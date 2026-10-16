@@ -3,7 +3,7 @@ import { describeNode, KIND_ARROW, KIND_LABEL } from '../model/inspect'
 import { useStore } from '../model/store'
 
 export function Inspector() {
-  const { data, selected, select, editRev, toggleConns, resetConns } = useStore()
+  const { data, selected, select, editRev, toggleConns, resetConns, addSignal, removeSignal, rebuilding } = useStore()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const info = useMemo(() => (data && selected != null ? describeNode(data, selected) : null), [data, selected, editRev])
 
@@ -29,6 +29,17 @@ export function Inspector() {
         {info.crossing && <span className="chip">travessia</span>}
         <span className="chip ok">{info.allowed} permitidas</span>
         {info.blocked > 0 && <span className="chip bad">{info.blocked} proibidas</span>}
+      </div>
+      <div className="row tight">
+        {info.signal ? (
+          <button className="btn sm danger" disabled={rebuilding} onClick={() => removeSignal(info.id)}>
+            Remover semáforo
+          </button>
+        ) : (
+          <button className="btn sm" disabled={rebuilding || info.degree < 3} onClick={() => addSignal(info.id)} title={info.degree < 3 ? 'Só em cruzamentos (3 ou mais ramos)' : ''}>
+            Adicionar semáforo
+          </button>
+        )}
       </div>
       <p className="hint">
         OSM node {info.osmId} · clique nas setas ou nas curvas do mapa para permitir/proibir.

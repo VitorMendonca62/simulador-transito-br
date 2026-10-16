@@ -143,5 +143,13 @@ npm run build          # produção (build:core + tsc + vite)
 - Custo: reconstrução total a cada edição (debounce 90 ms). Mapa pequeno: poucos ms; mapa de 17 MB: ~0,5 s + transferência. **Otimização futura:** reconstrução incremental só da vizinhança do trecho.
 - Limites: máscaras `turn:lanes` do OSM são descartadas se o nº de faixas do trecho muda; inverter sentido em via de mão dupla troca os sentidos e as faixas.
 
+### Feito: adicionar, remover e configurar semáforos (2026-10-16)
+- **Adicionar/remover**: no modo Conversões, com um cruzamento (3+ ramos) selecionado, o painel mostra "Adicionar semáforo" / "Remover semáforo". Serve para semáforos do OSM e para os adicionados. Muda a geometria (faixa de pedestre, marcadores), então vai ao núcleo: `Edits.sigs` (`SigEdit {node(osm), enabled, offset, phases?}`) em `core/src/net.rs`; `Node.signal` passa a refletir a edição; `conn::build_signals(net, edits)`.
+- **Configurar** (painel Semáforos, editor por semáforo): tempos verde/amarelo/vermelho-geral por fase, **defasagem** do ciclo (onda verde), **adicionar/remover fases** e **quem recebe verde em cada fase** (botões numerados coloridos por aproximação, com seta de direção e "vindo do …"). Com um semáforo selecionado, os marcadores no mapa ganham um anel na cor da fase.
+- Edições de fase/tempo são **locais** (sem reconstruir a rede): `editSignalLocal` no store atualiza `signals`, o desenho e o `sigRecord`; ao reconstruir, o núcleo reaplica as fases do `SigEdit` (aproximação identificada por chave estável `way:de:para:lado`, `approach_key`). Aproximação não listada em nenhuma fase ganha fase própria (todo ramo é sempre atendido). Fase vazia é permitida (aviso na UI).
+- Payload de reconstrução: `{"segments":[SegEdit], "signals":[SigEdit]}` (`apply_edits`; lista simples de SegEdit ainda aceita). Persistência: IDB `sig-config` e `signalConfigs` no JSON de cenário. O formato antigo de tempos por nó (`signal-edits`) foi descartado.
+- Restaurar: por semáforo (volta ao padrão do OSM, ou remove se foi adicionado) e "Restaurar todos".
+- Limites: ciclo é de tempo fixo (sem detecção/atuado); sem fase de pedestres separada; sem conflito/semáforo-amarelo piscante; só em nós de grau >= 3.
+
 ### Próximas peças da fase 2
-adicionar/remover semáforos; criar/apagar vias; fluxo de entrada (OD); reconstrução incremental.
+criar/apagar vias; fluxo de entrada (OD); reconstrução incremental.

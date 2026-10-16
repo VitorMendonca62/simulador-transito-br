@@ -169,7 +169,7 @@ fn key_of(n: &Network, name: &str, lanes_f: u8) -> SegKey {
 }
 
 fn edit_json(k: SegKey, extra: &str) -> String {
-    format!("[{{\"way\":{},\"from\":{},\"to\":{},{}}}]", k[0], k[1], k[2], extra)
+    format!("{{\"segments\":[{{\"way\":{},\"from\":{},\"to\":{},{}}}]}}", k[0], k[1], k[2], extra)
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn edit_lane_count_rebuilds_everything() {
     // restrições OSM continuam valendo
     assert!(n.net.conns.iter().any(|c| c.state == CONN_BLOCKED));
     // remover edições volta ao original
-    n.set_edits("[]").unwrap();
+    n.set_edits(r#"{"segments":[]}"#).unwrap();
     assert_eq!(n.net.lanes.len(), before.0);
     assert_eq!(n.net.conns.len(), before.1);
 }
@@ -222,4 +222,50 @@ fn edit_clamps_and_rejects_bad_json() {
     assert_eq!((s.lf, s.lb), (MAX_LANES, 1));
     assert!(s.w < 5.5);
     assert!(n.set_edits("not json").is_err());
+}
+
+fn node_idx(n: &Network, osm: i64) -> usize {
+    n.net.nodes.iter().position(|x| x.osm_id == osm).expect("nó")
+}
+
+#[test]
+fn signals_can_be_added_removed_and_configured() {
+    let mut n = sample();
+    assert_eq!(n.net.signals.len(), 3);
+    // junção sem semáforo: Avenida × Rua das Flores (nó OSM 1004 é o semáforo central; pegamos outra junção de grau >= 3)
+    let free = n.net.nodes.iter().position(|x| !x.signal && x.ends.len() >= 3).expect("junção livre");
+    let osm = n.net.nodes[free].osm_id;
+    n.set_edits(&format!(r#"{{"signals":[{{"node":{osm},"enabled":true}}]}}"#)).unwrap();
+    assert_eq!(n.net.signals.len(), 4, "semáforo adicionado");
+    let sig = n.net.signals.iter().find(|s| n.net.nodes[s.node as usize].osm_id == osm).unwrap();
+    assert!(!sig.phases.is_empty() && !sig.ends.is_empty());
+    assert!(n.net.nodes[free].signal, "o nó vira semaforizado (faixa de pedestre etc.)");
+
+    // remover um semáforo vindo do OSM
+    let existing = *n.raw.signals.iter().next().unwrap();
+    n.set_edits(&format!(r#"{{"signals":[{{"node":{existing},"enabled":false}}]}}"#)).unwrap();
+    assert_eq!(n.net.signals.len(), 2);
+}
+
+#[test]
+fn signal_phase_config_is_applied_and_covers_all_approaches() {
+    let mut n = sample();
+    let s0 = &n.net.signals[0];
+    let ni = s0.node as usize;
+    let osm = n.net.nodes[ni].osm_id;
+    let keys: Vec<String> = s0.ends.iter().map(|e| e.key.clone()).collect();
+    assert!(keys.len() >= 3);
+    // uma única fase com só a primeira aproximação: as outras ganham uma fase própria automaticamente
+    let json = format!(
+        r#"{{"signals":[{{"node":{osm},"enabled":true,"offset":7,"phases":[{{"green":42,"yellow":4,"allRed":1,"approaches":["{}"]}}]}}]}}"#,
+        keys[0]
+    );
+    n.set_edits(&json).unwrap();
+    let sig = n.net.signals.iter().find(|s| n.net.nodes[s.node as usize].osm_id == osm).unwrap();
+    assert_eq!(sig.phases.len(), 2);
+    assert_eq!((sig.phases[0].green, sig.phases[0].yellow, sig.phases[0].all_red), (42.0, 4.0, 1.0));
+    assert_eq!(sig.phases[0].ends.len(), 1);
+    assert_eq!(sig.offset, 7.0);
+    let total: usize = sig.phases.iter().map(|p| p.ends.len()).sum();
+    assert_eq!(total, sig.ends.len(), "toda aproximação é atendida");
 }

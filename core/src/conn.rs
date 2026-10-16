@@ -210,8 +210,8 @@ fn apply_restrictions(net: &mut Net, raw: &RawOsm) {
     }
 }
 
-/// Fases padrão: uma por eixo de aproximação.
-pub fn build_signals(net: &mut Net) {
+/// Semáforos: fases padrão (uma por eixo de aproximação), substituídas pela configuração do usuário quando houver.
+pub fn build_signals(net: &mut Net, edits: &Edits) {
     let mut signals = Vec::new();
     for (ni, node) in net.nodes.iter().enumerate() {
         if !node.signal {
@@ -240,7 +240,32 @@ pub fn build_signals(net: &mut Net) {
                 None => groups.push((*ang, vec![*e])),
             }
         }
-        let phases = groups.into_iter().map(|g| Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: g.1 }).collect();
+        let edit = edits.sigs.get(&node.osm_id);
+        let mut phases: Vec<Phase> = match edit.and_then(|e| e.phases.as_ref()) {
+            Some(list) => {
+                let keys: Vec<(u32, String)> = approaches.iter().map(|(e, _)| (*e, approach_key(net, ni as u32, *e))).collect();
+                let mut ps: Vec<Phase> = list
+                    .iter()
+                    .map(|p| Phase {
+                        green: p.green.clamp(0.0, 600.0),
+                        yellow: p.yellow.clamp(0.0, 60.0),
+                        all_red: p.all_red.clamp(0.0, 60.0),
+                        ends: p.approaches.iter().filter_map(|k| keys.iter().find(|x| &x.1 == k).map(|x| x.0)).collect(),
+                    })
+                    .collect();
+                // toda aproximação precisa ser atendida: as não listadas ganham uma fase própria
+                let listed: std::collections::HashSet<u32> = ps.iter().flat_map(|p| p.ends.iter().copied()).collect();
+                let rest: Vec<u32> = approaches.iter().map(|a| a.0).filter(|e| !listed.contains(e)).collect();
+                if !rest.is_empty() {
+                    ps.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: rest });
+                }
+                ps
+            }
+            None => groups.into_iter().map(|g| Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: g.1 }).collect(),
+        };
+        if phases.is_empty() {
+            phases.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).collect() });
+        }
         let mut ends = Vec::new();
         for (e, _) in &approaches {
             let s = &net.segs[(*e >> 1) as usize];
@@ -253,9 +278,9 @@ pub fn build_signals(net: &mut Net) {
             let (p, t) = s.poly.at(sv);
             let q = add(p, mul(right(t), lat));
             let d = mul(t, sign);
-            ends.push(SignalEnd { end: *e, pos: [q[0] as f32, q[1] as f32], angle: d[1].atan2(d[0]) as f32 });
+            ends.push(SignalEnd { end: *e, key: approach_key(net, ni as u32, *e), pos: [q[0] as f32, q[1] as f32], angle: d[1].atan2(d[0]) as f32 });
         }
-        signals.push(Signal { node: ni as u32, phases, ends });
+        signals.push(Signal { node: ni as u32, offset: edit.map_or(0.0, |e| e.offset) as f32, phases, ends });
     }
     net.signals = signals;
 }

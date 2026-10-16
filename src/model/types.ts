@@ -15,6 +15,8 @@ export interface SignalPhase {
 
 export interface SignalEnd {
   end: number
+  /** chave estável da aproximação (way:de:para:lado) */
+  key: string
   x: number
   y: number
   a: number
@@ -22,6 +24,10 @@ export interface SignalEnd {
 
 export interface SignalDef {
   node: number
+  /** id OSM do nó (estável entre reconstruções) */
+  osm: number
+  /** defasagem do ciclo (s) */
+  offset: number
   phases: SignalPhase[]
   ends: SignalEnd[]
 }

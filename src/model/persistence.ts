@@ -1,13 +1,16 @@
 import { del, get, set } from 'idb-keyval'
 import type { NetworkData, SignalDef } from './types'
 
-export interface PhaseEdit {
-  green: number
-  yellow: number
-  allRed: number
+/** Configuração de um semáforo (enviada ao núcleo e salva): liga/desliga e fases. */
+export interface SigConfig {
+  /** id OSM do nó */
+  node: number
+  enabled: boolean
+  offset: number
+  /** null = fases padrão geradas pelo núcleo */
+  phases: { green: number; yellow: number; allRed: number; approaches: string[] }[] | null
 }
-/** Edições de semáforo indexadas pelo id OSM do nó (estável entre importações). */
-export type SignalEdits = Record<string, PhaseEdit[]>
+export type SigConfigs = Record<string, SigConfig>
 
 /** Conversões alteradas: chave estável -> estado (1 ligada, 0 proibida, 2 ausente). */
 export type ConnEdits = Record<string, number>
@@ -33,7 +36,8 @@ export interface ScenarioFile {
   version: 1
   app: 'simulador-transito'
   map: { name: string }
-  signals: SignalEdits
+  /** semáforos adicionados, removidos ou reconfigurados */
+  signalConfigs?: SigConfig[]
   /** formato 2: chaves estáveis `nóOsm|way:de:para.dir.idx>...` */
   connections?: ConnEdits
   connFormat?: 2
@@ -41,7 +45,7 @@ export interface ScenarioFile {
 }
 
 const K_MAP = 'last-map'
-const K_EDITS = 'signal-edits'
+const K_SIGS = 'sig-config'
 const K_CONNS = 'conn-edits-v2'
 const K_SEGS = 'seg-edits'
 
@@ -55,15 +59,15 @@ const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => {
 
 export const saveMap = (name: string, buffer: ArrayBuffer) => safe(() => set(K_MAP, { name, buffer }), undefined)
 export const loadMap = () => safe(() => get<{ name: string; buffer: ArrayBuffer }>(K_MAP), undefined)
-export const saveEdits = (e: SignalEdits) => safe(() => set(K_EDITS, e), undefined)
-export const loadEdits = () => safe(async () => (await get<SignalEdits>(K_EDITS)) ?? {}, {} as SignalEdits)
+export const saveSigConfigs = (e: SigConfigs) => safe(() => set(K_SIGS, e), undefined)
+export const loadSigConfigs = () => safe(async () => (await get<SigConfigs>(K_SIGS)) ?? {}, {} as SigConfigs)
 export const saveConnEdits = (e: ConnEdits) => safe(() => set(K_CONNS, e), undefined)
 export const loadConnEdits = () => safe(async () => (await get<ConnEdits>(K_CONNS)) ?? {}, {} as ConnEdits)
 export const saveSegEdits = (e: SegEdits) => safe(() => set(K_SEGS, e), undefined)
 export const loadSegEdits = () => safe(async () => (await get<SegEdits>(K_SEGS)) ?? {}, {} as SegEdits)
 export const clearAll = () =>
   safe(async () => {
-    for (const k of [K_MAP, K_EDITS, K_CONNS, K_SEGS, 'conn-edits']) await del(k)
+    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, 'conn-edits', 'signal-edits']) await del(k)
   }, undefined)
 
 /** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
@@ -102,29 +106,28 @@ export function applyConnEdits(d: NetworkData, edits: ConnEdits): number {
   return applied
 }
 
-export function collectEdits(data: NetworkData, signals: SignalDef[]): SignalEdits {
-  const out: SignalEdits = {}
-  for (const s of signals) {
-    out[String(data.nodeOsm[s.node])] = s.phases.map((p) => ({ green: p.green, yellow: p.yellow, allRed: p.allRed }))
+/** Configuração completa de um semáforo a partir do estado atual (para salvar/reaplicar). */
+export function configFromDef(def: SignalDef): SigConfig {
+  const keyOf = new Map(def.ends.map((e) => [e.end, e.key]))
+  return {
+    node: def.osm,
+    enabled: true,
+    offset: def.offset,
+    phases: def.phases.map((p) => ({
+      green: p.green,
+      yellow: p.yellow,
+      allRed: p.allRed,
+      approaches: p.ends.map((e) => keyOf.get(e)).filter((k): k is string => k != null),
+    })),
   }
-  return out
 }
 
-/** Aplica tempos salvos aos semáforos padrão (só quando o nº de fases coincide). */
-export function applyEdits(data: NetworkData, edits: SignalEdits): SignalDef[] {
-  return data.meta.signals.map((s) => {
-    const e = edits[String(data.nodeOsm[s.node])]
-    if (!e || e.length !== s.phases.length) return s
-    return { ...s, phases: s.phases.map((p, i) => ({ ...p, green: e[i].green, yellow: e[i].yellow, allRed: e[i].allRed })) }
-  })
-}
-
-export function exportScenario(name: string, data: NetworkData, signals: SignalDef[], connections: ConnEdits, segments: SegEdits) {
+export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits) {
   const file: ScenarioFile = {
     version: 1,
     app: 'simulador-transito',
     map: { name },
-    signals: collectEdits(data, signals),
+    signalConfigs: Object.values(sigs),
     connections,
     connFormat: 2,
     segments: Object.values(segments),

@@ -16,31 +16,47 @@ use wasm_bindgen::prelude::*;
 pub struct Network {
     /// OSM bruto, guardado para reconstruir a rede quando há edições de trecho.
     raw: osm::RawOsm,
-    edits: std::collections::HashMap<SegKey, SegEdit>,
+    edits: Edits,
     net: Net,
     meshes: render::Meshes,
 }
 
-fn build_parts(raw: &osm::RawOsm, edits: &std::collections::HashMap<SegKey, SegEdit>) -> Result<(Net, render::Meshes), String> {
+fn build_parts(raw: &osm::RawOsm, edits: &Edits) -> Result<(Net, render::Meshes), String> {
     let mut net = Net::build(raw, edits)?;
     conn::build_connections(&mut net, raw);
-    conn::build_signals(&mut net);
+    conn::build_signals(&mut net, edits);
     let meshes = render::build_meshes(&net);
     Ok((net, meshes))
 }
 
 pub fn build_network(data: &[u8]) -> Result<Network, String> {
     let raw = osm::parse(data)?;
-    let edits = std::collections::HashMap::new();
+    let edits = Edits::default();
     let (net, meshes) = build_parts(&raw, &edits)?;
     Ok(Network { raw, edits, net, meshes })
 }
 
 impl Network {
-    /// Substitui o conjunto de edições de trecho e reconstrói a rede (JSON: lista de `SegEdit`).
+    /// Substitui as edições e reconstrói a rede. JSON: `{"segments":[SegEdit], "signals":[SigEdit]}`
+    /// (também aceita uma lista simples de `SegEdit`).
     pub fn set_edits(&mut self, json: &str) -> Result<(), String> {
-        let list: Vec<SegEdit> = serde_json::from_str(json).map_err(|e| format!("edições inválidas: {e}"))?;
-        let edits: std::collections::HashMap<SegKey, SegEdit> = list.into_iter().map(|e| (e.key(), e)).collect();
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct Payload {
+            segments: Vec<SegEdit>,
+            signals: Vec<SigEdit>,
+        }
+        let payload: Payload = match serde_json::from_str::<Payload>(json) {
+            Ok(p) => p,
+            Err(_) => Payload {
+                segments: serde_json::from_str(json).map_err(|e| format!("edições inválidas: {e}"))?,
+                signals: Vec::new(),
+            },
+        };
+        let edits = Edits {
+            segs: payload.segments.into_iter().map(|e| (e.key(), e)).collect(),
+            sigs: payload.signals.into_iter().map(|e| (e.node, e)).collect(),
+        };
         let (net, meshes) = build_parts(&self.raw, &edits)?;
         self.edits = edits;
         self.net = net;
@@ -64,8 +80,10 @@ impl Network {
             .map(|s| {
                 json!({
                     "node": s.node,
+                    "osm": n.nodes[s.node as usize].osm_id as f64,
+                    "offset": s.offset,
                     "phases": s.phases.iter().map(|p| json!({"green": p.green, "yellow": p.yellow, "allRed": p.all_red, "ends": p.ends})).collect::<Vec<_>>(),
-                    "ends": s.ends.iter().map(|e| json!({"end": e.end, "x": e.pos[0], "y": e.pos[1], "a": e.angle})).collect::<Vec<_>>(),
+                    "ends": s.ends.iter().map(|e| json!({"end": e.end, "key": e.key, "x": e.pos[0], "y": e.pos[1], "a": e.angle})).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -118,7 +136,7 @@ impl Network {
         self.set_edits(json).map_err(|e| JsError::new(&e))
     }
     pub fn edit_count(&self) -> usize {
-        self.edits.len()
+        self.edits.segs.len() + self.edits.sigs.len()
     }
     /// [way, nó_inicial, nó_final] (ids OSM, orientação original) por trecho.
     pub fn seg_keys(&self) -> Vec<f64> {

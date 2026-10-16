@@ -46,6 +46,34 @@ impl SegEdit {
     }
 }
 
+/// Fase editada: durações (s) e aproximações (chaves de `approach_key`) que recebem verde.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PhaseEdit {
+    pub green: f32,
+    pub yellow: f32,
+    pub all_red: f32,
+    pub approaches: Vec<String>,
+}
+
+/// Configuração de semáforo de um nó (id OSM): liga/desliga e, opcionalmente, as fases.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SigEdit {
+    pub node: i64,
+    pub enabled: bool,
+    /// defasagem do ciclo (s), p.ex. para onda verde
+    pub offset: f64,
+    pub phases: Option<Vec<PhaseEdit>>,
+}
+
+/// Todas as edições do usuário aplicadas na reconstrução da rede.
+#[derive(Default, Clone)]
+pub struct Edits {
+    pub segs: HashMap<SegKey, SegEdit>,
+    pub sigs: HashMap<i64, SigEdit>,
+}
+
 /// Bits de manobra (máscara) e códigos de tipo de conexão.
 pub const K_LEFT: u8 = 0;
 pub const K_STRAIGHT: u8 = 1;
@@ -178,12 +206,14 @@ pub struct Phase {
 
 pub struct SignalEnd {
     pub end: u32,
+    pub key: String,
     pub pos: [f32; 2],
     pub angle: f32,
 }
 
 pub struct Signal {
     pub node: u32,
+    pub offset: f32,
     pub phases: Vec<Phase>,
     pub ends: Vec<SignalEnd>,
 }
@@ -346,7 +376,7 @@ fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
 const M_PER_DEG: f64 = 111_319.490_793_273_57;
 
 impl Net {
-    pub fn build(raw: &RawOsm, edits: &HashMap<SegKey, SegEdit>) -> Result<Net, String> {
+    pub fn build(raw: &RawOsm, edits: &Edits) -> Result<Net, String> {
         // 1. vias aceitas, com coordenadas resolvidas
         struct W<'a> {
             raw: &'a crate::osm::RawWay,
@@ -445,7 +475,7 @@ impl Net {
                     continue;
                 }
                 let key: SegKey = [w.raw.id, pts[start].0, pts[k].0];
-                let edit = edits.get(&key);
+                let edit = edits.segs.get(&key);
                 let reverse = edit.map_or(false, |e| e.reverse);
                 let (mut from_i, mut to_i) = (start, k);
                 let mut pp: Vec<V2> = pts[start..=k].iter().map(|p| p.1).collect();
@@ -540,7 +570,7 @@ impl Net {
             net.nodes.push(Node {
                 pos: node_pos[i].unwrap_or([0.0, 0.0]),
                 osm_id: *id,
-                signal: raw.signals.contains(id),
+                signal: edits.sigs.get(id).map_or(raw.signals.contains(id), |e| e.enabled),
                 crossing: raw.crossings.contains(id),
                 ends: Vec::new(),
             });
@@ -709,4 +739,16 @@ impl Net {
         self.lanes.iter().all(|l| (l.seg as usize) < self.segs.len())
             && self.segs.iter().all(|s| (s.from as usize) < self.nodes.len() && (s.to as usize) < self.nodes.len())
     }
+}
+
+/// Chave estável de uma aproximação (ponta de trecho) de um nó: way:de:para:lado, na orientação original.
+pub fn approach_key(net: &Net, node: u32, e: u32) -> String {
+    let s = &net.segs[(e >> 1) as usize];
+    let osm = net.nodes[node as usize].osm_id;
+    let side = if s.key[1] != s.key[2] {
+        (osm != s.key[1]) as u32
+    } else {
+        e & 1
+    };
+    format!("{}:{}:{}:{}", s.key[0], s.key[1], s.key[2], side)
 }

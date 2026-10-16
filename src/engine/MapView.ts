@@ -323,6 +323,7 @@ export class MapView {
 
   select(node: number | null, focus = false) {
     this.selected = node
+    this.lastSignalDraw = 0
     this.hoverConn = null
     this.activeSrc = null
     this.connDrag = null
@@ -640,7 +641,7 @@ export class MapView {
     if (this.playing) this.clock += dt * this.speed
     if (this.signals.g.visible && (this.lastSignalDraw === 0 || (this.playing && now - this.lastSignalDraw > 120))) {
       this.lastSignalDraw = now
-      this.signals.draw(this.clock, this.cam.z)
+      this.signals.draw(this.clock, this.cam.z, this.selected)
       this.dirty = true
     }
     if (this.dirty) {

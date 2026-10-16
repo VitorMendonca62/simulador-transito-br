@@ -4,22 +4,22 @@ import { viewRef } from '../engine/instance'
 import { editNetwork, importMap } from './importer'
 import {
   applyConnEdits,
-  applyEdits,
   clearAll,
-  collectEdits,
+  configFromDef,
   connKey,
   exportScenario,
   loadConnEdits,
-  loadEdits,
+  loadSigConfigs,
   loadMap,
   loadSegEdits,
   saveConnEdits,
-  saveEdits,
+  saveSigConfigs,
   saveMap,
   saveSegEdits,
   segEditKey,
   type ConnEdits,
   type ScenarioFile,
+  type SigConfigs,
   type SegEdit,
   type SegEdits,
 } from './persistence'
@@ -51,6 +51,7 @@ interface State {
   editRev: number
   connEdits: number
   segEdits: number
+  sigEdits: number
 
   setLayer: (k: LayerKey, on: boolean) => void
   setMode: (m: EditMode) => void
@@ -69,6 +70,16 @@ interface State {
   editSegment: (patch: SegPatch) => void
   resetSegment: () => void
   setPhase: (signalIdx: number, phase: number, key: 'green' | 'yellow' | 'allRed', value: number) => void
+  setOffset: (signalIdx: number, value: number) => void
+  /** Move uma aproximação (id de ponta) para outra fase do semáforo. */
+  moveApproach: (signalIdx: number, end: number, toPhase: number) => void
+  addPhase: (signalIdx: number) => void
+  removePhase: (signalIdx: number, phase: number) => void
+  /** Liga um semáforo num cruzamento (índice do nó). */
+  addSignal: (node: number) => void
+  removeSignal: (node: number) => void
+  /** Volta o semáforo ao padrão do OSM (ou o remove, se foi adicionado pelo usuário). */
+  resetSignal: (node: number) => void
   resetSignals: () => void
   setPlaying: (p: boolean) => void
   setSpeed: (s: number) => void
@@ -90,6 +101,9 @@ let connOrig = new Uint8Array(0)
 let connRecord: ConnEdits = {}
 /** Configurações de trecho editadas (enviadas ao núcleo). */
 let segRecord: SegEdits = {}
+/** Semáforos adicionados/removidos/reconfigurados. */
+let sigRecord: SigConfigs = {}
+const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord) })
 export const getSegRecord = () => segRecord
 
 const snapshotConns = (d: NetworkData) => {
@@ -113,16 +127,18 @@ const afterConnEdit = () => {
 
 export const useStore = create<State>((set, get) => {
   /** Instala dados novos (importação ou reconstrução). */
-  const install = (data: NetworkData, opts: { fit: boolean; signals: SignalDef[] }) => {
+  const install = (data: NetworkData, opts: { fit: boolean }) => {
     snapshotConns(data)
     applyConnEdits(data, connRecord)
     const view = viewRef.current
     if (opts.fit) view?.setNetwork(data)
     else view?.updateNetwork(data)
-    view?.setSignals(opts.signals)
+    const signals = data.meta.signals
+    view?.setSignals(signals)
     set((s) => ({
       data,
-      signals: opts.signals,
+      signals,
+      sigEdits: Object.keys(sigRecord).length,
       editRev: s.editRev + 1,
       connEdits: Object.keys(connRecord).length,
       segEdits: Object.keys(segRecord).length,
@@ -136,15 +152,16 @@ export const useStore = create<State>((set, get) => {
         await clearAll()
         connRecord = {}
         segRecord = {}
+        sigRecord = {}
       } else {
         connRecord = await loadConnEdits()
         segRecord = await loadSegEdits()
+        sigRecord = await loadSigConfigs()
       }
-      const { data, ms } = await importMap(buffer, name, JSON.stringify(Object.values(segRecord)))
-      const signals = applyEdits(data, persist ? {} : await loadEdits())
+      const { data, ms } = await importMap(buffer, name, editPayload())
       if (persist) await saveMap(name, buffer)
       set({ fileName: name, importMs: ms, loading: false, selected: null, selectedSeg: null })
-      install(data, { fit: true, signals })
+      install(data, { fit: true })
     } catch (e) {
       set({ loading: false, error: e instanceof Error ? e.message : String(e) })
     }
@@ -160,11 +177,10 @@ export const useStore = create<State>((set, get) => {
     set({ rebuilding: true })
     try {
       const old = get()
-      const sigEdits = old.data ? collectEdits(old.data, old.signals) : {}
-      const { data } = await editNetwork(JSON.stringify(Object.values(segRecord)))
+      const { data } = await editNetwork(editPayload())
       const sameShape = old.data && old.data.segKeys.length === data.segKeys.length
       if (!sameShape) set({ selectedSeg: null })
-      install(data, { fit: false, signals: applyEdits(data, sigEdits) })
+      install(data, { fit: false })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     } finally {
@@ -178,9 +194,23 @@ export const useStore = create<State>((set, get) => {
   const scheduleRebuild = () => {
     clearTimeout(rebuildTimer)
     rebuildTimer = window.setTimeout(() => void rebuild(), 90)
-    const snapshot = { ...segRecord }
-    saveSegEdits(snapshot)
-    set((s) => ({ segEdits: Object.keys(segRecord).length, editRev: s.editRev }))
+    saveSegEdits({ ...segRecord })
+    saveSigConfigs({ ...sigRecord })
+    set((s) => ({ segEdits: Object.keys(segRecord).length, sigEdits: Object.keys(sigRecord).length, editRev: s.editRev }))
+  }
+
+  /** Edita um semáforo sem reconstruir a rede (só dados de fase): atualiza o desenho e o registro salvo. */
+  const editSignalLocal = (si: number, fn: (d: SignalDef) => SignalDef) => {
+    const { signals } = get()
+    const def = signals[si]
+    if (!def) return
+    const next = fn(def)
+    const list = signals.map((x, i) => (i === si ? next : x))
+    sigRecord[String(next.osm)] = configFromDef(next)
+    viewRef.current?.setSignals(list)
+    set({ signals: list, sigEdits: Object.keys(sigRecord).length })
+    clearTimeout(saveTimer)
+    saveTimer = window.setTimeout(() => saveSigConfigs({ ...sigRecord }), 300)
   }
 
   return {
@@ -203,6 +233,7 @@ export const useStore = create<State>((set, get) => {
     editRev: 0,
     connEdits: 0,
     segEdits: 0,
+    sigEdits: 0,
 
     setLayer: (k, on) => {
       viewRef.current?.setLayer(k, on)
@@ -232,12 +263,13 @@ export const useStore = create<State>((set, get) => {
           if (sc.app !== 'simulador-transito') throw new Error('arquivo não é um cenário do simulador')
           segRecord = Object.fromEntries((sc.segments ?? []).map((e) => [segEditKey(e), e]))
           connRecord = sc.connFormat === 2 ? { ...(sc.connections ?? {}) } : {}
+          sigRecord = Object.fromEntries((sc.signalConfigs ?? []).map((c) => [String(c.node), c]))
           saveSegEdits({ ...segRecord })
           saveConnEdits({ ...connRecord })
-          saveEdits(sc.signals ?? {})
-          // reconstrói a partir do cenário (inclui sinais e conversões)
-          const { data: nd } = await editNetwork(JSON.stringify(Object.values(segRecord)))
-          install(nd, { fit: false, signals: applyEdits(nd, sc.signals ?? {}) })
+          saveSigConfigs({ ...sigRecord })
+          // reconstrói a partir do cenário (faixas, semáforos e conversões)
+          const { data: nd } = await editNetwork(editPayload())
+          install(nd, { fit: false })
           get().notify('Cenário aplicado.')
         } catch (e) {
           set({ error: `Cenário inválido: ${e instanceof Error ? e.message : e}` })
@@ -323,23 +355,52 @@ export const useStore = create<State>((set, get) => {
     },
 
     setPhase: (si, pi, key, value) => {
-      const { signals, data } = get()
-      const next = signals.map((s, i) =>
-        i !== si ? s : { ...s, phases: s.phases.map((p, j) => (j !== pi ? p : { ...p, [key]: Math.max(0, value) })) },
-      )
-      viewRef.current?.setSignals(next)
-      set({ signals: next })
-      clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(() => data && saveEdits(collectEdits(data, next)), 400)
+      editSignalLocal(si, (def) => ({
+        ...def,
+        phases: def.phases.map((p, j) => (j !== pi ? p : { ...p, [key]: Math.min(600, Math.max(0, Number.isFinite(value) ? value : 0)) })),
+      }))
     },
+    setOffset: (si, value) => editSignalLocal(si, (def) => ({ ...def, offset: Math.min(600, Math.max(0, Number.isFinite(value) ? value : 0)) })),
+    moveApproach: (si, end, toPhase) =>
+      editSignalLocal(si, (def) => ({
+        ...def,
+        phases: def.phases.map((p, j) => ({ ...p, ends: j === toPhase ? [...p.ends.filter((e) => e !== end), end] : p.ends.filter((e) => e !== end) })),
+      })),
+    addPhase: (si) => editSignalLocal(si, (def) => ({ ...def, phases: [...def.phases, { green: 20, yellow: 3, allRed: 2, ends: [] }] })),
+    removePhase: (si, pi) =>
+      editSignalLocal(si, (def) => {
+        if (def.phases.length < 2) return def
+        const gone = def.phases[pi]
+        const target = pi > 0 ? pi - 1 : 1
+        const phases = def.phases
+          .map((p, j) => (j === target ? { ...p, ends: [...p.ends, ...gone.ends] } : p))
+          .filter((_, j) => j !== pi)
+        return { ...def, phases }
+      }),
 
-    resetSignals: () => {
+    addSignal: (node) => {
       const { data } = get()
       if (!data) return
-      const signals = data.meta.signals
-      viewRef.current?.setSignals(signals)
-      set({ signals })
-      saveEdits({})
+      const osm = data.nodeOsm[node]
+      sigRecord[String(osm)] = { node: osm, enabled: true, offset: 0, phases: null }
+      scheduleRebuild()
+    },
+    removeSignal: (node) => {
+      const { data } = get()
+      if (!data) return
+      const osm = data.nodeOsm[node]
+      sigRecord[String(osm)] = { node: osm, enabled: false, offset: 0, phases: null }
+      scheduleRebuild()
+    },
+    resetSignal: (node) => {
+      const { data } = get()
+      if (!data) return
+      delete sigRecord[String(data.nodeOsm[node])]
+      scheduleRebuild()
+    },
+    resetSignals: () => {
+      sigRecord = {}
+      scheduleRebuild()
     },
 
     setPlaying: (p) => {
@@ -351,8 +412,8 @@ export const useStore = create<State>((set, get) => {
       set({ speed: s })
     },
     exportScenario: () => {
-      const { data, fileName, signals } = get()
-      if (data) exportScenario(fileName, data, signals, { ...connRecord }, { ...segRecord })
+      const { data, fileName } = get()
+      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...segRecord })
     },
     notify: (msg) => {
       set({ toast: msg })
