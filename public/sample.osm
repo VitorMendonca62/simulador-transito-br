@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="gen-sample">
+ <node id="1000" lat="-23.5614000" lon="-46.6598201"/>
+ <node id="1001" lat="-23.5614000" lon="-46.6588401"/>
+ <node id="1002" lat="-23.5614000" lon="-46.6578600"/>
+ <node id="1003" lat="-23.5614000" lon="-46.6568800">
+   <tag k="highway" v="crossing"/>
+   <tag k="crossing" v="zebra"/>
+ </node>
+ <node id="1004" lat="-23.5614000" lon="-46.6559000">
+   <tag k="highway" v="traffic_signals"/>
+ </node>
+ <node id="1005" lat="-23.5614000" lon="-46.6549200">
+   <tag k="highway" v="crossing"/>
+   <tag k="crossing" v="zebra"/>
+ </node>
+ <node id="1006" lat="-23.5614000" lon="-46.6539400">
+   <tag k="highway" v="traffic_signals"/>
+ </node>
+ <node id="1007" lat="-23.5614000" lon="-46.6529599"/>
+ <node id="1008" lat="-23.5614000" lon="-46.6519799"/>
+ <node id="1009" lat="-23.5600525" lon="-46.6578600"/>
+ <node id="1010" lat="-23.5587051" lon="-46.6578600"/>
+ <node id="1011" lat="-23.5640949" lon="-46.6578600"/>
+ <node id="1012" lat="-23.5622983" lon="-46.6578600"/>
+ <node id="1013" lat="-23.5622983" lon="-46.6598201"/>
+ <node id="1014" lat="-23.5622983" lon="-46.6588401"/>
+ <node id="1015" lat="-23.5640949" lon="-46.6559000"/>
+ <node id="1016" lat="-23.5600525" lon="-46.6559000">
+   <tag k="highway" v="traffic_signals"/>
+ </node>
+ <node id="1017" lat="-23.5587051" lon="-46.6559000"/>
+ <node id="1018" lat="-23.5640949" lon="-46.6539400"/>
+ <node id="1019" lat="-23.5629092" lon="-46.6539400"/>
+ <node id="1020" lat="-23.5625858" lon="-46.6539400"/>
+ <node id="1021" lat="-23.5600525" lon="-46.6539400"/>
+ <node id="1022" lat="-23.5587051" lon="-46.6539400"/>
+ <node id="1023" lat="-23.5627475" lon="-46.6549200"/>
+ <node id="1024" lat="-23.5627475" lon="-46.6541164"/>
+ <node id="1025" lat="-23.5627475" lon="-46.6537636"/>
+ <node id="1026" lat="-23.5627475" lon="-46.6527639"/>
+ <node id="1027" lat="-23.5626666" lon="-46.6537872"/>
+ <node id="1028" lat="-23.5626074" lon="-46.6538518"/>
+ <node id="1029" lat="-23.5626074" lon="-46.6540282"/>
+ <node id="1030" lat="-23.5626666" lon="-46.6540927"/>
+ <node id="1031" lat="-23.5628283" lon="-46.6540927"/>
+ <node id="1032" lat="-23.5628875" lon="-46.6540282"/>
+ <node id="1033" lat="-23.5628875" lon="-46.6538518"/>
+ <node id="1034" lat="-23.5628283" lon="-46.6537872"/>
+ <node id="1035" lat="-23.5600525" lon="-46.6598201"/>
+ <node id="1036" lat="-23.5600525" lon="-46.6519799"/>
+ <node id="1037" lat="-23.5598698" lon="-46.6598008"/>
+ <node id="1038" lat="-23.5596917" lon="-46.6597433"/>
+ <node id="1039" lat="-23.5595224" lon="-46.6596492"/>
+ <node id="1040" lat="-23.5593661" lon="-46.6595206"/>
+ <node id="1041" lat="-23.5592268" lon="-46.6593608"/>
+ <node id="1042" lat="-23.5591077" lon="-46.6591737"/>
+ <node id="1043" lat="-23.5590120" lon="-46.6589639"/>
+ <node id="1044" lat="-23.5589419" lon="-46.6587366"/>
+ <node id="1045" lat="-23.5588991" lon="-46.6584973"/>
+ <node id="1046" lat="-23.5588847" lon="-46.6582520"/>
+ <way id="5000">
+  <nd ref="1000"/>
+  <nd ref="1001"/>
+  <nd ref="1002"/>
+  <tag k="highway" v="primary"/>
+  <tag k="name" v="Avenida Brasil"/>
+  <tag k="lanes" v="4"/>
+ </way>
+ <way id="5001">
+  <nd ref="1002"/>
+  <nd ref="1003"/>
+  <nd ref="1004"/>
+  <nd ref="1005"/>
+  <nd ref="1006"/>
+  <nd ref="1007"/>
+  <nd ref="1008"/>
+  <tag k="highway" v="primary"/>
+  <tag k="name" v="Avenida Brasil"/>
+  <tag k="lanes" v="4"/>
+ </way>
+ <way id="5002">
+  <nd ref="1002"/>
+  <nd ref="1009"/>
+  <nd ref="1010"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua das Flores"/>
+ </way>
+ <way id="5003">
+  <nd ref="1011"/>
+  <nd ref="1012"/>
+  <nd ref="1002"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua das Flores"/>
+ </way>
+ <way id="5004">
+  <nd ref="1013"/>
+  <nd ref="1014"/>
+  <nd ref="1012"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua do Parque"/>
+ </way>
+ <way id="5005">
+  <nd ref="1015"/>
+  <nd ref="1004"/>
+  <tag k="highway" v="secondary"/>
+  <tag k="name" v="Rua Central"/>
+  <tag k="lanes:forward" v="3"/>
+  <tag k="lanes:backward" v="2"/>
+  <tag k="lanes" v="5"/>
+  <tag k="turn:lanes:forward" v="left|through|through;right"/>
+  <tag k="busway:right" v="lane"/>
+ </way>
+ <way id="5006">
+  <nd ref="1004"/>
+  <nd ref="1016"/>
+  <nd ref="1017"/>
+  <tag k="highway" v="secondary"/>
+  <tag k="name" v="Rua Central"/>
+  <tag k="lanes" v="4"/>
+  <tag k="busway:right" v="lane"/>
+ </way>
+ <way id="5007">
+  <nd ref="1018"/>
+  <nd ref="1019"/>
+  <tag k="highway" v="tertiary"/>
+  <tag k="name" v="Rua do Comércio"/>
+ </way>
+ <way id="5008">
+  <nd ref="1020"/>
+  <nd ref="1006"/>
+  <nd ref="1021"/>
+  <nd ref="1022"/>
+  <tag k="highway" v="tertiary"/>
+  <tag k="name" v="Rua do Comércio"/>
+ </way>
+ <way id="5009">
+  <nd ref="1023"/>
+  <nd ref="1024"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua das Palmeiras"/>
+ </way>
+ <way id="5010">
+  <nd ref="1025"/>
+  <nd ref="1026"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua das Palmeiras"/>
+ </way>
+ <way id="5011">
+  <nd ref="1025"/>
+  <nd ref="1027"/>
+  <nd ref="1028"/>
+  <nd ref="1020"/>
+  <nd ref="1029"/>
+  <nd ref="1030"/>
+  <nd ref="1024"/>
+  <nd ref="1031"/>
+  <nd ref="1032"/>
+  <nd ref="1019"/>
+  <nd ref="1033"/>
+  <nd ref="1034"/>
+  <nd ref="1025"/>
+  <tag k="highway" v="tertiary"/>
+  <tag k="junction" v="roundabout"/>
+  <tag k="name" v="Praça da Rotatória"/>
+  <tag k="oneway" v="yes"/>
+ </way>
+ <way id="5012">
+  <nd ref="1035"/>
+  <nd ref="1009"/>
+  <nd ref="1016"/>
+  <nd ref="1021"/>
+  <nd ref="1036"/>
+  <tag k="highway" v="secondary"/>
+  <tag k="name" v="Rua Sentido Único"/>
+  <tag k="oneway" v="yes"/>
+  <tag k="lanes" v="2"/>
+ </way>
+ <way id="5013">
+  <nd ref="1035"/>
+  <nd ref="1037"/>
+  <nd ref="1038"/>
+  <nd ref="1039"/>
+  <nd ref="1040"/>
+  <nd ref="1041"/>
+  <nd ref="1042"/>
+  <nd ref="1043"/>
+  <nd ref="1044"/>
+  <nd ref="1045"/>
+  <nd ref="1046"/>
+  <tag k="highway" v="residential"/>
+  <tag k="name" v="Rua Curva"/>
+ </way>
+ <relation id="9000">
+  <member type="way" ref="5000" role="from"/>
+  <member type="node" ref="1002" role="via"/>
+  <member type="way" ref="5002" role="to"/>
+  <tag k="type" v="restriction"/>
+  <tag k="restriction" v="no_left_turn"/>
+ </relation>
+</osm>

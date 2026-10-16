@@ -1,0 +1,5 @@
+node_modules
+dist
+core/target
+core/pkg
+*.log
