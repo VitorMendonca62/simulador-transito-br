@@ -5,6 +5,35 @@ export interface MeshData {
   idx: Uint32Array
 }
 
+/** Conteúdo desenhável de um ladrilho (malhas locais + pontos de nós). */
+export interface TileData {
+  id: number
+  asphalt: MeshData
+  bus: MeshData
+  white: MeshData
+  yellow: MeshData
+  /** vértices intermediários das vias, nós menores e cruzamentos (xy) */
+  shape: Float32Array
+  minor: Float32Array
+  major: Float32Array
+}
+export interface TileUpdate {
+  dirty: TileData[]
+  removed: number[]
+}
+
+/** Conexões de um único nó, geradas sob demanda pelo núcleo (layout dos antigos arrays globais). */
+export interface NodeConns {
+  node: number
+  n: number
+  /** [nó, faixaOrigem, faixaDestino, tipo, estado] x n */
+  u32: Uint32Array
+  /** Bézier x8 por conexão */
+  f32: Float32Array
+  /** estado padrão (antes das edições) por conexão */
+  base: Uint8Array
+}
+
 export interface SignalPhase {
   green: number
   yellow: number
@@ -46,20 +75,15 @@ export interface NetworkData {
   nodeOsm: Float64Array
   nodeEnds: Uint32Array
   nodeEndOff: Uint32Array
-  shapeXY: Float32Array
   segU32: Uint32Array // [from,to,lf,lb,hw,name,flags,maxspeed,laneBase] x9
   laneU32: Uint32Array // [seg,dir,idx,from,to,bus] x6
   laneF32: Float32Array // [sx,sy,sdx,sdy,ex,ey,edx,edy] x8
-  connU32: Uint32Array // [node,fromLane,toLane,kind,allowed] x5
-  connF32: Float32Array // bézier x8
-  connOff: Uint32Array
-  asphalt: MeshData
-  bus: MeshData
-  white: MeshData
-  yellow: MeshData
+  /** ladrilhos regenerados nesta (re)construção e ladrilhos que ficaram vazios */
+  tiles: TileUpdate
   labels: Float32Array // [x,y,ang,len,rank,name,width] x7
   segKeys: Float64Array // [way, nóOsmInicial, nóOsmFinal] x3, orientação original
   segW: Float32Array // largura da faixa (m) por trecho
+  segCuts: Float32Array // recuos [início, fim] x2 por trecho (m)
   segPts: Float32Array // eixo dos trechos (xy), offsets em segPtsOff
   segPtsOff: Uint32Array
 }
@@ -76,11 +100,74 @@ export const KIND_UTURN = 3
 export type WorkerIn =
   | { type: 'import'; buffer: ArrayBuffer; name: string; edits?: string }
   | { type: 'edit'; edits: string }
+  | { type: 'demand'; id: number; json: string }
+  | { type: 'nodeConns'; id: number; node: number }
+  | { type: 'connEdits'; json: string }
+  | { type: 'simInit'; json: string }
+  | { type: 'simRun'; running: boolean; speed: number }
+  | { type: 'simStop' }
+  | { type: 'simHeat'; kind: number }
+  | { type: 'simTrack'; veh: number | null }
+  | { type: 'simHist'; id: number; bucket: number }
+  | { type: 'bench'; id: number; edits: string; sim: string; minutes: number }
+  | { type: 'benchCancel' }
 export type WorkerOut =
   | { type: 'done'; data: NetworkData; ms: number }
   | { type: 'error'; message: string }
+  | { type: 'sim'; time: number; stats: SimStats; buf: Float32Array; heat?: Uint8Array; series?: Float32Array; histLen?: number; track?: string }
+  | { type: 'benchProgress'; id: number; done: number }
+  | { type: 'benchDone'; id: number; result: BenchResult }
+  | { type: 'benchError'; id: number; message: string }
+  | { type: 'simEnded'; reason: string }
+  | { type: 'simReady'; error?: string }
+  | { type: 'result'; id: number; json?: string; u32?: Uint32Array; f32?: Float32Array; u8?: Uint8Array; error?: string }
 
 /** Estado de uma conexão de faixa (connU32[c*5+4]). */
 export const CONN_BLOCKED = 0 // proibida por restrição OSM (vermelho)
 export const CONN_ALLOWED = 1 // ligada
 export const CONN_ABSENT = 2 // candidata não ligada (só aparece ao arrastar)
+
+/** Estatísticas da simulação (1 Hz). */
+export interface SimStats {
+  time: number
+  alive: number
+  spawned: number
+  finished: number
+  lost: number
+  queued: number
+  meanTravel: number
+  redRuns: number
+  laneChanges: number
+}
+
+/** Resultado de uma execução headless de um cenário (comparação A/B). */
+export interface BenchResult {
+  report: SimReport
+  /** por minuto: t, vivos, concluídos no minuto, velocidade média (km/h), fila de entrada, 0 */
+  series: Float32Array
+  /** razão média de velocidade por trecho direcionado (0..254, 255 sem dados) */
+  ratio: Uint8Array
+  /** [way, nóInicial, nóFinal] por trecho (para alinhar com outro cenário) */
+  segKeys: Float64Array
+  minutes: number
+}
+
+export interface SimReport {
+  elapsed: number
+  spawned: number
+  trips: number
+  alive: number
+  queued: number
+  meanTravel: number
+  meanDelay: number
+  totalDelayVehH: number
+  aliveDelayVehH: number
+  queueDelayVehH: number
+  totalDelayAllVehH: number
+  meanDelayAll: number
+  meanSpeedKmh: number
+  throughputPerH: number
+  maxQueue: number
+  od: { from: number; to: number; n: number; meanTravel: number; meanDelay: number }[]
+  junctions: { node: number; osm: number; delayVehH: number; queueMax: number }[]
+}

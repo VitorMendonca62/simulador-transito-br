@@ -1,5 +1,5 @@
 import { Graphics } from 'pixi.js'
-import type { NetworkData } from '../model/types'
+import type { NetworkData, NodeConns } from '../model/types'
 import { CONN_ABSENT, CONN_ALLOWED, CONN_BLOCKED, CONN_STRIDE, KIND_RIGHT, KIND_STRAIGHT, KIND_UTURN } from '../model/types'
 import { C } from './colors'
 
@@ -96,12 +96,12 @@ export interface NodeLanes {
 }
 
 /** Faixas de entrada (origem) e de saída (destino) do nó, ordenadas por id. */
-export function nodeLanes(d: NetworkData, node: number): NodeLanes {
+export function nodeLanes(nc: NodeConns): NodeLanes {
   const src = new Set<number>()
   const dst = new Set<number>()
-  for (let c = d.connOff[node]; c < d.connOff[node + 1]; c++) {
-    src.add(d.connU32[c * CONN_STRIDE + 1])
-    dst.add(d.connU32[c * CONN_STRIDE + 2])
+  for (let c = 0; c < nc.n; c++) {
+    src.add(nc.u32[c * CONN_STRIDE + 1])
+    dst.add(nc.u32[c * CONN_STRIDE + 2])
   }
   return { src: [...src].sort((a, b) => a - b), dst: [...dst].sort((a, b) => a - b) }
 }
@@ -135,33 +135,39 @@ function polyline(g: Graphics, pts: Pt[]) {
 }
 
 /** Visualização e edição das conversões do nó selecionado (estilo TM:PE). Tamanhos em px de tela / zoom. */
-export function drawTurns(g: Graphics, d: NetworkData, node: number, zoom: number, view: TurnView) {
+export function drawTurns(g: Graphics, d: NetworkData, nc: NodeConns | null, node: number, zoom: number, view: TurnView) {
   g.clear()
   const px = 1 / zoom
-  const a = d.connOff[node]
-  const b = d.connOff[node + 1]
   const nx = d.nodeXY[node * 2]
   const ny = d.nodeXY[node * 2 + 1]
-  const lanes = nodeLanes(d, node)
+  if (!nc) {
+    // conexões ainda chegando do núcleo: só o nó selecionado com halo
+    g.circle(nx, ny, 15 * px).fill({ color: C.nodeJunction, alpha: 0.22 })
+    g.circle(nx, ny, 7.5 * px).fill(C.nodeJunction).stroke({ width: 2 * px, color: 0xffffff, alpha: 0.9 })
+    return
+  }
+  const a = 0
+  const b = nc.n
+  const lanes = nodeLanes(nc)
   const color = (lane: number) => PALETTE[lanes.src.indexOf(lane) % PALETTE.length]
   const sample = (c: number): Pt[] => {
     const pts: Pt[] = []
-    for (let i = 0; i <= 24; i++) pts.push(bez(d.connF32, c * 8, i / 24))
+    for (let i = 0; i <= 24; i++) pts.push(bez(nc.f32, c * 8, i / 24))
     return pts
   }
   const active = view.activeSrc
 
   // 1) proibidas por restrição OSM: tracejado vermelho fino
   for (let c = a; c < b; c++) {
-    if (d.connU32[c * CONN_STRIDE + 4] !== CONN_BLOCKED) continue
+    if (nc.u32[c * CONN_STRIDE + 4] !== CONN_BLOCKED) continue
     dashed(g, sample(c), 3 * px, 5 * px)
     g.stroke({ width: 1.6 * px, color: C.curveBlocked, alpha: active == null ? 0.6 : 0.25, cap: 'round' })
   }
 
   // 2) ligadas: contorno escuro + cor da faixa de origem
   const lit: number[] = []
-  for (let c = a; c < b; c++) if (d.connU32[c * CONN_STRIDE + 4] === CONN_ALLOWED) lit.push(c)
-  const alphaOf = (c: number) => (active == null || d.connU32[c * CONN_STRIDE + 1] === active ? 1 : 0.18)
+  for (let c = a; c < b; c++) if (nc.u32[c * CONN_STRIDE + 4] === CONN_ALLOWED) lit.push(c)
+  const alphaOf = (c: number) => (active == null || nc.u32[c * CONN_STRIDE + 1] === active ? 1 : 0.18)
   for (const c of lit) {
     polyline(g, sample(c))
     g.stroke({ width: 6.5 * px, color: 0x05090a, alpha: 0.65 * alphaOf(c), cap: 'round', join: 'round' })
@@ -169,19 +175,19 @@ export function drawTurns(g: Graphics, d: NetworkData, node: number, zoom: numbe
   for (const c of lit) {
     const hot = c === view.highlight
     polyline(g, sample(c))
-    g.stroke({ width: (hot ? 5 : 3.4) * px, color: hot ? 0xffffff : color(d.connU32[c * CONN_STRIDE + 1]), alpha: alphaOf(c), cap: 'round', join: 'round' })
+    g.stroke({ width: (hot ? 5 : 3.4) * px, color: hot ? 0xffffff : color(nc.u32[c * CONN_STRIDE + 1]), alpha: alphaOf(c), cap: 'round', join: 'round' })
   }
 
   // 3) setas por faixa de entrada (manobras ligadas/proibidas)
   const byLane = new Map<number, { kind: number; ok: boolean }[]>()
   for (let c = a; c < b; c++) {
     const o = c * CONN_STRIDE
-    const st = d.connU32[o + 4]
+    const st = nc.u32[o + 4]
     if (st === CONN_ABSENT) continue
-    const lane = d.connU32[o + 1]
+    const lane = nc.u32[o + 1]
     const arr = byLane.get(lane) ?? []
     byLane.set(lane, arr)
-    arr.push({ kind: d.connU32[o + 3], ok: st === CONN_ALLOWED })
+    arr.push({ kind: nc.u32[o + 3], ok: st === CONN_ALLOWED })
   }
   for (const [lane, list] of byLane) {
     const o = lane * 8
@@ -201,7 +207,7 @@ export function drawTurns(g: Graphics, d: NetworkData, node: number, zoom: numbe
   const activeDst = new Set<number>()
   if (active != null) {
     for (let c = a; c < b; c++) {
-      if (d.connU32[c * CONN_STRIDE + 1] === active && d.connU32[c * CONN_STRIDE + 4] === CONN_ALLOWED) activeDst.add(d.connU32[c * CONN_STRIDE + 2])
+      if (nc.u32[c * CONN_STRIDE + 1] === active && nc.u32[c * CONN_STRIDE + 4] === CONN_ALLOWED) activeDst.add(nc.u32[c * CONN_STRIDE + 2])
     }
   }
   const dragging = view.drag != null
@@ -259,14 +265,14 @@ export function drawHover(g: Graphics, d: NetworkData, node: number | null, zoom
 }
 
 /** Conversão do nó cuja curva passa a menos de `tol` (unidades do mundo) do ponto (wx, wy). */
-export function pickConn(d: NetworkData, node: number, wx: number, wy: number, tol: number): number | null {
+export function pickConn(nc: NodeConns, wx: number, wy: number, tol: number): number | null {
   let best: number | null = null
   let bd = tol * tol
-  for (let c = d.connOff[node]; c < d.connOff[node + 1]; c++) {
-    if (d.connU32[c * CONN_STRIDE + 4] === CONN_ABSENT) continue
-    let [px, py] = bez(d.connF32, c * 8, 0)
+  for (let c = 0; c < nc.n; c++) {
+    if (nc.u32[c * CONN_STRIDE + 4] === CONN_ABSENT) continue
+    let [px, py] = bez(nc.f32, c * 8, 0)
     for (let i = 1; i <= 16; i++) {
-      const [qx, qy] = bez(d.connF32, c * 8, i / 16)
+      const [qx, qy] = bez(nc.f32, c * 8, i / 16)
       const vx = qx - px
       const vy = qy - py
       const l2 = vx * vx + vy * vy || 1

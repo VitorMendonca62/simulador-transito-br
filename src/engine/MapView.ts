@@ -1,14 +1,17 @@
-import { Application, Container, Graphics } from 'pixi.js'
+import { Application, Container, Graphics, type Mesh } from 'pixi.js'
+import type { Zone } from '../model/demand'
 import type { NewPt } from '../model/persistence'
 import { presetWidth, type RoadPreset, ROAD_PRESETS } from '../model/presets'
-import type { NetworkData, SignalDef } from '../model/types'
+import type { NetworkData, NodeConns, SignalDef, TileUpdate } from '../model/types'
 import { C } from './colors'
 import { LabelLayer } from './LabelLayer'
-import { makeDots, makeMesh, pick } from './meshes'
+import { makeDots, makeMesh } from './meshes'
 import { SignalLayer } from './SignalLayer'
+import { HEAT_PALETTE, HeatLayer } from './HeatLayer'
+import { VehicleLayer } from './VehicleLayer'
 import { drawHover, drawTurns, nodeLanes, pickConn, pickDst, pickSrc, type NodeLanes } from './TurnOverlay'
 
-export type LayerKey = 'roads' | 'markings' | 'labels' | 'nodes' | 'shapes' | 'signals' | 'turns' | 'grid'
+export type LayerKey = 'vehicles' | 'roads' | 'markings' | 'labels' | 'nodes' | 'shapes' | 'signals' | 'turns' | 'grid' | 'zones'
 export type LayerState = Record<LayerKey, boolean>
 
 const MIN_Z = 0.04
@@ -92,7 +95,12 @@ export class MapView {
   private shapes = new Container()
   private turnsG = new Graphics()
   private hoverG = new Graphics()
+  private trackG = new Graphics()
+  private trackId: number | null = null
+  private trackPts: Float32Array | null = null
   private labels!: LabelLayer
+  private vehicles = new VehicleLayer()
+  private heat = new HeatLayer()
   private segG = new Graphics()
   private buildG = new Graphics()
   private badge!: HTMLDivElement
@@ -100,18 +108,30 @@ export class MapView {
   private buildCurve = false
   private draw: DrawState = { start: null, ctrl: null, lastDir: null, newChain: true }
   private cursorSnap: Snap | null = null
-  private mode: 'nodes' | 'lanes' | 'build' | 'erase' = 'nodes'
+  private mode: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal' = 'nodes'
+  private zonesG = new Graphics()
+  private zoneEl!: HTMLDivElement
+  private zones: Zone[] = []
+  private selZone: number | null = null
+  private zoneDraw: V[] = []
+  private zoneCursor: V | null = null
+  private lastZoneClick = { t: 0, x: 0, y: 0 }
+  onZoneCreate: (poly: [number, number][]) => void = () => {}
+  onZoneSelect: (id: number | null) => void = () => {}
+  onZoneEdit: (id: number, poly: [number, number][]) => void = () => {}
   private selectedSeg: number | null = null
   private hoverSeg: number | null = null
   private segBox: Float32Array = new Float32Array(0)
   onSegSelect: (seg: number | null) => void = () => {}
   /** Trecho desenhado confirmado (pontos em metros locais). */
   onBuildCommit: (pts: NewPt[], newChain: boolean) => void = () => {}
+  /** clique no modo Semáforo: nó existente ou ponto no corpo de uma via */
+  onSignalPlace: (p: { kind: 'node' | 'way'; x: number; y: number; node?: number; way?: number }) => void = () => {}
   onErase: (seg: number) => void = () => {}
   private signals = new SignalLayer()
   private data: NetworkData | null = null
   private cam = { x: 0, y: 0, z: 1 }
-  private user: LayerState = { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true }
+  private user: LayerState = { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true, zones: true, vehicles: true }
   private selectable = new Uint32Array(0)
   private selected: number | null = null
   private hover: number | null = null
@@ -123,6 +143,9 @@ export class MapView {
   private playing = true
   private speed = 1
   private clock = 0
+  /** relógio da simulação (s); quando definido, os semáforos desenhados seguem o mesmo ciclo do núcleo */
+  private simClock: number | null = null
+  private simClockDrawn = -1
   private lastFrame = performance.now()
   private lastSignalDraw = 0
   private ro?: ResizeObserver
@@ -132,10 +155,13 @@ export class MapView {
   onZoom: (z: number) => void = () => {}
   /** Chamado ao clicar numa curva de conversão do nó selecionado. */
   onConnClick: (conn: number) => void = () => {}
+  /** clique num veículo (id do núcleo) ou fora dele (null) enquanto havia um selecionado */
+  onVehiclePick: (id: number | null) => void = () => {}
   /** Chamado ao soltar um arrasto de faixa de origem -> faixa de destino. */
   onConnEdit: (fromLane: number, toLane: number) => void = () => {}
   private hoverConn: number | null = null
   private lanes: NodeLanes | null = null
+  private nodeConns: NodeConns | null = null
   private activeSrc: number | null = null
   private connDrag: { x: number; y: number; dst: number | null } | null = null
 
@@ -156,6 +182,9 @@ export class MapView {
     if (this.destroyed) return app.destroy(true)
     host.appendChild(app.canvas)
     this.labels = new LabelLayer(host)
+    this.zoneEl = document.createElement('div')
+    this.zoneEl.className = 'zone-labels'
+    host.appendChild(this.zoneEl)
     this.badge = document.createElement('div')
     this.badge.className = 'build-badge'
     this.badge.hidden = true
@@ -164,7 +193,7 @@ export class MapView {
     app.canvas.style.touchAction = 'none'
 
     app.stage.addChild(this.gridG, this.world)
-    this.world.addChild(this.roads, this.markings, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
+    this.world.addChild(this.zonesG, this.roads, this.markings, this.heat.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
     this.bindEvents()
 
     this.ro = new ResizeObserver(() => {
@@ -182,40 +211,61 @@ export class MapView {
     this.ro?.disconnect()
     this.labels?.destroy()
     this.badge?.remove()
+    this.zoneEl?.remove()
     if (this.app.renderer) this.app.destroy(true, { children: true })
   }
 
   // ------------------------------------------------------------ dados
 
+  private tileObjs = new Map<number, Mesh[]>()
+
   private clearScene() {
-    for (const c of [this.roads, this.markings, this.nodes, this.shapes]) {
-      for (const ch of c.removeChildren()) ch.destroy(true)
-    }
+    for (const meshes of this.tileObjs.values()) for (const m of meshes) m.destroy(true)
+    this.tileObjs.clear()
     this.labels.clear()
   }
 
-  private buildScene(d: NetworkData) {
-    this.roads.addChild(makeMesh(d.asphalt, C.asphalt), makeMesh(d.bus, C.bus))
-    this.markings.addChild(makeMesh(d.white, C.white), makeMesh(d.yellow, C.yellow))
+  /** Aplica os ladrilhos regenerados (e remove os esvaziados); o resto da cena fica intocado. */
+  private applyTiles(u: TileUpdate) {
+    for (const id of u.removed) this.dropTile(id)
+    for (const t of u.dirty) {
+      this.dropTile(t.id)
+      const meshes: Mesh[] = []
+      const add = (parent: Container, m: Mesh | null) => {
+        if (m) {
+          parent.addChild(m)
+          meshes.push(m)
+        }
+      }
+      // cópias (slice): os buffers do worker são visões de blocos grandes compartilhados
+      const mesh = (m: { pos: Float32Array; idx: Uint32Array }, color: number) =>
+        m.idx.length ? makeMesh({ pos: m.pos.slice(), idx: m.idx.slice() }, color) : null
+      add(this.roads, mesh(t.asphalt, C.asphalt))
+      add(this.roads, mesh(t.bus, C.bus))
+      add(this.markings, mesh(t.white, C.white))
+      add(this.markings, mesh(t.yellow, C.yellow))
+      add(this.shapes, makeDots(t.shape, 0.7, C.nodeShape, 8))
+      add(this.nodes, makeDots(t.minor, 1.25, C.nodeMinor, 12))
+      add(this.nodes, makeDots(t.major, 2.0, C.nodeJunction, 14))
+      this.tileObjs.set(t.id, meshes)
+    }
+  }
 
-    const major: number[] = []
-    const minor: number[] = []
+  private dropTile(id: number) {
+    const old = this.tileObjs.get(id)
+    if (old) for (const m of old) m.destroy(true)
+    this.tileObjs.delete(id)
+  }
+
+  /** Estruturas derivadas da rede inteira (seleção, rótulos, caixas): leves, refeitas a cada atualização. */
+  private buildScene(d: NetworkData) {
     const sel: number[] = []
     for (let i = 0; i < d.nodeInfo.length / 2; i++) {
       const deg = d.nodeInfo[i * 2]
       const flags = d.nodeInfo[i * 2 + 1]
-      if (deg >= 3) major.push(i)
-      else minor.push(i)
       if (deg >= 3 || (flags & 1) === 1) sel.push(i)
     }
     this.selectable = Uint32Array.from(sel)
-    const shapeDots = makeDots(d.shapeXY, 0.7, C.nodeShape, 8)
-    const minorDots = makeDots(pick(d.nodeXY, minor), 1.25, C.nodeMinor, 12)
-    const majorDots = makeDots(pick(d.nodeXY, major), 2.0, C.nodeJunction, 14)
-    if (shapeDots) this.shapes.addChild(shapeDots)
-    if (minorDots) this.nodes.addChild(minorDots)
-    if (majorDots) this.nodes.addChild(majorDots)
-
     this.labels.setData(d.labels, d.meta.names)
     this.signals.setSignals(d.meta.signals)
     this.segBox = segBounds(d)
@@ -235,7 +285,11 @@ export class MapView {
     this.hover = null
     this.data = d
     if (!d) return this.requestRender()
+    this.heat.invalidate()
+    this.heat.set(null, null)
+    this.applyTiles(d.tiles)
     this.buildScene(d)
+    this.nodeConns = null
     this.fit()
     this.applyLayers()
   }
@@ -244,15 +298,19 @@ export class MapView {
   updateNetwork(d: NetworkData) {
     const sel = this.selected
     const seg = this.selectedSeg
-    this.clearScene()
+    this.labels.clear()
+    this.heat.invalidate()
+    this.heat.set(null, null)
     this.data = d
+    this.applyTiles(d.tiles)
     this.buildScene(d)
     this.connDrag = null
     this.activeSrc = null
     this.selectedSeg = seg != null && seg < d.segKeys.length / 3 ? seg : null
     this.hoverSeg = null
     this.selected = sel != null && sel < d.nodeInfo.length / 2 ? sel : null
-    this.lanes = this.selected != null ? nodeLanes(d, this.selected) : null
+    this.nodeConns = null // o store pede de novo as conexões do nó selecionado
+    this.lanes = null
     this.applyLayers()
     this.scheduleLabels()
     this.redrawOverlay(true)
@@ -261,7 +319,7 @@ export class MapView {
   }
 
   /** Alterna entre editar conversões (nós) e faixas (trechos). */
-  setMode(m: 'nodes' | 'lanes' | 'build' | 'erase') {
+  setMode(m: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal') {
     this.mode = m
     this.selected = null
     this.lanes = null
@@ -272,10 +330,14 @@ export class MapView {
     this.hoverSeg = null
     this.selectedSeg = null
     this.resetDraw()
+    this.zoneDraw = []
+    this.zoneCursor = null
+    if (m !== 'zones') this.selZone = null
+    this.drawZones()
     this.turnsG.clear()
     this.hoverG.clear()
     this.drawSeg()
-    this.app.canvas.style.cursor = m === 'build' ? 'crosshair' : 'grab'
+    this.app.canvas.style.cursor = m === 'build' || m === 'zones' ? 'crosshair' : 'grab'
     this.requestRender()
   }
 
@@ -285,6 +347,127 @@ export class MapView {
     this.buildCurve = curve
     if (curve && this.draw.start && this.draw.ctrl == null && this.draw.lastDir == null) this.draw.ctrl = null
     this.drawBuild()
+  }
+
+  // ------------------------------------------------------------ zonas de demanda
+
+  setZones(zones: Zone[], selected: number | null) {
+    this.zones = zones
+    this.selZone = selected
+    this.drawZones()
+  }
+
+  private zoneAt(wx: number, wy: number): Zone | null {
+    for (let i = this.zones.length - 1; i >= 0; i--) {
+      const poly = this.zones[i].poly
+      let inside = false
+      for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
+        const [ax, ay] = poly[a]
+        const [bx, by] = poly[b]
+        if (ay > wy !== by > wy && wx < ((bx - ax) * (wy - ay)) / (by - ay) + ax) inside = !inside
+      }
+      if (inside) return this.zones[i]
+    }
+    return null
+  }
+
+  private zoneVertexAt(sx: number, sy: number): { id: number; idx: number } | null {
+    const z = this.zones.find((q) => q.id === this.selZone)
+    if (!z || this.mode !== 'zones') return null
+    const { x, y, zoom } = { x: this.cam.x, y: this.cam.y, zoom: this.cam.z }
+    for (let i = 0; i < z.poly.length; i++) {
+      if (Math.hypot(z.poly[i][0] * zoom + x - sx, z.poly[i][1] * zoom + y - sy) <= 10) return { id: z.id, idx: i }
+    }
+    return null
+  }
+
+  private drawZones() {
+    const g = this.zonesG
+    g.clear()
+    const px = 1 / this.cam.z
+    const labels: string[] = []
+    this.zoneEl?.replaceChildren()
+    for (const z of this.zones) {
+      if (z.poly.length < 3) continue
+      const sel = z.id === this.selZone
+      g.poly(z.poly.flat()).fill({ color: z.color, alpha: sel ? 0.26 : 0.14 })
+      g.poly(z.poly.flat()).stroke({ width: (sel ? 2.6 : 1.6) * px, color: sel ? 0xffffff : z.color, alpha: 0.9, join: 'round' })
+      if (sel && this.mode === 'zones') for (const p of z.poly) g.circle(p[0], p[1], 6 * px).fill(0xffffff).stroke({ width: 2 * px, color: z.color })
+      const el = document.createElement('span')
+      el.textContent = z.name
+      el.style.setProperty('--zc', `#${z.color.toString(16).padStart(6, '0')}`)
+      el.dataset.id = String(z.id)
+      this.zoneEl?.appendChild(el)
+      labels.push(z.name)
+    }
+    // polígono em desenho
+    if (this.mode === 'zones' && this.zoneDraw.length) {
+      const pts = this.zoneCursor ? [...this.zoneDraw, this.zoneCursor] : this.zoneDraw
+      g.moveTo(pts[0][0], pts[0][1])
+      for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1])
+      if (pts.length >= 3) g.lineTo(pts[0][0], pts[0][1])
+      g.stroke({ width: 2 * px, color: 0xffffff, alpha: 0.9, join: 'round' })
+      for (const p of this.zoneDraw) g.circle(p[0], p[1], 4 * px).fill(0xffffff)
+      if (this.zoneDraw.length >= 3) g.circle(this.zoneDraw[0][0], this.zoneDraw[0][1], 9 * px).stroke({ width: 2 * px, color: 0x4ade80 })
+    }
+    this.positionZoneLabels()
+    this.requestRender()
+  }
+
+  private positionZoneLabels() {
+    if (!this.zoneEl) return
+    const spans = this.zoneEl.children
+    let k = 0
+    for (const z of this.zones) {
+      if (z.poly.length < 3) continue
+      const el = spans[k++] as HTMLElement | undefined
+      if (!el) break
+      let cx = 0
+      let cy = 0
+      for (const p of z.poly) {
+        cx += p[0]
+        cy += p[1]
+      }
+      cx /= z.poly.length
+      cy /= z.poly.length
+      el.style.transform = `translate(${cx * this.cam.z + this.cam.x}px, ${cy * this.cam.z + this.cam.y}px) translate(-50%, -50%)`
+    }
+  }
+
+  private zoneClick(sx: number, sy: number) {
+    const wx = (sx - this.cam.x) / this.cam.z
+    const wy = (sy - this.cam.y) / this.cam.z
+    const now = performance.now()
+    const last = this.lastZoneClick
+    this.lastZoneClick = { t: now, x: sx, y: sy }
+    if (this.zoneDraw.length) {
+      const first = this.zoneDraw[0]
+      const nearFirst = Math.hypot(first[0] * this.cam.z + this.cam.x - sx, first[1] * this.cam.z + this.cam.y - sy) < 12
+      const dbl = now - last.t < 350 && Math.hypot(last.x - sx, last.y - sy) < 6
+      if (this.zoneDraw.length >= 3 && (nearFirst || dbl)) return this.finishZone()
+      if (!dbl) this.zoneDraw.push([wx, wy])
+      return this.drawZones()
+    }
+    const hit = this.zoneAt(wx, wy)
+    if (hit) {
+      this.selZone = hit.id
+      this.onZoneSelect(hit.id)
+      return this.drawZones()
+    }
+    if (this.selZone != null) {
+      this.selZone = null
+      this.onZoneSelect(null)
+    }
+    this.zoneDraw = [[wx, wy]]
+    this.drawZones()
+  }
+
+  private finishZone() {
+    const poly = this.zoneDraw.map((p): [number, number] => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10])
+    this.zoneDraw = []
+    this.zoneCursor = null
+    if (poly.length >= 3) this.onZoneCreate(poly)
+    this.drawZones()
   }
 
   private resetDraw() {
@@ -416,6 +599,19 @@ export class MapView {
     this.drawBuild()
   }
 
+  /** Marcador do ponto onde o semáforo será colocado. */
+  private drawSignalCursor() {
+    const g = this.buildG
+    g.clear()
+    const sn = this.cursorSnap
+    if (this.mode === 'signal' && sn && sn.kind !== 'free') {
+      const px = 1 / this.cam.z
+      g.circle(sn.x, sn.y, 9 * px).fill({ color: 0x0b1220, alpha: 0.6 }).stroke({ width: 2 * px, color: sn.kind === 'node' ? 0xfbbf24 : 0x34d399 })
+      g.circle(sn.x, sn.y, 3.5 * px).fill(sn.kind === 'node' ? 0xfbbf24 : 0x34d399)
+    }
+    this.requestRender()
+  }
+
   /** Prévia da via (largura real), marcadores de encaixe e rótulo de comprimento. */
   private drawBuild() {
     const g = this.buildG
@@ -508,6 +704,66 @@ export class MapView {
     this.requestRender()
   }
 
+  /** Mapa de calor por trecho direcionado (níveis 0..4, -1 sem dado); null esconde. */
+  setHeat(levels: Int8Array | null, palette: number[] = HEAT_PALETTE) {
+    this.heat.set(this.data, levels, palette)
+    this.requestRender()
+  }
+
+  /** Relógio da simulação para os semáforos (null volta ao relógio livre). */
+  setSimClock(t: number | null) {
+    this.simClock = t
+    if (t == null) this.simClockDrawn = -1
+    else if (this.signals.g.visible && t !== this.simClockDrawn) {
+      this.simClockDrawn = t
+      this.signals.draw(t, this.cam.z, this.selected)
+      this.requestRender()
+    }
+  }
+
+  /** Quadro da simulação (null limpa). */
+  setVehicles(buf: Float32Array | null) {
+    this.vehicles.set(buf, this.cam.z)
+    if (this.trackId != null) this.drawTrack()
+    this.requestRender()
+  }
+
+  /** Rota restante do veículo selecionado (pontos xy planos); null limpa. O último ponto é o destino. */
+  setTrack(id: number | null, pts: ArrayLike<number> | null) {
+    this.trackId = id
+    this.trackPts = pts && pts.length >= 4 ? Float32Array.from(pts) : null
+    this.drawTrack()
+    this.requestRender()
+  }
+
+  private drawTrack() {
+    const g = this.trackG
+    g.clear()
+    if (this.trackId == null) return
+    const px = 1 / this.cam.z
+    const me = this.vehicles.find(this.trackId)
+    const p = this.trackPts
+    if (p) {
+      const poly = () => {
+        // a rota nasce na posição atual do veículo
+        g.moveTo(me ? me.x : p[0], me ? me.y : p[1])
+        for (let i = 2; i < p.length; i += 2) g.lineTo(p[i], p[i + 1])
+      }
+      poly()
+      g.stroke({ width: 7 * px, color: 0x0b1220, alpha: 0.55, cap: 'round', join: 'round' })
+      poly()
+      g.stroke({ width: 3.5 * px, color: 0x22d3ee, alpha: 0.95, cap: 'round', join: 'round' })
+      const dx = p[p.length - 2]
+      const dy = p[p.length - 1]
+      g.circle(dx, dy, 11 * px).fill({ color: 0x0b1220, alpha: 0.7 }).stroke({ width: 2.5 * px, color: 0xffffff })
+      g.circle(dx, dy, 5 * px).fill(0xf43f5e)
+    }
+    if (me) {
+      const r = Math.max(me.len * 0.9, 9 * px)
+      g.circle(me.x, me.y, r).stroke({ width: 2.5 * px, color: 0xffffff })
+    }
+  }
+
   setSignals(defs: SignalDef[]) {
     this.signals.setSignals(defs)
     this.lastSignalDraw = 0
@@ -533,7 +789,8 @@ export class MapView {
     this.hoverConn = null
     this.activeSrc = null
     this.connDrag = null
-    this.lanes = node != null && this.data ? nodeLanes(this.data, node) : null
+    this.nodeConns = null
+    this.lanes = null
     this.redrawOverlay(true)
     if (node != null && focus && this.data) {
       const d = this.data
@@ -585,6 +842,8 @@ export class MapView {
     let drag: { x: number; y: number; moved: boolean; id: number } | null = null
     /** arrasto a partir de uma faixa de origem (criar/remover conversão) */
     let src: { lane: number; sx: number; sy: number; moved: boolean } | null = null
+    /** arrasto de vértice de zona */
+    let zv: { id: number; idx: number; moved: boolean } | null = null
     const world = (e: PointerEvent): [number, number] => {
       const r = cv.getBoundingClientRect()
       return [(e.clientX - r.left - this.cam.x) / this.cam.z, (e.clientY - r.top - this.cam.y) / this.cam.z]
@@ -597,6 +856,19 @@ export class MapView {
     }, { passive: false })
     cv.addEventListener('contextmenu', (e) => {
       e.preventDefault()
+      if (this.mode === 'zones') {
+        const r = cv.getBoundingClientRect()
+        const v = this.zoneVertexAt(e.clientX - r.left, e.clientY - r.top)
+        if (v) {
+          const z = this.zones.find((q) => q.id === v.id)
+          if (z && z.poly.length > 3) this.onZoneEdit(z.id, z.poly.filter((_, i) => i !== v.idx))
+        } else {
+          this.zoneDraw = []
+          this.zoneCursor = null
+          this.drawZones()
+        }
+        return
+      }
       if (this.mode === 'build') {
         this.draw = { start: null, ctrl: null, lastDir: null, newChain: true }
         this.drawBuild()
@@ -605,6 +877,14 @@ export class MapView {
     cv.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return
       cv.setPointerCapture(e.pointerId)
+      if (this.mode === 'zones') {
+        const r = cv.getBoundingClientRect()
+        const v = this.zoneVertexAt(e.clientX - r.left, e.clientY - r.top)
+        if (v && !this.zoneDraw.length) {
+          zv = { ...v, moved: false }
+          return
+        }
+      }
       if (this.selected != null && this.data && this.lanes && this.user.turns) {
         const [wx, wy] = world(e)
         const lane = pickSrc(this.data, this.lanes, wx, wy, 13 / this.cam.z)
@@ -621,6 +901,13 @@ export class MapView {
     })
     cv.addEventListener('pointermove', (e) => {
       const r = cv.getBoundingClientRect()
+      if (zv) {
+        zv.moved = true
+        const [wx, wy] = world(e)
+        this.zones = this.zones.map((z) => (z.id === zv!.id ? { ...z, poly: z.poly.map((p, i): [number, number] => (i === zv!.idx ? [wx, wy] : p)) } : z))
+        this.drawZones()
+        return
+      }
       if (src) {
         if (!src.moved && Math.hypot(e.clientX - src.sx, e.clientY - src.sy) < 4) return
         src.moved = true
@@ -647,6 +934,20 @@ export class MapView {
         this.drawBuild()
         return
       }
+      if (this.mode === 'signal' && this.data) {
+        this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        this.drawSignalCursor()
+        return
+      }
+      if (this.mode === 'zones') {
+        if (this.zoneDraw.length) {
+          this.zoneCursor = [(e.clientX - r.left - this.cam.x) / this.cam.z, (e.clientY - r.top - this.cam.y) / this.cam.z]
+          this.drawZones()
+        } else {
+          cv.style.cursor = this.zoneVertexAt(e.clientX - r.left, e.clientY - r.top) ? 'move' : 'crosshair'
+        }
+        return
+      }
       if (this.mode === 'lanes' || this.mode === 'erase') {
         const sg = this.pickSeg(e.clientX - r.left, e.clientY - r.top)
         if (sg !== this.hoverSeg) {
@@ -671,6 +972,15 @@ export class MapView {
       }
     })
     const end = (e: PointerEvent) => {
+      if (zv) {
+        const v = zv
+        zv = null
+        if (v.moved) {
+          const z = this.zones.find((q) => q.id === v.id)
+          if (z) this.onZoneEdit(z.id, z.poly.map((p): [number, number] => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]))
+        }
+        return
+      }
       if (src) {
         const s = src
         src = null
@@ -684,6 +994,18 @@ export class MapView {
       const wasClick = !drag.moved
       drag = null
       cv.style.cursor = 'grab'
+      if (wasClick && this.mode === 'zones') {
+        const r = cv.getBoundingClientRect()
+        this.zoneClick(e.clientX - r.left, e.clientY - r.top)
+        return
+      }
+      if (wasClick && this.mode === 'signal' && this.data) {
+        const r = cv.getBoundingClientRect()
+        const sn = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        if (sn.kind === 'node') this.onSignalPlace({ kind: 'node', x: sn.x, y: sn.y, node: sn.node })
+        else if (sn.kind === 'way') this.onSignalPlace({ kind: 'way', x: sn.x, y: sn.y, way: sn.way })
+        return
+      }
       if (wasClick && this.mode === 'build') {
         const r = cv.getBoundingClientRect()
         this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
@@ -707,6 +1029,15 @@ export class MapView {
         this.drawSeg()
         this.onSegSelect(sg)
         return
+      }
+      if (wasClick && this.user.vehicles) {
+        const [wx, wy] = world(e)
+        const vid = this.vehicles.pick(wx, wy, Math.max(4, 10 / this.cam.z))
+        if (vid != null) {
+          this.onVehiclePick(vid)
+          return
+        }
+        if (this.trackId != null) this.onVehiclePick(null)
       }
       if (wasClick) {
         const r = cv.getBoundingClientRect()
@@ -732,7 +1063,18 @@ export class MapView {
   }
 
   private onKey = (e: KeyboardEvent) => {
+    if (this.mode === 'zones' && e.key === 'Enter' && this.zoneDraw.length >= 3) return this.finishZone()
     if (e.key !== 'Escape') return
+    if (this.mode === 'zones') {
+      if (this.zoneDraw.length) {
+        this.zoneDraw = []
+        this.zoneCursor = null
+      } else if (this.selZone != null) {
+        this.selZone = null
+        this.onZoneSelect(null)
+      }
+      return this.drawZones()
+    }
     if (this.mode === 'build') {
       this.draw = { start: null, ctrl: null, lastDir: null, newChain: true }
       this.drawBuild()
@@ -753,7 +1095,16 @@ export class MapView {
   private connAt(sx: number, sy: number): number | null {
     if (this.selected == null || !this.data || !this.user.turns) return null
     const { x, y, z } = this.cam
-    return pickConn(this.data, this.selected, (sx - x) / z, (sy - y) / z, 7 / z)
+    if (!this.nodeConns) return null
+    return pickConn(this.nodeConns, (sx - x) / z, (sy - y) / z, 7 / z)
+  }
+
+  /** Conexões do nó selecionado, entregues pelo núcleo (ignora respostas de um nó que já não está selecionado). */
+  setNodeConns(nc: NodeConns | null, node: number | null = nc?.node ?? null) {
+    if (node !== this.selected) return
+    this.nodeConns = nc
+    this.lanes = nc ? nodeLanes(nc) : null
+    this.redrawOverlay(true)
   }
 
   /** Redesenha o overlay do nó selecionado (após editar conversões). */
@@ -793,6 +1144,9 @@ export class MapView {
     this.lastSignalDraw = 0
     if (this.selectedSeg != null) this.drawSeg()
     if (this.mode === 'build') this.drawBuild()
+    if (this.zones.length || this.zoneDraw.length) this.drawZones()
+    this.vehicles.rezoom(z)
+    if (this.trackId != null) this.drawTrack()
     this.labels?.reposition(this.cam)
     this.scheduleLabels()
     if (this.selected != null && Math.abs(z / (this.overlayZoom || z) - 1) > 0.02) this.redrawOverlay(false)
@@ -812,6 +1166,9 @@ export class MapView {
     this.signals.g.visible = on('signals')
     this.turnsG.visible = this.user.turns
     this.gridG.visible = this.user.grid
+    this.zonesG.visible = this.user.zones
+    this.vehicles.container.visible = this.user.vehicles
+    if (this.zoneEl) this.zoneEl.style.display = this.user.zones ? '' : 'none'
     this.requestRender()
   }
 
@@ -853,7 +1210,7 @@ export class MapView {
     if (!this.data) return
     this.overlayZoom = this.cam.z
     if (this.selected == null) this.turnsG.clear()
-    else drawTurns(this.turnsG, this.data, this.selected, this.cam.z, { highlight: this.hoverConn, activeSrc: this.activeSrc, drag: this.connDrag })
+    else drawTurns(this.turnsG, this.data, this.nodeConns, this.selected, this.cam.z, { highlight: this.hoverConn, activeSrc: this.activeSrc, drag: this.connDrag })
     drawHover(this.hoverG, this.data, this.hover === this.selected ? null : this.hover, this.cam.z)
     this.requestRender()
   }
@@ -879,8 +1236,13 @@ export class MapView {
     const now = performance.now()
     const dt = (now - this.lastFrame) / 1000
     this.lastFrame = now
-    if (this.playing) this.clock += dt * this.speed
-    if (this.signals.g.visible && (this.lastSignalDraw === 0 || (this.playing && now - this.lastSignalDraw > 120))) {
+    if (this.playing && this.simClock == null) this.clock += dt * this.speed
+    if (this.simClock != null && this.signals.g.visible && this.lastSignalDraw === 0) {
+      this.lastSignalDraw = now
+      this.signals.draw(this.simClock, this.cam.z, this.selected)
+      this.dirty = true
+    }
+    if (this.simClock == null && this.signals.g.visible && (this.lastSignalDraw === 0 || (this.playing && now - this.lastSignalDraw > 120))) {
       this.lastSignalDraw = now
       this.signals.draw(this.clock, this.cam.z, this.selected)
       this.dirty = true

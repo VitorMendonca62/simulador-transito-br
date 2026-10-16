@@ -3,12 +3,14 @@ import { useStore } from '../model/store'
 
 const ITEMS: [LayerKey, string, string][] = [
   ['roads', 'Vias', 'Asfalto e faixas de ônibus'],
+  ['vehicles', 'Veículos', 'Carros e ônibus da simulação'],
   ['markings', 'Sinalização de solo', 'Faixas brancas/amarelas, zebra, retenção'],
   ['labels', 'Nomes das ruas', ''],
   ['nodes', 'Nós de cruzamento', 'Laranja = cruzamento, verde = ponta/trecho'],
   ['shapes', 'Pontos de forma', 'Vértices intermediários (zoom alto)'],
   ['signals', 'Semáforos', ''],
   ['turns', 'Conversões do nó', 'Visualização estilo TM:PE'],
+  ['zones', 'Zonas de demanda', 'Áreas de geração/atração de viagens'],
   ['grid', 'Grade', ''],
 ]
 

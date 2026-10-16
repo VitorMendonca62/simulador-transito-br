@@ -5,8 +5,11 @@ import { getSegRecord, useStore } from './model/store'
 import { Inspector } from './ui/Inspector'
 import { BuildPanel, ErasePanel } from './ui/BuildPanel'
 import { SegmentPanel } from './ui/SegmentPanel'
+import { ZonePanel } from './ui/ZonePanel'
 import { LayerPanel } from './ui/LayerPanel'
 import { SignalPanel } from './ui/SignalPanel'
+import { ScenarioPanel } from './ui/ScenarioPanel'
+import { SimPanel } from './ui/SimPanel'
 import { Toolbar } from './ui/Toolbar'
 
 export function App() {
@@ -16,11 +19,16 @@ export function App() {
 
   useEffect(() => {
     const view = new MapView(host.current!)
-    view.onSelect = (n) => useStore.setState({ selected: n })
+    view.onSelect = (n) => useStore.getState().onViewSelect(n)
     view.onSegSelect = (sg) => useStore.setState({ selectedSeg: sg })
+    view.onSignalPlace = (p) => useStore.getState().placeSignal(p)
     view.onBuildCommit = (pts, newChain) => useStore.getState().addRoad(pts, newChain)
     view.onErase = (seg) => useStore.getState().eraseSegment(seg)
+    view.onZoneCreate = (poly) => useStore.getState().addZone(poly)
+    view.onZoneSelect = (id) => useStore.getState().selectZone(id)
+    view.onZoneEdit = (id, poly) => useStore.getState().updateZone(id, { poly })
     view.onZoom = (z) => useStore.getState().setZoom(z)
+    view.onVehiclePick = (id) => useStore.getState().pickVehicle(id)
     view.onConnClick = (c) => useStore.getState().toggleConns([c])
     view.onConnEdit = (from, to) => useStore.getState().connectLanes(from, to)
     let alive = true
@@ -72,11 +80,20 @@ export function App() {
 
       {data && (
         <aside className="side">
+          <SimPanel />
+          <ScenarioPanel />
           <LayerPanel />
           {mode === 'nodes' && <Inspector />}
           {mode === 'lanes' && <SegmentPanel />}
           {mode === 'build' && <BuildPanel />}
           {mode === 'erase' && <ErasePanel />}
+          {mode === 'zones' && <ZonePanel />}
+          {mode === 'signal' && (
+            <section className="panel">
+              <h2>Semáforo</h2>
+              <p className="hint">Clique em qualquer ponto de uma via para colocar um semáforo (a via é dividida ali, com uma fase extra para pedestres). Clique num nó para ligar o semáforo dele. Depois ajuste as fases no modo Conversões; para remover, use <b>Remover semáforo</b>.</p>
+            </section>
+          )}
           <SignalPanel />
         </aside>
       )}
@@ -107,7 +124,6 @@ export function App() {
           <span>{data.meta.counts.nodes.toLocaleString('pt-BR')} nós</span>
           <span>{data.meta.counts.segments.toLocaleString('pt-BR')} trechos</span>
           <span>{data.meta.counts.lanes.toLocaleString('pt-BR')} faixas</span>
-          <span>{data.meta.counts.connections.toLocaleString('pt-BR')} conexões</span>
           <span>{data.meta.counts.signals} semáforos</span>
           <span>importado em {importMs.toFixed(0)} ms</span>
           <span>{zoom.toFixed(2)} px/m</span>

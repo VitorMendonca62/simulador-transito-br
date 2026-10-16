@@ -44,6 +44,8 @@ export function Toolbar() {
                   ['lanes', 'Faixas', 'Selecionar vias e editar faixas'],
                   ['build', 'Construir', 'Desenhar vias novas'],
                   ['erase', 'Demolir', 'Remover trechos de via'],
+                  ['signal', 'Semáforo', 'Colocar semáforo em qualquer ponto de uma via'],
+                  ['zones', 'Zonas', 'Desenhar zonas de geração/atração de viagens'],
                 ] as const
               ).map(([m, label, tip]) => (
                 <button key={m} aria-pressed={mode === m} onClick={() => setMode(m)} title={tip}>

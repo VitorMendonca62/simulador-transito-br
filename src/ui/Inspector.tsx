@@ -3,9 +3,9 @@ import { describeNode, KIND_ARROW, KIND_LABEL } from '../model/inspect'
 import { useStore } from '../model/store'
 
 export function Inspector() {
-  const { data, selected, select, editRev, toggleConns, resetConns, addSignal, removeSignal, rebuilding } = useStore()
+  const { data, selected, nodeConns, select, editRev, toggleConns, resetConns, addSignal, removeSignal, rebuilding } = useStore()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const info = useMemo(() => (data && selected != null ? describeNode(data, selected) : null), [data, selected, editRev])
+  const info = useMemo(() => (data && selected != null ? describeNode(data, selected, nodeConns) : null), [data, selected, nodeConns, editRev])
 
   if (!info) {
     return (

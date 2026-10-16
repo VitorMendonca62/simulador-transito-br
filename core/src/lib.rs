@@ -2,10 +2,12 @@
 //! Fase 1: importação OSM/PBF, grafo viário, faixas, conexões, semáforos e malhas de desenho.
 
 pub mod conn;
+pub mod demand;
 pub mod geo;
 pub mod net;
 pub mod osm;
 pub mod render;
+pub mod sim;
 
 use net::*;
 use serde_json::json;
@@ -16,28 +18,50 @@ use wasm_bindgen::prelude::*;
 pub struct Network {
     /// OSM bruto, guardado para reconstruir a rede quando há edições de trecho.
     raw: osm::RawOsm,
+    /// geometria e atributos do OSM que não dependem das edições (calculados uma vez)
+    base: BaseCache,
     edits: Edits,
     net: Net,
-    meshes: render::Meshes,
+    tiles: render::TileSet,
+    /// ladrilhos regenerados / esvaziados na última (re)construção
+    delta: render::TileDelta,
+    restr: std::collections::HashMap<i64, Vec<usize>>,
+    sim: Option<sim::Sim>,
+    /// conexões por nó só sob demanda (a interface pede ao selecionar); desligado nos testes
+    lazy: bool,
 }
 
-fn build_parts(raw: &osm::RawOsm, edits: &Edits) -> Result<(Net, render::Meshes), String> {
-    let mut net = Net::build(raw, edits)?;
-    conn::build_connections(&mut net, raw);
+fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool) -> Result<Net, String> {
+    let mut net = Net::build(raw, edits, base)?;
+    if !lazy {
+        conn::build_connections(&mut net, raw, edits);
+    }
     conn::build_signals(&mut net, edits);
-    let meshes = render::build_meshes(&net);
-    Ok((net, meshes))
+    Ok(net)
 }
 
-pub fn build_network(data: &[u8]) -> Result<Network, String> {
+fn build_network_with(data: &[u8], lazy: bool) -> Result<Network, String> {
     let raw = osm::parse(data)?;
     let edits = Edits::default();
-    let (net, meshes) = build_parts(&raw, &edits)?;
-    Ok(Network { raw, edits, net, meshes })
+    let base = BaseCache::new(&raw)?;
+    let net = build_parts(&raw, &base, &edits, lazy)?;
+    let (tiles, delta) = render::update_tiles(&net, None);
+    let restr = conn::restriction_index(&raw);
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy })
+}
+
+/// Rede com conexões por nó sob demanda (como no navegador).
+pub fn build_network_lazy(data: &[u8]) -> Result<Network, String> {
+    build_network_with(data, true)
+}
+
+/// Rede com todas as conexões calculadas (testes, simulação).
+pub fn build_network(data: &[u8]) -> Result<Network, String> {
+    build_network_with(data, false)
 }
 
 impl Network {
-    /// Substitui as edições e reconstrói a rede. JSON: `{"segments":[SegEdit], "signals":[SigEdit]}`
+    /// Substitui as edições e reconstrói a rede. JSON: `{"segments","signals","roads","removed","connections"}`
     /// (também aceita uma lista simples de `SegEdit`).
     pub fn set_edits(&mut self, json: &str) -> Result<(), String> {
         #[derive(serde::Deserialize, Default)]
@@ -47,6 +71,7 @@ impl Network {
             signals: Vec<SigEdit>,
             roads: Vec<NewRoad>,
             removed: Vec<SegKey>,
+            connections: std::collections::HashMap<String, u8>,
         }
         let payload: Payload = match serde_json::from_str::<Payload>(json) {
             Ok(p) => p,
@@ -55,23 +80,45 @@ impl Network {
                 ..Default::default()
             },
         };
-        let edits = Edits {
+        let mut edits = Edits {
             segs: payload.segments.into_iter().map(|e| (e.key(), e)).collect(),
             sigs: payload.signals.into_iter().map(|e| (e.node, e)).collect(),
             roads: payload.roads,
             removed: payload.removed.into_iter().collect(),
+            conns: Default::default(),
         };
-        let (net, meshes) = build_parts(&self.raw, &edits)?;
+        edits.set_conns(payload.connections);
+        let net = build_parts(&self.raw, &self.base, &edits, self.lazy)?;
+        let prev = std::mem::take(&mut self.tiles);
+        let (tiles, delta) = render::update_tiles(&net, Some(prev));
         self.edits = edits;
         self.net = net;
-        self.meshes = meshes;
+        self.sim = None; // a rede mudou: a simulação precisa recomeçar
+        self.tiles = tiles;
+        let ts = &self.tiles;
+        self.delta.merge(delta, |id| ts.tiles.contains_key(&id));
         Ok(())
+    }
+
+    /// Inicia a simulação (JSON: `{"zones":[…],"params":{…}}`).
+    pub fn start_sim(&mut self, json: &str) -> Result<(), String> {
+        self.ensure_conns();
+        let init: sim::SimInit = serde_json::from_str(json).map_err(|e| format!("simulação inválida: {e}"))?;
+        self.sim = Some(sim::Sim::new(&self.net, &init)?);
+        Ok(())
+    }
+
+    /// Garante `net.conns` completo (simulação e roteamento).
+    pub fn ensure_conns(&mut self) {
+        if self.net.conns.is_empty() && !self.net.nodes.is_empty() {
+            conn::build_connections(&mut self.net, &self.raw, &self.edits);
+        }
     }
 }
 
 #[wasm_bindgen]
 pub fn import_osm(data: &[u8]) -> Result<Network, JsError> {
-    build_network(data).map_err(|e| JsError::new(&e))
+    build_network_with(data, true).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen]
@@ -135,6 +182,13 @@ impl Network {
         out
     }
 
+    /// Resolve zonas sobre a rede e devolve a matriz OD (JSON). Entrada: `{"zones":[…],"params":{…}}`.
+    pub fn demand_json(&self, json: &str) -> Result<String, JsError> {
+        let payload: demand::Payload = serde_json::from_str(json).map_err(|e| JsError::new(&format!("demanda inválida: {e}")))?;
+        let r = demand::resolve(&self.net, &payload, &demand::straight_line_minutes);
+        serde_json::to_string(&r).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Reconstrói a rede com as edições de trecho (JSON). Os buffers antigos deixam de valer.
     pub fn apply_edits(&mut self, json: &str) -> Result<(), JsError> {
         self.set_edits(json).map_err(|e| JsError::new(&e))
@@ -145,6 +199,10 @@ impl Network {
     /// [way, nó_inicial, nó_final] (ids OSM, orientação original) por trecho.
     pub fn seg_keys(&self) -> Vec<f64> {
         self.net.segs.iter().flat_map(|s| s.key.map(|v| v as f64)).collect()
+    }
+    /// Recuos [do início, do fim] (m) de cada trecho nos cruzamentos.
+    pub fn seg_cuts(&self) -> Vec<f32> {
+        self.net.segs.iter().flat_map(|s| [s.cut_from as f32, s.cut_to as f32]).collect()
     }
     /// Largura da faixa (m) por trecho.
     pub fn seg_w(&self) -> Vec<f32> {
@@ -196,7 +254,106 @@ impl Network {
             .collect()
     }
 
-    // --- conexões
+    // --- simulação
+    pub fn sim_init(&mut self, json: &str) -> Result<(), JsError> {
+        self.start_sim(json).map_err(|e| JsError::new(&e))
+    }
+    pub fn sim_step(&mut self, ticks: u32) {
+        if let Some(s) = self.sim.as_mut() {
+            for _ in 0..ticks {
+                s.step(&self.net);
+            }
+        }
+    }
+    pub fn sim_active(&self) -> bool {
+        self.sim.is_some()
+    }
+    pub fn sim_time(&self) -> f64 {
+        self.sim.as_ref().map_or(0.0, |s| s.time)
+    }
+    /// Veículos: [x, y, rumo, velocidade, tipo(0 carro, 1 ônibus), comprimento] cada.
+    pub fn sim_snapshot(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        if let Some(s) = &self.sim {
+            s.snapshot(&self.net, &mut out);
+        }
+        out
+    }
+    /// Rota restante do veículo `id` (JSON); `{"alive":false}` se já saiu.
+    pub fn sim_track(&self, id: u32) -> String {
+        match self.sim.as_ref().and_then(|s| s.track(&self.net, id as usize)) {
+            Some((pts, zone, kind, v, wait)) => json!({ "alive": true, "id": id, "zone": zone, "kind": kind, "v": v, "wait": wait, "pts": pts }).to_string(),
+            None => json!({ "alive": false, "id": id }).to_string(),
+        }
+    }
+    pub fn sim_stats(&self) -> String {
+        match &self.sim {
+            Some(s) => json!({
+                "time": s.time,
+                "alive": s.n_alive,
+                "spawned": s.stats.spawned,
+                "finished": s.stats.finished,
+                "lost": s.stats.lost,
+                "queued": s.stats.queued,
+                "meanTravel": if s.stats.finished > 0 { s.stats.travel_sum / s.stats.finished as f64 } else { 0.0 },
+                "redRuns": s.stats.red_runs,
+                "laneChanges": s.stats.lane_changes,
+            })
+            .to_string(),
+            None => "{}".to_string(),
+        }
+    }
+    /// Mapa de calor atual por trecho direcionado (índice = trecho*2 + sentido): 0..254, 255 sem dados.
+    /// `kind` 0 = razão de velocidade, 1 = fração parada.
+    pub fn sim_heat(&self, kind: u8) -> Vec<u8> {
+        self.sim.as_ref().map_or(Vec::new(), |s| s.metrics.heat(kind))
+    }
+    /// Quantidade de baldes de 60 s já finalizados (para o replay).
+    pub fn sim_hist_len(&self) -> u32 {
+        self.sim.as_ref().map_or(0, |s| s.metrics.hist_speed.len() as u32)
+    }
+    /// Razão de velocidade por trecho direcionado no balde `b`.
+    pub fn sim_hist(&self, b: u32) -> Vec<u8> {
+        self.sim.as_ref().and_then(|s| s.metrics.hist_speed.get(b as usize).cloned()).unwrap_or_default()
+    }
+    /// Série global: por balde [t, vivos, concluídos, velocidade média (km/h), fila de entrada, 0].
+    pub fn sim_series(&self) -> Vec<f32> {
+        self.sim.as_ref().map_or(Vec::new(), |s| s.metrics.series_flat())
+    }
+    /// Relatório consolidado (JSON): viagens, atrasos, vazão, OD, cruzamentos mais atrasados.
+    pub fn sim_report(&self) -> String {
+        self.sim.as_ref().map_or("{}".to_string(), |s| s.report(&self.net).to_string())
+    }
+    /// Razão média de velocidade por trecho direcionado em toda a execução.
+    pub fn sim_run_ratio(&self) -> Vec<u8> {
+        self.sim.as_ref().map_or(Vec::new(), |s| s.run_ratio(&self.net))
+    }
+    pub fn sim_stop(&mut self) {
+        self.sim = None;
+    }
+
+    // --- conexões (por nó, sob demanda)
+    /// Atualiza só as conversões editadas (sem reconstruir a rede). JSON: mapa chave -> estado.
+    pub fn set_conn_edits(&mut self, json: &str) -> Result<(), JsError> {
+        let m: std::collections::HashMap<String, u8> = serde_json::from_str(json).map_err(|e| JsError::new(&format!("conversões inválidas: {e}")))?;
+        self.edits.set_conns(m);
+        self.net.conns.clear();
+        self.net.conn_off.clear();
+        Ok(())
+    }
+    /// [faixa_origem, faixa_destino, tipo, estado, estado_padrão] por conexão do nó.
+    pub fn node_conns_u32(&self, node: u32) -> Vec<u32> {
+        conn::node_conns(&self.net, node as usize, &self.raw, &self.restr, &self.edits)
+            .iter()
+            .flat_map(|c| [c.from_lane, c.to_lane, c.kind as u32, c.state as u32, c.base as u32])
+            .collect()
+    }
+    /// Bézier (8 floats) por conexão do nó, na mesma ordem de `node_conns_u32`.
+    pub fn node_conns_f32(&self, node: u32) -> Vec<f32> {
+        conn::node_conns(&self.net, node as usize, &self.raw, &self.restr, &self.edits).iter().flat_map(|c| c.curve).collect()
+    }
+
+    // --- conexões (todas; só se foram construídas)
     /// [nó, faixa_origem, faixa_destino, tipo(0 esq,1 frente,2 dir,3 retorno), estado(1 ligada, 0 proibida, 2 ausente)]
     pub fn conn_u32(&self) -> Vec<u32> {
         self.net.conns.iter().flat_map(|c| [c.node, c.from_lane, c.to_lane, c.kind as u32, c.state as u32]).collect()
@@ -209,30 +366,49 @@ impl Network {
         self.net.conn_off.clone()
     }
 
-    // --- malhas
-    pub fn asphalt_pos(&self) -> Vec<f32> {
-        self.meshes.asphalt.pos.clone()
+    // --- malhas por ladrilho (só os que mudaram na última construção)
+    /// Marca o delta de ladrilhos como entregue (chamar depois de ler `tiles_*`).
+    pub fn clear_delta(&mut self) {
+        self.delta = render::TileDelta::default();
     }
-    pub fn asphalt_idx(&self) -> Vec<u32> {
-        self.meshes.asphalt.idx.clone()
+    pub fn tiles_dirty(&self) -> Vec<u32> {
+        self.delta.dirty.clone()
     }
-    pub fn bus_pos(&self) -> Vec<f32> {
-        self.meshes.bus.pos.clone()
+    pub fn tiles_removed(&self) -> Vec<u32> {
+        self.delta.removed.clone()
     }
-    pub fn bus_idx(&self) -> Vec<u32> {
-        self.meshes.bus.idx.clone()
+    /// Por ladrilho sujo: [id, tamanhos de pos×7 (asfalto, ônibus, branco, amarelo, forma, nós menores, cruzamentos), tamanhos de idx×4].
+    pub fn tiles_index(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for id in &self.delta.dirty {
+            let t = &self.tiles.tiles[id];
+            out.push(*id);
+            out.extend([t.asphalt.pos.len(), t.bus.pos.len(), t.white.pos.len(), t.yellow.pos.len(), t.shape.len(), t.minor.len(), t.major.len()].map(|v| v as u32));
+            out.extend([t.asphalt.idx.len(), t.bus.idx.len(), t.white.idx.len(), t.yellow.idx.len()].map(|v| v as u32));
+        }
+        out
     }
-    pub fn white_pos(&self) -> Vec<f32> {
-        self.meshes.white.pos.clone()
+    /// Posições dos ladrilhos sujos, concatenadas na ordem de `tiles_index`.
+    pub fn tiles_pos(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for id in &self.delta.dirty {
+            let t = &self.tiles.tiles[id];
+            for v in [&t.asphalt.pos, &t.bus.pos, &t.white.pos, &t.yellow.pos, &t.shape, &t.minor, &t.major] {
+                out.extend_from_slice(v);
+            }
+        }
+        out
     }
-    pub fn white_idx(&self) -> Vec<u32> {
-        self.meshes.white.idx.clone()
-    }
-    pub fn yellow_pos(&self) -> Vec<f32> {
-        self.meshes.yellow.pos.clone()
-    }
-    pub fn yellow_idx(&self) -> Vec<u32> {
-        self.meshes.yellow.idx.clone()
+    /// Índices (locais a cada malha) dos ladrilhos sujos, concatenados.
+    pub fn tiles_idx(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for id in &self.delta.dirty {
+            let t = &self.tiles.tiles[id];
+            for v in [&t.asphalt.idx, &t.bus.idx, &t.white.idx, &t.yellow.idx] {
+                out.extend_from_slice(v);
+            }
+        }
+        out
     }
 
     /// Candidatos a rótulo de rua: [x, y, ângulo, comprimento, rank, nome, largura]

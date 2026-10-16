@@ -15,10 +15,11 @@ fn imports_sample() {
     assert_eq!(net.signals.len(), 3, "3 semáforos");
     assert!(!net.conns.is_empty());
     assert_eq!(net.conn_off.len(), net.nodes.len() + 1);
-    assert!(!n.meshes.asphalt.idx.is_empty());
-    assert!(!n.meshes.white.idx.is_empty());
-    assert!(!n.meshes.yellow.idx.is_empty());
-    assert!(!n.meshes.bus.idx.is_empty(), "faixa de ônibus");
+    let tiles = &n.tiles.tiles;
+    assert!(tiles.values().any(|t| !t.asphalt.idx.is_empty()));
+    assert!(tiles.values().any(|t| !t.white.idx.is_empty()));
+    assert!(tiles.values().any(|t| !t.yellow.idx.is_empty()));
+    assert!(tiles.values().any(|t| !t.bus.idx.is_empty()), "faixa de ônibus");
 }
 
 #[test]
@@ -122,7 +123,7 @@ fn perf_big_map() {
         n.net.segs.len(),
         n.net.lanes.len(),
         n.net.conns.len(),
-        n.meshes.asphalt.idx.len() / 3,
+        n.tiles.asphalt_tris(),
         t.elapsed()
     );
 }
@@ -175,14 +176,14 @@ fn edit_json(k: SegKey, extra: &str) -> String {
 #[test]
 fn edit_lane_count_rebuilds_everything() {
     let mut n = sample();
-    let before = (n.net.lanes.len(), n.net.conns.len(), n.meshes.asphalt.pos.len());
+    let before = (n.net.lanes.len(), n.net.conns.len(), n.tiles.vertex_count(|t| t.asphalt.pos.len()));
     let k = key_of(&n, "Rua das Palmeiras", 1);
     n.set_edits(&edit_json(k, "\"oneway\":false,\"lf\":3,\"lb\":2")).unwrap();
     let seg = n.net.segs.iter().find(|s| s.key == k).unwrap();
     assert_eq!((seg.lf, seg.lb), (3, 2));
     assert!(n.net.lanes.len() > before.0, "mais faixas");
     assert!(n.net.conns.len() > before.1, "mais conexões candidatas");
-    assert!(n.meshes.asphalt.pos.len() > before.2 / 2);
+    assert!(n.tiles.vertex_count(|t| t.asphalt.pos.len()) > before.2 / 2);
     assert!(n.net.meshes_ok());
     // restrições OSM continuam valendo
     assert!(n.net.conns.iter().any(|c| c.state == CONN_BLOCKED));
@@ -321,4 +322,492 @@ fn removed_segments_disappear() {
     assert_eq!(n.net.segs.len(), segs0 - 1);
     assert!(n.net.segs.iter().all(|s| s.key != k));
     assert!(n.net.meshes_ok());
+}
+
+/// Cronometra cada estágio da (re)construção no mapa grande: `PERF_OSM=arquivo cargo test --release perf_stages -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn perf_stages() {
+    use std::time::Instant;
+    let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
+    let data = std::fs::read(path).unwrap();
+    let t = Instant::now();
+    let raw = crate::osm::parse(&data).unwrap();
+    eprintln!("parse            {:>7.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    let edits = Edits::default();
+    crate::net::stage_log().lock().unwrap().clear();
+    let t = Instant::now();
+    let base = crate::net::BaseCache::new(&raw).unwrap();
+    let mut net = Net::build(&raw, &edits, &base).unwrap();
+    eprintln!("grafo+faixas     {:>7.1} ms  ({} nós, {} trechos)", t.elapsed().as_secs_f64() * 1e3, net.nodes.len(), net.segs.len());
+    for (n, ms) in crate::net::stage_log().lock().unwrap().iter() {
+        eprintln!("   · {n:<34} {ms:>6.1} ms");
+    }
+    let t = Instant::now();
+    crate::conn::build_connections(&mut net, &raw, &edits);
+    eprintln!("conexões         {:>7.1} ms  ({} conexões)", t.elapsed().as_secs_f64() * 1e3, net.conns.len());
+    let t = Instant::now();
+    crate::conn::build_signals(&mut net, &edits);
+    eprintln!("semáforos        {:>7.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    let t = Instant::now();
+    let (ts, _) = crate::render::update_tiles(&net, None);
+    eprintln!("malhas (ladrilhos){:>6.1} ms  ({} tri asfalto, {} ladrilhos)", t.elapsed().as_secs_f64() * 1e3, ts.asphalt_tris(), ts.tiles.len());
+    // reconstrução por edição de faixas (caminho real de set_edits, sem parse)
+    let mut n = build_network_lazy_for_test(&data);
+    let k = n.net.segs[n.net.segs.len() / 2].key;
+    let json = format!(r#"{{"segments":[{{"way":{},"from":{},"to":{},"oneway":false,"lf":2,"lb":2}}]}}"#, k[0], k[1], k[2]);
+    let t = Instant::now();
+    n.set_edits(&json).unwrap();
+    eprintln!("set_edits total  {:>7.1} ms  ({} de {} ladrilhos sujos)", t.elapsed().as_secs_f64() * 1e3, n.delta.dirty.len(), n.tiles.tiles.len());
+}
+
+#[test]
+fn gravity_conserves_origin_totals_and_respects_forced_cells() {
+    let o = vec![100.0, 50.0, 0.0];
+    let a = vec![1.0, 2.0, 3.0];
+    let t = vec![vec![0.0, 5.0, 10.0], vec![5.0, 0.0, 5.0], vec![10.0, 5.0, 0.0]];
+    let none = vec![vec![None; 3]; 3];
+    let m = crate::demand::gravity(&o, &a, &t, 0.1, false, &none);
+    for i in 0..3 {
+        assert!((m[i].iter().sum::<f64>() - o[i]).abs() < 1e-9, "linha {i}");
+        assert_eq!(m[i][i], 0.0, "sem viagens intrazona");
+    }
+    // atração maior e mais perto => mais viagens
+    assert!(m[0][1] > m[0][2] * 0.5);
+    // célula fixa: valor exato e o resto se redistribui
+    let mut forced = none.clone();
+    forced[0][1] = Some(70.0);
+    let m2 = crate::demand::gravity(&o, &a, &t, 0.1, false, &forced);
+    assert_eq!(m2[0][1], 70.0);
+    assert!((m2[0].iter().sum::<f64>() - 100.0).abs() < 1e-9);
+    // intrazona
+    let m3 = crate::demand::gravity(&o, &a, &t, 0.1, true, &none);
+    assert!(m3[0][0] > 0.0);
+}
+
+#[test]
+fn polygon_helpers() {
+    let sq = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+    assert!(crate::demand::point_in_poly([5.0, 5.0], &sq));
+    assert!(!crate::demand::point_in_poly([15.0, 5.0], &sq));
+    let c = crate::demand::centroid(&sq);
+    assert!((c[0] - 5.0).abs() < 1e-9 && (c[1] - 5.0).abs() < 1e-9);
+    let prof: Vec<f64> = (0..24).map(|h| h as f64).collect();
+    assert!((crate::demand::profile_at(&prof, 3.5) - 3.5).abs() < 1e-9);
+    assert!((crate::demand::profile_at(&prof, 23.5) - 11.5).abs() < 1e-9, "interpola 23->0");
+    assert_eq!(crate::demand::profile_at(&[], 5.0), 1.0);
+}
+
+#[test]
+fn zones_resolve_on_sample() {
+    let n = sample();
+    // duas zonas: uma sobre a Avenida oeste e outra no leste; uma terceira vazia (longe de tudo)
+    let json = r#"{"zones":[
+        {"id":1,"gen":600,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+        {"id":2,"gen":300,"attr":2,"poly":[[150,-30],[420,-30],[420,30],[150,30]]},
+        {"id":3,"gen":100,"attr":1,"poly":[[5000,5000],[5100,5000],[5100,5100]]}],
+        "params":{"hour":8,"beta":0.05}}"#;
+    let payload: crate::demand::Payload = serde_json::from_str(json).unwrap();
+    let r = crate::demand::resolve(&n.net, &payload, &crate::demand::straight_line_minutes);
+    assert!(r.zones[0].nodes > 0 && r.zones[1].nodes > 0);
+    assert!(r.zones[2].warning.is_some() && r.zones[2].gen_now == 0.0);
+    let row0: f64 = r.matrix[0].iter().sum();
+    assert!((row0 - 600.0).abs() < 1e-6, "linha da zona 1 soma a geração (a zona vazia não atrai)");
+    assert_eq!(r.matrix[0][2], 0.0);
+}
+
+#[test]
+fn per_node_conns_match_eager_and_apply_user_edits() {
+    let n = sample();
+    // por nó == construção completa
+    for ni in 0..n.net.nodes.len() {
+        let one = crate::conn::node_conns(&n.net, ni, &n.raw, &n.restr, &n.edits);
+        let (a, b) = (n.net.conn_off[ni] as usize, n.net.conn_off[ni + 1] as usize);
+        assert_eq!(one.len(), b - a, "nó {ni}");
+        for (x, y) in one.iter().zip(&n.net.conns[a..b]) {
+            assert_eq!((x.from_lane, x.to_lane, x.kind, x.state), (y.from_lane, y.to_lane, y.kind, y.state));
+        }
+    }
+    // edição de conversão por chave estável: liga uma candidata e remove uma padrão
+    let ni = (0..n.net.nodes.len()).find(|&i| n.net.nodes[i].signal && n.net.nodes[i].ends.len() == 4).unwrap();
+    let list = crate::conn::node_conns(&n.net, ni, &n.raw, &n.restr, &n.edits);
+    let absent = list.iter().find(|c| c.state == CONN_ABSENT).unwrap();
+    let allowed = list.iter().find(|c| c.state == CONN_ALLOWED).unwrap();
+    let k1 = crate::conn::conn_key(&n.net, ni as u32, absent.from_lane, absent.to_lane);
+    let k2 = crate::conn::conn_key(&n.net, ni as u32, allowed.from_lane, allowed.to_lane);
+    let mut m = n;
+    m.set_edits(&format!(r#"{{"connections":{{"{k1}":1,"{k2}":2}}}}"#)).unwrap();
+    let ni2 = (0..m.net.nodes.len()).find(|&i| m.net.nodes[i].osm_id == m.net.nodes[ni].osm_id).unwrap();
+    let after = crate::conn::node_conns(&m.net, ni2, &m.raw, &m.restr, &m.edits);
+    let st = |a: u32, b: u32| after.iter().find(|c| c.from_lane == a && c.to_lane == b).unwrap().state;
+    assert_eq!(st(absent.from_lane, absent.to_lane), CONN_ALLOWED);
+    assert_eq!(st(allowed.from_lane, allowed.to_lane), CONN_ABSENT);
+}
+
+fn same_tiles(a: &crate::render::TileSet, b: &crate::render::TileSet) -> Result<(), String> {
+    let mut ka: Vec<_> = a.tiles.keys().copied().collect();
+    let mut kb: Vec<_> = b.tiles.keys().copied().collect();
+    ka.sort();
+    kb.sort();
+    if ka != kb {
+        return Err(format!("ladrilhos diferentes: {ka:?} vs {kb:?}"));
+    }
+    for k in ka {
+        let (x, y) = (&a.tiles[&k], &b.tiles[&k]);
+        let pairs: [(&str, bool); 7] = [
+            ("asphalt", x.asphalt.pos == y.asphalt.pos && x.asphalt.idx == y.asphalt.idx),
+            ("bus", x.bus.pos == y.bus.pos && x.bus.idx == y.bus.idx),
+            ("white", x.white.pos == y.white.pos && x.white.idx == y.white.idx),
+            ("yellow", x.yellow.pos == y.yellow.pos && x.yellow.idx == y.yellow.idx),
+            ("shape", x.shape == y.shape),
+            ("minor", x.minor == y.minor),
+            ("major", x.major == y.major),
+        ];
+        for (name, ok) in pairs {
+            if !ok {
+                return Err(format!("ladrilho {k:#x}: {name} difere"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn incremental_tiles_equal_full_rebuild_after_edit_sequence() {
+    let mut n = sample();
+    let k = key_of(&n, "Rua Central", 3);
+    let steps = [
+        format!(r#"{{"segments":[{{"way":{},"from":{},"to":{},"oneway":false,"lf":4,"lb":2}}]}}"#, k[0], k[1], k[2]),
+        r#"{"roads":[{"id":900000000000001,"hw":"secondary","name":"A","oneway":false,"lf":2,"lb":2,"pts":[{"x":-50,"y":-200},{"x":-50,"y":200}]}]}"#.to_string(),
+        r#"{"roads":[{"id":900000000000001,"hw":"secondary","name":"A","oneway":false,"lf":2,"lb":2,"pts":[{"x":-50,"y":-200},{"x":-50,"y":200}]}],"signals":[{"node":1002,"enabled":true}]}"#.to_string(),
+        r#"{"removed":[[5000,1000,1013]]}"#.to_string(),
+        "{}".to_string(),
+    ];
+    for (i, json) in steps.iter().enumerate() {
+        n.set_edits(json).unwrap_or_else(|e| panic!("passo {i}: {e}"));
+        let (full, _) = crate::render::update_tiles(&n.net, None);
+        same_tiles(&n.tiles, &full).unwrap_or_else(|e| panic!("passo {i}: {e}"));
+    }
+}
+
+#[test]
+fn local_edit_dirties_only_nearby_tiles() {
+    // dois blocos do mesmo mapa a ~3 km: editar um não pode sujar o ladrilho do outro
+    let mut n = sample();
+    let before = n.delta.dirty.len();
+    assert!(before >= 1, "importação gera todos os ladrilhos");
+    n.clear_delta();
+    let k = key_of(&n, "Rua do Parque", 1);
+    n.set_edits(&format!(r#"{{"segments":[{{"way":{},"from":{},"to":{},"oneway":false,"lf":2,"lb":1}}]}}"#, k[0], k[1], k[2])).unwrap();
+    assert!(!n.delta.dirty.is_empty() && n.delta.dirty.len() <= n.tiles.tiles.len());
+    // sem mudanças, nada fica sujo
+    n.clear_delta();
+    n.set_edits(&format!(r#"{{"segments":[{{"way":{},"from":{},"to":{},"oneway":false,"lf":2,"lb":1}}]}}"#, k[0], k[1], k[2])).unwrap();
+    assert!(n.delta.dirty.is_empty(), "reaplicar as mesmas edições não suja ladrilhos: {:?}", n.delta.dirty);
+}
+
+fn build_network_lazy_for_test(data: &[u8]) -> Network {
+    crate::build_network_lazy(data).unwrap()
+}
+
+// ------------------------------------------------------------------ simulação
+
+const SIM_ZONES: &str = r#"{"zones":[
+  {"id":1,"gen":900,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+  {"id":2,"gen":900,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]}],
+  "params":{"seed":7,"hour":8,"busShare":5,"beta":0.02}}"#;
+
+fn sim_net() -> Network {
+    let mut n = sample();
+    n.start_sim(SIM_ZONES).expect("simulação deve iniciar");
+    n
+}
+
+fn run(n: &mut Network, seconds: f64) {
+    let ticks = (seconds / 0.2) as u32;
+    for _ in 0..ticks {
+        let s = n.sim.as_mut().unwrap();
+        s.step(&n.net);
+    }
+}
+
+#[test]
+fn sim_spawns_moves_and_finishes_trips() {
+    let mut n = sim_net();
+    run(&mut n, 600.0);
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.spawned > 40, "geração: {st:?}");
+    assert!(st.finished > 10, "viagens concluídas: {st:?}");
+    assert_eq!(st.red_runs, 0, "ninguém atravessa no vermelho: {st:?}");
+    // conservação
+    let alive = n.sim.as_ref().unwrap().n_alive as u64;
+    assert_eq!(st.spawned, st.finished + st.lost + alive);
+    assert!(st.travel_sum / st.finished as f64 > 20.0, "tempo de viagem plausível");
+}
+
+#[test]
+fn sim_vehicles_never_overlap() {
+    let mut n = sim_net();
+    for _ in 0..(900.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for list in s.edge_lists() {
+            for w in list.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+            }
+        }
+        for (e, sv, v, _) in s.debug_vehicles() {
+            assert!(v >= 0.0 && sv.is_finite() && v.is_finite(), "estado inválido na aresta {e}");
+        }
+    }
+}
+
+#[test]
+fn sim_is_deterministic() {
+    let snap = |seed: u64| {
+        let mut n = sample();
+        n.start_sim(&SIM_ZONES.replace("\"seed\":7", &format!("\"seed\":{seed}"))).unwrap();
+        run(&mut n, 300.0);
+        let mut v = Vec::new();
+        n.sim.as_ref().unwrap().snapshot(&n.net, &mut v);
+        (v, n.sim.as_ref().unwrap().stats.clone().spawned)
+    };
+    let a = snap(7);
+    let b = snap(7);
+    assert_eq!(a, b, "mesma semente => mesmo resultado");
+    let c = snap(8);
+    assert_ne!(a.0, c.0, "semente diferente => resultado diferente");
+}
+
+#[test]
+fn sim_respects_signals_in_red() {
+    let mut n = sim_net();
+    // mede quantos veículos cruzaram com o sinal vermelho há > 1,5 s: deve ser zero em 15 min
+    run(&mut n, 900.0);
+    assert_eq!(n.sim.as_ref().unwrap().stats.red_runs, 0);
+    // houve interação real com semáforos (veículos esperaram)
+    assert!(n.sim.as_ref().unwrap().stats.spawned > 100);
+}
+
+#[test]
+#[ignore]
+fn sim_stress_report() {
+    let zones = r#"{"zones":[
+      {"id":1,"gen":2500,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+      {"id":2,"gen":2500,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]},
+      {"id":3,"gen":1500,"attr":2,"poly":[[-60,-320],[60,-320],[60,-250],[-60,-250]]},
+      {"id":4,"gen":1500,"attr":2,"poly":[[-60,250],[60,250],[60,320],[-60,320]]}],
+      "params":{"seed":3,"hour":8,"busShare":4,"beta":0.01,"intrazone":false}}"#;
+    let mut n = sample();
+    n.start_sim(zones).unwrap();
+    let mut max_alive = 0;
+    let mut min_gap = f32::MAX;
+    for t in 0..(1800.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        max_alive = max_alive.max(s.n_alive);
+        if t % 25 == 0 {
+            for list in s.edge_lists() {
+                for w in list.windows(2) {
+                    let (sa, _) = s.vehicle_s(w[0]);
+                    let (sb, lb) = s.vehicle_s(w[1]);
+                    min_gap = min_gap.min(sb - lb - sa);
+                }
+            }
+        }
+        if t % 1500 == 0 {
+            eprintln!("t={:>5.0}s vivos={:>4} {:?}", s.time, s.n_alive, s.stats);
+        }
+    }
+    eprintln!("max vivos={max_alive}  menor folga entre veículos={min_gap:.2} m");
+    assert!(min_gap > -0.2);
+}
+
+/// `PERF_OSM=arquivo cargo test --release perf_sim -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn perf_sim() {
+    use std::time::Instant;
+    let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
+    let data = std::fs::read(path).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    let t = Instant::now();
+    n.ensure_conns();
+    eprintln!("ensure_conns {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let zones = [
+        q(1, -6000.0, -6000.0, -300.0, -300.0, 30000.0),
+        q(2, 300.0, -6000.0, 6000.0, -300.0, 30000.0),
+        q(3, -6000.0, 300.0, -300.0, 6000.0, 30000.0),
+        q(4, 300.0, 300.0, 6000.0, 6000.0, 30000.0),
+    ]
+    .join(",");
+    let json = format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":3,"beta":0.02}}}}"#);
+    let t = Instant::now();
+    n.start_sim(&json).unwrap();
+    eprintln!("Sim::new {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let mut worst = 0.0f64;
+    for block in 0..12 {
+        if block == 11 {
+            n.sim.as_mut().unwrap().prof = [0.0; 7];
+        }
+        let t = Instant::now();
+        let mut peak = 0.0f64;
+        for _ in 0..250 {
+            let t1 = Instant::now();
+            n.sim.as_mut().unwrap().step(&n.net);
+            peak = peak.max(t1.elapsed().as_secs_f64());
+        }
+        let s = n.sim.as_ref().unwrap();
+        worst = worst.max(peak);
+        eprintln!(
+            "min {:>2}: vivos={:>6} gerados={:>6} concl.={:>6} fila={:>6}  passo médio {:>6.2} ms  pior {:>6.2} ms",
+            block + 1,
+            s.n_alive,
+            s.stats.spawned,
+            s.stats.finished,
+            s.stats.queued,
+            t.elapsed().as_secs_f64() * 1e3 / 250.0,
+            peak * 1e3
+        );
+    }
+    let p = n.sim.as_ref().unwrap().prof;
+    let names = ["sinais", "geração", "aceleração(líder+junção)", "integração", "folgas#1", "mudança de aresta+folgas#2", "troca de faixa"];
+    for (k, nme) in names.iter().enumerate() {
+        eprintln!("   fase {nme:<28} {:>6.2} ms/passo", p[k] / 250.0);
+    }
+}
+
+
+#[test]
+fn sim_metrics_report_series_and_heat() {
+    let mut n = sim_net();
+    run(&mut n, 720.0);
+    let s = n.sim.as_ref().unwrap();
+    let nd = n.net.segs.len() * 2;
+    // série: um ponto por minuto
+    assert!(s.metrics.series.len() >= 10, "série: {}", s.metrics.series.len());
+    assert_eq!(s.metrics.hist_speed.len(), s.metrics.series.len());
+    assert!(s.metrics.hist_speed.iter().all(|r| r.len() == nd));
+    // mapa de calor
+    let heat = s.metrics.heat(0);
+    assert_eq!(heat.len(), nd);
+    assert!(heat.iter().any(|&h| h != 255 && h <= 254), "algum trecho com dados");
+    // relatório coerente
+    let r = s.report(&n.net);
+    assert!(r["trips"].as_u64().unwrap() > 10);
+    assert!(r["meanTravel"].as_f64().unwrap() > 20.0);
+    assert!(r["meanDelay"].as_f64().unwrap() >= 0.0);
+    assert!(r["meanDelay"].as_f64().unwrap() <= r["meanTravel"].as_f64().unwrap());
+    assert!(r["od"].as_array().unwrap().len() >= 1);
+    // com 3 semáforos e fluxo na avenida há atraso medido em cruzamentos
+    let total_delay: f64 = r["junctions"].as_array().unwrap().iter().map(|j| j["delayVehH"].as_f64().unwrap()).sum();
+    assert!(total_delay >= 0.0);
+    let ratio = s.run_ratio(&n.net);
+    assert_eq!(ratio.len(), nd);
+}
+
+/// Cenário com gargalo conhecido: reduzir a avenida de 2+2 para 1+1 deve piorar atraso/tempo de viagem
+/// (mesma semente e demanda). É a base da comparação A/B.
+#[test]
+fn sim_ab_bottleneck_makes_things_worse() {
+    let zones = r#"{"zones":[
+      {"id":1,"gen":1800,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+      {"id":2,"gen":1800,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]}],
+      "params":{"seed":5,"hour":8,"busShare":0,"beta":0.0}}"#;
+    let run_with = |edit: Option<&str>| {
+        let mut n = sample();
+        if let Some(e) = edit {
+            n.set_edits(e).unwrap();
+            n.ensure_conns();
+        }
+        n.start_sim(zones).unwrap();
+        run(&mut n, 900.0);
+        let r = n.sim.as_ref().unwrap().report(&n.net);
+        (r["totalDelayAllVehH"].as_f64().unwrap(), r["meanSpeedKmh"].as_f64().unwrap(), r["trips"].as_u64().unwrap())
+    };
+    let base = run_with(None);
+    // estreita todos os trechos da Avenida Brasil para 1+1
+    let n = sample();
+    let idx = n.net.names.iter().position(|x| x == "Avenida Brasil").unwrap() as u32;
+    let segs: Vec<String> = n
+        .net
+        .segs
+        .iter()
+        .filter(|s| s.name == idx)
+        .map(|s| format!(r#"{{"way":{},"from":{},"to":{},"oneway":false,"lf":1,"lb":1}}"#, s.key[0], s.key[1], s.key[2]))
+        .collect();
+    let narrow = run_with(Some(&format!(r#"{{"segments":[{}]}}"#, segs.join(","))));
+    eprintln!("base {base:?}  estreita {narrow:?}");
+    assert!(narrow.0 > base.0 * 1.2, "atraso total (incluindo quem ficou preso) sobe com o gargalo: {base:?} vs {narrow:?}");
+    assert!(narrow.1 < base.1, "velocidade média cai com o gargalo");
+    assert!(narrow.2 < base.2, "menos viagens concluídas");
+}
+
+#[test]
+#[ignore]
+fn sim_stuck_diag() {
+    let zones = r#"{"zones":[
+      {"id":1,"gen":1800,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+      {"id":2,"gen":1800,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]}],
+      "params":{"seed":1,"hour":8,"busShare":0,"beta":0,"intrazone":false}}"#;
+    let mut n = sample();
+    n.start_sim(zones).unwrap();
+    for _ in 0..(600.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+    }
+    let net = &n.net;
+    let s = n.sim.as_mut().unwrap();
+    let mut hist = std::collections::BTreeMap::new();
+    for _ in 0..300 {
+        for _ in 0..5 { s.step(net); }
+        for l in s.stuck_report(net, 15.0) {
+            if l.starts_with("veh") {
+                let st = l.split("end_state=").nth(1).unwrap().chars().next().unwrap();
+                let why = l.split("why=").nth(1).unwrap().split(' ').next().unwrap().to_string();
+                let sg = l.split(" seg ").nth(1).unwrap().split(' ').next().unwrap().to_string();
+                *hist.entry((sg, st, why)).or_insert(0u32) += 1;
+            }
+        }
+    }
+    let mut same = 0; let mut total = 0;
+    for i in 0..2000 { if let Some((o, d, _, _)) = s.od_of(i) { total += 1; if o == d { same += 1; } } }
+    eprintln!("origem==destino: {same}/{total}");
+    eprintln!("HIST (seg, estado, motivo) -> amostras: {:?}", hist);
+    eprintln!("vivos {} {:?}", s.n_alive, s.stats);
+    let mut per = std::collections::BTreeMap::new();
+    for e in 0..s.lane_count() {
+        for &k in &s.edge_lists()[e] {
+            let (_, _) = s.vehicle_s(k);
+            let ent = per.entry(e).or_insert((0, 0.0f32));
+            ent.0 += 1;
+        }
+    }
+    for (e, (c, _)) in &per { if *c > 6 { eprintln!("lane {} seg {} n={}", e, net.lanes[*e].seg, c); } }
+    for l in s.stuck_report(net, 30.0) {
+        eprintln!("{l}");
+    }
+}
+
+#[test]
+fn signal_can_be_placed_mid_block() {
+    let mut n = sample();
+    let longest = (0..n.net.segs.len()).max_by(|&a, &b| n.net.segs[a].poly.length().partial_cmp(&n.net.segs[b].poly.length()).unwrap()).unwrap();
+    let (way, mid) = {
+        let s = &n.net.segs[longest];
+        (s.way_id, s.poly.at(s.poly.length() / 2.0).0)
+    };
+    let (segs0, sigs0) = (n.net.segs.len(), n.net.signals.len());
+    let json = format!(r#"{{"roads":[{{"id":900000000000001,"hw":"mark","pts":[{{"x":{},"y":{},"way":{}}}]}}]}}"#, mid[0], mid[1], way);
+    n.set_edits(&json).unwrap();
+    assert_eq!(n.net.segs.len(), segs0 + 1, "o trecho deve ser dividido no ponto");
+    assert_eq!(n.net.signals.len(), sigs0 + 1, "o nó novo deve ter semáforo");
+    let node = n.net.nodes.iter().position(|nd| nd.signal && nd.ends.len() == 2 && ((nd.pos[0] - mid[0]).abs() < 1.0 && (nd.pos[1] - mid[1]).abs() < 1.0)).expect("nó do semáforo");
+    let sg = n.net.signals.iter().find(|s| s.node as usize == node).unwrap();
+    assert_eq!(sg.phases.len(), 2, "fase de travessia de pedestres");
+    // remover o ponto desfaz tudo
+    n.set_edits("{}").unwrap();
+    assert_eq!(n.net.segs.len(), segs0);
 }

@@ -1,4 +1,4 @@
-import type { NetworkData } from './types'
+import type { NetworkData, NodeConns } from './types'
 import { CONN_ABSENT, CONN_ALLOWED, CONN_STRIDE, LANE_STRIDE, SEG_STRIDE } from './types'
 
 export const HIGHWAY_NAMES = ['Autoestrada', 'Via expressa', 'Primária', 'Secundária', 'Terciária', 'Local', 'Residencial', 'Zona calma', 'Serviço', 'Corredor de ônibus']
@@ -30,23 +30,22 @@ export interface NodeInfo {
   approaches: ApproachInfo[]
 }
 
-export function describeNode(d: NetworkData, node: number): NodeInfo {
+export function describeNode(d: NetworkData, node: number, nc: NodeConns | null): NodeInfo {
   const flags = d.nodeInfo[node * 2 + 1]
-  const a = d.connOff[node]
-  const b = d.connOff[node + 1]
+  const n = nc?.n ?? 0
   const byLane = new Map<number, { kind: number; allowed: boolean; conns: number[] }[]>()
   let allowed = 0
   let blocked = 0
-  for (let c = a; c < b; c++) {
+  for (let c = 0; c < n; c++) {
     const o = c * CONN_STRIDE
-    const lane = d.connU32[o + 1]
-    const st = d.connU32[o + 4]
+    const lane = nc!.u32[o + 1]
+    const st = nc!.u32[o + 4]
     if (st === CONN_ABSENT) continue
     const ok = st === CONN_ALLOWED
     allowed += ok ? 1 : 0
     blocked += ok ? 0 : 1
     const arr = byLane.get(lane) ?? []
-    const kind = d.connU32[o + 3]
+    const kind = nc!.u32[o + 3]
     const ex = arr.find((k) => k.kind === kind)
     if (ex) {
       ex.conns.push(c)

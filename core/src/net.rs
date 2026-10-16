@@ -100,6 +100,20 @@ pub struct Edits {
     pub roads: Vec<NewRoad>,
     /// trechos demolidos
     pub removed: std::collections::HashSet<SegKey>,
+    /// conversões editadas, agrupadas pelo id OSM do nó: (chave de `conn_key`, estado)
+    pub conns: HashMap<i64, Vec<(String, u8)>>,
+}
+
+impl Edits {
+    /// Agrupa um mapa chave -> estado (`nóOsm|faixa>faixa`) por nó.
+    pub fn set_conns(&mut self, m: HashMap<String, u8>) {
+        self.conns.clear();
+        for (k, v) in m {
+            if let Some(osm) = k.split('|').next().and_then(|s| s.parse::<i64>().ok()) {
+                self.conns.entry(osm).or_default().push((k, v));
+            }
+        }
+    }
 }
 
 /// Id determinístico de um nó criado pelo editor, a partir da posição (resolução de 10 cm).
@@ -116,6 +130,108 @@ struct W<'a> {
     hw: u8,
     link: bool,
     pts: Vec<(i64, V2)>,
+    attrs: std::borrow::Cow<'a, Attrs>,
+}
+
+/// Via do OSM já filtrada, projetada e com atributos interpretados: independe das edições, então é
+/// calculada uma vez e reaproveitada em toda reconstrução.
+pub struct BaseWay {
+    pub raw_idx: usize,
+    pub hw: u8,
+    pub link: bool,
+    pub pts: Vec<(i64, V2)>,
+    pub attrs: Attrs,
+    /// por vértice: é nó de quebra segundo só o OSM (válido enquanto não há vias novas)
+    pub split_flags: Vec<bool>,
+}
+
+pub struct BaseCache {
+    pub ways: Vec<BaseWay>,
+    /// nós de quebra só pelo OSM (usados 2+ vezes, pontas, semáforos, travessias), ordenados
+    pub split: Vec<i64>,
+}
+
+impl BaseCache {
+    pub fn new(raw: &RawOsm) -> Result<BaseCache, String> {
+        // 1. vias aceitas, com coordenadas resolvidas
+        let mut base: Vec<(usize, u8, bool, Vec<(i64, i32, i32)>)> = Vec::new();
+        for (i, w) in raw.ways.iter().enumerate() {
+            let t = Tags(&w.tags);
+            let Some((hw, link)) = t.get("highway").and_then(parse_highway) else { continue };
+            if t.get("area") == Some("yes") {
+                continue;
+            }
+            if hw == HW_SERVICE && matches!(t.get("service"), Some("driveway") | Some("parking_aisle")) {
+                continue;
+            }
+            if matches!(t.get("access"), Some("no") | Some("private")) && hw == HW_SERVICE {
+                continue;
+            }
+            let pts: Vec<(i64, i32, i32)> = w.refs.iter().filter_map(|&r| raw.coord(r).map(|(la, lo)| (r, la, lo))).collect();
+            if pts.len() >= 2 {
+                base.push((i, hw, link, pts));
+            }
+        }
+        if base.is_empty() {
+            return Err("Nenhuma via veicular encontrada no arquivo".into());
+        }
+        // 2. origem da projeção (só das vias do OSM: estável diante de edições)
+        let (mut la0, mut la1, mut lo0, mut lo1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for w in &base {
+            for p in &w.3 {
+                la0 = la0.min(p.1);
+                la1 = la1.max(p.1);
+                lo0 = lo0.min(p.2);
+                lo1 = lo1.max(p.2);
+            }
+        }
+        let lat_c = (la0 as f64 + la1 as f64) / 2.0 * 1e-7;
+        let lon_c = (lo0 as f64 + lo1 as f64) / 2.0 * 1e-7;
+        let kx = M_PER_DEG * lat_c.to_radians().cos();
+        let proj = |la: i32, lo: i32| -> V2 { [(lo as f64 * 1e-7 - lon_c) * kx, -(la as f64 * 1e-7 - lat_c) * M_PER_DEG] };
+        let mut ways: Vec<BaseWay> = base
+            .into_iter()
+            .map(|(raw_idx, hw, link, pts)| {
+                let attrs = way_attrs(&Tags(&raw.ways[raw_idx].tags), hw, link);
+                BaseWay { raw_idx, hw, link, pts: pts.iter().map(|p| (p.0, proj(p.1, p.2))).collect(), attrs, split_flags: Vec::new() }
+            })
+            .collect();
+        let split = split_nodes(ways.iter().map(|w| &w.pts[..]), raw, &Default::default());
+        for w in ways.iter_mut() {
+            let last = w.pts.len() - 1;
+            w.split_flags = w.pts.iter().enumerate().map(|(k, p)| k == 0 || k == last || split.binary_search(&p.0).is_ok()).collect();
+        }
+        Ok(BaseCache { ways, split })
+    }
+}
+
+/// Nós de quebra: usados 2+ vezes, pontas de via, semáforos e travessias.
+fn split_nodes<'a>(ways: impl Iterator<Item = &'a [(i64, V2)]> + Clone, raw: &RawOsm, forced: &std::collections::HashSet<i64>) -> Vec<i64> {
+    let mut all: Vec<i64> = Vec::new();
+    for w in ways.clone() {
+        all.extend(w.iter().map(|p| p.0));
+    }
+    all.sort_unstable();
+    let mut split: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < all.len() {
+        let mut j = i + 1;
+        while j < all.len() && all[j] == all[i] {
+            j += 1;
+        }
+        let id = all[i];
+        if j - i >= 2 || raw.signals.contains(&id) || raw.crossings.contains(&id) || forced.contains(&id) {
+            split.push(id);
+        }
+        i = j;
+    }
+    for w in ways {
+        split.push(w[0].0);
+        split.push(w[w.len() - 1].0);
+    }
+    split.sort_unstable();
+    split.dedup();
+    split
 }
 
 fn seg_cross(a: V2, b: V2, c: V2, d: V2) -> Option<(f64, f64)> {
@@ -282,6 +398,8 @@ pub struct Conn {
     pub to_lane: u32,
     pub kind: u8,
     pub state: u8,
+    /// estado antes das edições do usuário (padrão + restrições OSM)
+    pub base: u8,
     pub curve: [f32; 8],
 }
 
@@ -361,7 +479,8 @@ where
     out
 }
 
-struct Attrs {
+#[derive(Clone)]
+pub struct Attrs {
     oneway: i8,
     roundabout: bool,
     lf: u8,
@@ -374,7 +493,7 @@ struct Attrs {
     turn_b: Vec<u8>,
 }
 
-fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
+pub fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
     let roundabout = matches!(t.get("junction"), Some("roundabout") | Some("circular"));
     let oneway = match t.get("oneway") {
         Some("yes") | Some("true") | Some("1") => 1,
@@ -461,57 +580,43 @@ fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
     Attrs { oneway, roundabout, lf, lb, w, maxspeed, bus_f, bus_b, turn_f, turn_b }
 }
 
+/// Cronometragem de estágios (só nativo, para o teste de desempenho; no wasm não faz nada).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stage_log() -> &'static std::sync::Mutex<Vec<(&'static str, f64)>> {
+    static LOG: std::sync::OnceLock<std::sync::Mutex<Vec<(&'static str, f64)>>> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+macro_rules! stage {
+    ($t:ident, $name:expr) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            stage_log().lock().unwrap().push(($name, $t.elapsed().as_secs_f64() * 1e3));
+            $t = std::time::Instant::now();
+        }
+    };
+}
+
 const M_PER_DEG: f64 = 111_319.490_793_273_57;
 
 impl Net {
-    pub fn build(raw: &RawOsm, edits: &Edits) -> Result<Net, String> {
-        // 1. vias aceitas, com coordenadas resolvidas
-        let mut base: Vec<(&crate::osm::RawWay, u8, bool, Vec<(i64, i32, i32)>)> = Vec::new();
-        for w in &raw.ways {
-            let t = Tags(&w.tags);
-            let Some((hw, link)) = t.get("highway").and_then(parse_highway) else { continue };
-            if t.get("area") == Some("yes") {
-                continue;
-            }
-            if hw == HW_SERVICE && matches!(t.get("service"), Some("driveway") | Some("parking_aisle")) {
-                continue;
-            }
-            if matches!(t.get("access"), Some("no") | Some("private")) && hw == HW_SERVICE {
-                continue;
-            }
-            let pts: Vec<(i64, i32, i32)> =
-                w.refs.iter().filter_map(|&r| raw.coord(r).map(|(la, lo)| (r, la, lo))).collect();
-            if pts.len() >= 2 {
-                base.push((w, hw, link, pts));
-            }
-        }
-        if base.is_empty() {
-            return Err("Nenhuma via veicular encontrada no arquivo".into());
-        }
-
-        // 2. origem da projeção (só das vias do OSM: estável diante de edições)
-        let (mut la0, mut la1, mut lo0, mut lo1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-        for w in &base {
-            for p in &w.3 {
-                la0 = la0.min(p.1);
-                la1 = la1.max(p.1);
-                lo0 = lo0.min(p.2);
-                lo1 = lo1.max(p.2);
-            }
-        }
-        let lat_c = (la0 as f64 + la1 as f64) / 2.0 * 1e-7;
-        let lon_c = (lo0 as f64 + lo1 as f64) / 2.0 * 1e-7;
-        let kx = M_PER_DEG * lat_c.to_radians().cos();
-        let proj = |la: i32, lo: i32| -> V2 { [(lo as f64 * 1e-7 - lon_c) * kx, -(la as f64 * 1e-7 - lat_c) * M_PER_DEG] };
-
+    pub fn build(raw: &RawOsm, edits: &Edits, base: &BaseCache) -> Result<Net, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut _t = std::time::Instant::now();
         let mut ways: Vec<W> = base
+            .ways
             .iter()
-            .map(|(w, hw, link, pts)| W { id: w.id, tags: &w.tags, hw: *hw, link: *link, pts: pts.iter().map(|p| (p.0, proj(p.1, p.2))).collect() })
+            .map(|b| {
+                let w = &raw.ways[b.raw_idx];
+                W { id: w.id, tags: &w.tags, hw: b.hw, link: b.link, pts: b.pts.clone(), attrs: std::borrow::Cow::Borrowed(&b.attrs) }
+            })
             .collect();
         let base_len = ways.len();
+        stage!(_t, "1+2 vias do OSM (cache)");
 
         // 2b. vias criadas pelo usuário: encaixes, divisões e cruzamentos automáticos
         let road_tags: Vec<Vec<(String, String)>> = edits.roads.iter().map(road_tags).collect();
+        // semáforos "em trecho": pontos (hw = "mark") onde se força um nó no corpo de uma via existente
+        let mut marks: std::collections::HashSet<i64> = std::collections::HashSet::new();
         if !edits.roads.is_empty() {
             let mut known: HashMap<i64, V2> = HashMap::new();
             for w in &ways {
@@ -544,7 +649,8 @@ impl Net {
                     }
                 }
                 if pts.len() >= 2 {
-                    ways.push(W { id: r.id, tags: &road_tags[ri], hw, link, pts });
+                    let attrs = way_attrs(&Tags(&road_tags[ri]), hw, link);
+                    ways.push(W { id: r.id, tags: &road_tags[ri], hw, link, pts, attrs: std::borrow::Cow::Owned(attrs) });
                 }
             }
 
@@ -602,45 +708,47 @@ impl Net {
             }
         }
 
-        // 3. nós de quebra: usados 2+ vezes, pontas, semáforos, travessias
-        let mut all: Vec<i64> = Vec::new();
-        for w in &ways {
-            all.extend(w.pts.iter().map(|p| p.0));
-        }
-        all.sort_unstable();
-        let mut split: Vec<i64> = Vec::new();
-        let mut i = 0;
-        while i < all.len() {
-            let mut j = i + 1;
-            while j < all.len() && all[j] == all[i] {
-                j += 1;
+        for r in edits.roads.iter().filter(|r| r.hw == "mark") {
+            let Some(pt) = r.pts.first() else { continue };
+            let pos = [pt.x, pt.y];
+            let wi = match pt.way {
+                Some(wid) => ways.iter().position(|w| w.id == wid),
+                None => None,
+            };
+            if let Some(wi) = wi {
+                // só vale perto da via (o clique pode ter ficado obsoleto depois de uma edição)
+                if let Some((_, _, _, d)) = nearest_on(&ways[wi], pos) {
+                    if d < 3.0 {
+                        if let Some((id, _)) = insert_on(&mut ways[wi], pos) {
+                            marks.insert(id);
+                        }
+                    }
+                }
             }
-            let id = all[i];
-            if j - i >= 2 || raw.signals.contains(&id) || raw.crossings.contains(&id) {
-                split.push(id);
-            }
-            i = j;
         }
-        for w in &ways {
-            split.push(w.pts[0].0);
-            split.push(w.pts[w.pts.len() - 1].0);
-        }
-        split.sort_unstable();
-        split.dedup();
-
+        stage!(_t, "2b vias novas");
+        // 3. nós de quebra: sem vias novas, o conjunto do OSM é reaproveitado
+        let split: Vec<i64> = if edits.roads.is_empty() { base.split.clone() } else { split_nodes(ways.iter().map(|w| &w.pts[..]), raw, &marks) };
+        stage!(_t, "3 nós de quebra (ordenação)");
         let mut net = Net::default();
         let mut node_pos: Vec<Option<V2>> = vec![None; split.len()];
         let mut names: HashMap<String, u32> = HashMap::new();
 
         // 4. segmentos
-        for w in &ways {
+        let use_flags = edits.roads.is_empty();
+        for (wi, w) in ways.iter().enumerate() {
             let t = Tags(w.tags);
-            let a = way_attrs(&t, w.hw, w.link);
+            let a: &Attrs = &w.attrs;
             let name = match t.get("name") {
-                Some(n) => *names.entry(n.to_string()).or_insert_with(|| {
-                    net.names.push(n.to_string());
-                    (net.names.len() - 1) as u32
-                }),
+                Some(n) => match names.get(n) {
+                    Some(&i) => i,
+                    None => {
+                        net.names.push(n.to_string());
+                        let i = (net.names.len() - 1) as u32;
+                        names.insert(n.to_string(), i);
+                        i
+                    }
+                },
                 None => NO_NAME,
             };
             let mut pts: Vec<(i64, V2)> = w.pts.clone();
@@ -648,7 +756,19 @@ impl Net {
                 pts.reverse();
             }
             let last = pts.len() - 1;
-            let is_split = |k: usize, id: i64| k == 0 || k == last || split.binary_search(&id).is_ok();
+            let flags: Option<Vec<bool>> = if use_flags && wi < base_len {
+                let mut f = base.ways[wi].split_flags.clone();
+                if a.oneway < 0 {
+                    f.reverse();
+                }
+                Some(f)
+            } else {
+                None
+            };
+            let is_split = |k: usize, id: i64| match &flags {
+                Some(f) => f[k],
+                None => k == 0 || k == last || split.binary_search(&id).is_ok(),
+            };
             let mut start = 0usize;
             for k in 1..pts.len() {
                 if !is_split(k, pts[k].0) {
@@ -740,6 +860,7 @@ impl Net {
             }
         }
 
+        stage!(_t, "4 segmentos (attrs, polilinhas)");
         // 5. nós (compactando os sem segmento)
         let mut remap = vec![u32::MAX; split.len()];
         for s in &net.segs {
@@ -754,7 +875,7 @@ impl Net {
             net.nodes.push(Node {
                 pos: node_pos[i].unwrap_or([0.0, 0.0]),
                 osm_id: *id,
-                signal: edits.sigs.get(id).map_or(raw.signals.contains(id), |e| e.enabled),
+                signal: edits.sigs.get(id).map_or(raw.signals.contains(id) || marks.contains(id), |e| e.enabled),
                 crossing: raw.crossings.contains(id),
                 ends: Vec::new(),
             });
@@ -766,9 +887,13 @@ impl Net {
             net.nodes[s.to as usize].ends.push(si as u32 * 2 + 1);
         }
 
+        stage!(_t, "5 nós");
         net.sort_ends();
+        stage!(_t, "6 ordenar pontas");
         net.compute_cuts();
+        stage!(_t, "7 recuos");
         net.build_lanes();
+        stage!(_t, "8 faixas");
         net.bounds = net.compute_bounds();
         Ok(net)
     }

@@ -101,113 +101,137 @@ fn bezier(p0: [f32; 2], d0: [f32; 2], p3: [f32; 2], d3: [f32; 2], kind: u8) -> [
     [p0[0], p0[1], p0[0] + d0[0] * k, p0[1] + d0[1] * k, p3[0] - d3[0] * k, p3[1] - d3[1] * k, p3[0], p3[1]]
 }
 
-pub fn build_connections(net: &mut Net, raw: &RawOsm) {
-    let mut conns: Vec<Conn> = Vec::new();
-    let mut off = Vec::with_capacity(net.nodes.len() + 1);
-
-    for ni in 0..net.nodes.len() {
-        off.push(conns.len() as u32);
-        let ends = net.nodes[ni].ends.clone();
-        let n = ends.len();
-        let ap: Vec<(Vec<u32>, Vec<u32>)> = ends.iter().map(|&e| net.approach_lanes(e)).collect();
-        let outw: Vec<V2> = ends.iter().map(|&e| net.outward(e)).collect();
-
-        for a in 0..n {
-            let ins = &ap[a].0;
-            if ins.is_empty() {
-                continue;
-            }
-            // alvos: outras pontas com faixas de saída
-            let mut targets: Vec<(usize, u8)> = Vec::new();
-            for b in 0..n {
-                if b == a || ap[b].1.is_empty() {
-                    continue;
-                }
-                targets.push((b, classify(mul(outw[a], -1.0), outw[b])));
-            }
-            // beco sem saída: retorno
-            if n == 1 && !ap[a].1.is_empty() {
-                targets.push((a, K_UTURN));
-            }
-            let present = targets.iter().fold(0u8, |m, t| m | (1 << t.1));
-            if present == 0 {
-                continue;
-            }
-            let tags: Vec<u8> = ins.iter().map(|&l| net.lanes[l as usize].tmask).collect();
-            let masks = lane_masks(&tags, ins.len(), present);
-            for kind in 0..4u8 {
-                let bit = 1u8 << kind;
-                let who: Vec<usize> = (0..ins.len()).filter(|&i| masks[i] & bit != 0).collect();
-                for (t, &li) in who.iter().enumerate() {
-                    for &(b, k) in targets.iter().filter(|x| x.1 == kind) {
-                        let _ = k;
-                        let outs = &ap[b].1;
-                        let oi = target_index(kind, t, who.len(), li, ins.len(), outs.len());
-                        let fl = ins[li];
-                        let tl = outs[oi];
-                        let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
-                        conns.push(Conn {
-                            node: ni as u32,
-                            from_lane: fl,
-                            to_lane: tl,
-                            kind,
-                            state: CONN_ALLOWED,
-                            curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind),
-                        });
-                    }
-                }
-            }
-        }
-
-        // candidatas: todo par entrada -> saída que ainda não existe (estado ausente)
-        let existing: std::collections::HashSet<(u32, u32)> =
-            conns[off[ni] as usize..].iter().map(|c| (c.from_lane, c.to_lane)).collect();
-        for a in 0..n {
-            for b in 0..n {
-                let kind = if a == b { K_UTURN } else { classify(mul(outw[a], -1.0), outw[b]) };
-                for &fl in &ap[a].0 {
-                    for &tl in &ap[b].1 {
-                        if existing.contains(&(fl, tl)) {
-                            continue;
-                        }
-                        let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
-                        conns.push(Conn {
-                            node: ni as u32,
-                            from_lane: fl,
-                            to_lane: tl,
-                            kind,
-                            state: CONN_ABSENT,
-                            curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind),
-                        });
-                    }
-                }
-            }
-        }
+/// Restrições OSM indexadas pelo nó "via" (id OSM) -> índices em `raw.restrictions`.
+pub fn restriction_index(raw: &RawOsm) -> HashMap<i64, Vec<usize>> {
+    let mut m: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (i, r) in raw.restrictions.iter().enumerate() {
+        m.entry(r.via).or_default().push(i);
     }
-    off.push(conns.len() as u32);
-    net.conns = conns;
-    net.conn_off = off;
-    apply_restrictions(net, raw);
+    m
 }
 
-fn apply_restrictions(net: &mut Net, raw: &RawOsm) {
-    let node_by_osm: HashMap<i64, u32> = net.nodes.iter().enumerate().map(|(i, n)| (n.osm_id, i as u32)).collect();
-    for r in &raw.restrictions {
-        let Some(&ni) = node_by_osm.get(&r.via) else { continue };
-        let (a, b) = (net.conn_off[ni as usize] as usize, net.conn_off[ni as usize + 1] as usize);
-        for ci in a..b {
-            let c = &net.conns[ci];
-            let in_way = net.segs[net.lanes[c.from_lane as usize].seg as usize].way_id;
-            let out_way = net.segs[net.lanes[c.to_lane as usize].seg as usize].way_id;
-            if in_way != r.from {
+/// Chave estável de uma faixa: way:de:para.sentido.posição (orientação original do trecho).
+pub fn lane_key(net: &Net, lane: u32) -> String {
+    let l = &net.lanes[lane as usize];
+    let k = net.segs[l.seg as usize].key;
+    format!("{}:{}:{}.{}.{}", k[0], k[1], k[2], l.dir, l.idx)
+}
+
+/// Chave estável de uma conversão: nóOsm|faixaOrigem>faixaDestino.
+pub fn conn_key(net: &Net, node: u32, from: u32, to: u32) -> String {
+    format!("{}|{}>{}", net.nodes[node as usize].osm_id, lane_key(net, from), lane_key(net, to))
+}
+
+/// Todas as conexões do nó `ni` (padrão, candidatas e proibidas por restrição), já com as edições do usuário.
+pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<usize>>, edits: &Edits) -> Vec<Conn> {
+    let mut conns: Vec<Conn> = Vec::new();
+    let ends = net.nodes[ni].ends.clone();
+    let n = ends.len();
+    let ap: Vec<(Vec<u32>, Vec<u32>)> = ends.iter().map(|&e| net.approach_lanes(e)).collect();
+    let outw: Vec<V2> = ends.iter().map(|&e| net.outward(e)).collect();
+
+    for a in 0..n {
+        let ins = &ap[a].0;
+        if ins.is_empty() {
+            continue;
+        }
+        // alvos: outras pontas com faixas de saída
+        let mut targets: Vec<(usize, u8)> = Vec::new();
+        for b in 0..n {
+            if b == a || ap[b].1.is_empty() {
                 continue;
             }
-            let hit = if r.kind.starts_with("only_") { out_way != r.to } else if r.kind.starts_with("no_") { out_way == r.to } else { false };
-            if hit && net.conns[ci].state == CONN_ALLOWED {
-                net.conns[ci].state = CONN_BLOCKED;
+            targets.push((b, classify(mul(outw[a], -1.0), outw[b])));
+        }
+        // beco sem saída: retorno
+        if n == 1 && !ap[a].1.is_empty() {
+            targets.push((a, K_UTURN));
+        }
+        let present = targets.iter().fold(0u8, |m, t| m | (1 << t.1));
+        if present == 0 {
+            continue;
+        }
+        let tags: Vec<u8> = ins.iter().map(|&l| net.lanes[l as usize].tmask).collect();
+        let masks = lane_masks(&tags, ins.len(), present);
+        for kind in 0..4u8 {
+            let bit = 1u8 << kind;
+            let who: Vec<usize> = (0..ins.len()).filter(|&i| masks[i] & bit != 0).collect();
+            for (t, &li) in who.iter().enumerate() {
+                for &(b, _) in targets.iter().filter(|x| x.1 == kind) {
+                    let outs = &ap[b].1;
+                    let oi = target_index(kind, t, who.len(), li, ins.len(), outs.len());
+                    let (fl, tl) = (ins[li], outs[oi]);
+                    let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
+                    conns.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ALLOWED, base: CONN_ALLOWED, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
+                }
             }
         }
     }
+
+    // candidatas: todo par entrada -> saída que ainda não existe (estado ausente)
+    let existing: std::collections::HashSet<(u32, u32)> = conns.iter().map(|c| (c.from_lane, c.to_lane)).collect();
+    for a in 0..n {
+        for b in 0..n {
+            let kind = if a == b { K_UTURN } else { classify(mul(outw[a], -1.0), outw[b]) };
+            for &fl in &ap[a].0 {
+                for &tl in &ap[b].1 {
+                    if existing.contains(&(fl, tl)) {
+                        continue;
+                    }
+                    let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
+                    conns.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ABSENT, base: CONN_ABSENT, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
+                }
+            }
+        }
+    }
+
+    // restrições do OSM
+    let osm = net.nodes[ni].osm_id;
+    if let Some(list) = restr.get(&osm) {
+        for &ri in list {
+            let r = &raw.restrictions[ri];
+            for c in conns.iter_mut() {
+                let in_way = net.segs[net.lanes[c.from_lane as usize].seg as usize].way_id;
+                let out_way = net.segs[net.lanes[c.to_lane as usize].seg as usize].way_id;
+                if in_way != r.from {
+                    continue;
+                }
+                let hit = if r.kind.starts_with("only_") { out_way != r.to } else if r.kind.starts_with("no_") { out_way == r.to } else { false };
+                if hit && c.state == CONN_ALLOWED {
+                    c.state = CONN_BLOCKED;
+                }
+            }
+        }
+    }
+
+    for c in conns.iter_mut() {
+        c.base = c.state;
+    }
+
+    // edições do usuário (ligar/remover conversões)
+    if let Some(list) = edits.conns.get(&osm) {
+        for c in conns.iter_mut() {
+            let key = conn_key(net, ni as u32, c.from_lane, c.to_lane);
+            if let Some((_, st)) = list.iter().find(|(k, _)| *k == key) {
+                c.state = *st;
+            }
+        }
+    }
+    conns
+}
+
+/// Constrói as conexões de todos os nós (usado pelos testes e pela simulação; a interface pede por nó).
+pub fn build_connections(net: &mut Net, raw: &RawOsm, edits: &Edits) {
+    let restr = restriction_index(raw);
+    let mut all: Vec<Conn> = Vec::new();
+    let mut off = Vec::with_capacity(net.nodes.len() + 1);
+    for ni in 0..net.nodes.len() {
+        off.push(all.len() as u32);
+        all.extend(node_conns(net, ni, raw, &restr, edits));
+    }
+    off.push(all.len() as u32);
+    net.conns = all;
+    net.conn_off = off;
 }
 
 /// Semáforos: fases padrão (uma por eixo de aproximação), substituídas pela configuração do usuário quando houver.
@@ -265,6 +289,10 @@ pub fn build_signals(net: &mut Net, edits: &Edits) {
         };
         if phases.is_empty() {
             phases.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).collect() });
+        }
+        // semáforo em trecho (sem cruzamento): fase própria para a travessia de pedestres, que para os dois sentidos
+        if edit.map_or(true, |e| e.phases.is_none()) && approaches.len() == 2 && phases.len() == 1 {
+            phases.push(Phase { green: 12.0, yellow: 0.0, all_red: 0.0, ends: Vec::new() });
         }
         let mut ends = Vec::new();
         for (e, _) in &approaches {

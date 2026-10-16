@@ -1,4 +1,5 @@
 import { del, get, set } from 'idb-keyval'
+import type { DemandParams, Zone } from './demand'
 import type { NetworkData, SignalDef } from './types'
 
 /** Configuração de um semáforo (enviada ao núcleo e salva): liga/desliga e fases. */
@@ -63,6 +64,14 @@ export interface ScenarioFile {
   segments?: SegEdit[]
   roads?: NewRoad[]
   removed?: SegKeyTuple[]
+  demand?: DemandFile
+}
+
+/** Demanda salva: zonas, parâmetros e células da matriz OD fixadas pelo usuário. */
+export interface DemandFile {
+  zones: Zone[]
+  params: DemandParams
+  odManual: Record<string, number>
 }
 
 const K_MAP = 'last-map'
@@ -71,6 +80,8 @@ const K_CONNS = 'conn-edits-v2'
 const K_SEGS = 'seg-edits'
 const K_ROADS = 'new-roads'
 const K_REMOVED = 'removed-segs'
+const K_DEMAND = 'demand'
+const K_SCEN = 'scenarios'
 
 const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => {
   try {
@@ -92,9 +103,22 @@ export const saveRoads = (r: NewRoad[], removed: SegKeyTuple[]) =>
   safe(async () => (await set(K_ROADS, r), await set(K_REMOVED, removed)), undefined)
 export const loadRoads = () => safe(async () => (await get<NewRoad[]>(K_ROADS)) ?? [], [] as NewRoad[])
 export const loadRemoved = () => safe(async () => (await get<SegKeyTuple[]>(K_REMOVED)) ?? [], [] as SegKeyTuple[])
+export const saveDemand = (d: DemandFile) => safe(() => set(K_DEMAND, d), undefined)
+export const loadDemand = () => safe(() => get<DemandFile>(K_DEMAND), undefined)
+/** Cenário salvo para comparação: as edições (JSON do núcleo) e a simulação (JSON), mais o resultado da última execução. */
+export interface ScenarioRec {
+  id: number
+  name: string
+  edits: string
+  sim: string
+  minutes: number
+  result?: import('./types').BenchResult
+}
+export const saveScenarios = (s: ScenarioRec[]) => safe(() => set(K_SCEN, s), undefined)
+export const loadScenarios = () => safe(async () => (await get<ScenarioRec[]>(K_SCEN)) ?? [], [] as ScenarioRec[])
 export const clearAll = () =>
   safe(async () => {
-    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, K_ROADS, K_REMOVED, 'conn-edits', 'signal-edits']) await del(k)
+    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)
   }, undefined)
 
 /** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
@@ -104,36 +128,9 @@ export function laneKey(d: NetworkData, lane: number): string {
   return `${d.segKeys[k]}:${d.segKeys[k + 1]}:${d.segKeys[k + 2]}.${d.laneU32[lane * 6 + 1]}.${d.laneU32[lane * 6 + 2]}`
 }
 
-export const connKey = (d: NetworkData, c: number) =>
-  `${d.nodeOsm[d.connU32[c * 5]]}|${laneKey(d, d.connU32[c * 5 + 1])}>${laneKey(d, d.connU32[c * 5 + 2])}`
+export const connKey = (d: NetworkData, node: number, fromLane: number, toLane: number) =>
+  `${d.nodeOsm[node]}|${laneKey(d, fromLane)}>${laneKey(d, toLane)}`
 
-/** Aplica edições de conversão (ignora as que não existem mais). Devolve quantas foram aplicadas. */
-export function applyConnEdits(d: NetworkData, edits: ConnEdits): number {
-  const byNode = new Map<number, Map<string, number>>()
-  const byOsm = new Map<number, number>()
-  for (const [k, v] of Object.entries(edits)) {
-    const osm = Number(k.slice(0, k.indexOf('|')))
-    if (!byOsm.size) for (let n = 0; n < d.nodeOsm.length; n++) byOsm.set(d.nodeOsm[n], n)
-    const n = byOsm.get(osm)
-    if (n == null) continue
-    const m = byNode.get(n) ?? new Map<string, number>()
-    m.set(k, v)
-    byNode.set(n, m)
-  }
-  let applied = 0
-  for (const [n, m] of byNode) {
-    for (let c = d.connOff[n]; c < d.connOff[n + 1]; c++) {
-      const v = m.get(connKey(d, c))
-      if (v != null) {
-        d.connU32[c * 5 + 4] = v
-        applied++
-      }
-    }
-  }
-  return applied
-}
-
-/** Configuração completa de um semáforo a partir do estado atual (para salvar/reaplicar). */
 export function configFromDef(def: SignalDef): SigConfig {
   const keyOf = new Map(def.ends.map((e) => [e.end, e.key]))
   return {
@@ -149,7 +146,7 @@ export function configFromDef(def: SignalDef): SigConfig {
   }
 }
 
-export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[]) {
+export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[], demand: DemandFile) {
   const file: ScenarioFile = {
     version: 1,
     app: 'simulador-transito',
@@ -160,6 +157,7 @@ export function exportScenario(name: string, sigs: SigConfigs, connections: Conn
     segments: Object.values(segments),
     roads,
     removed,
+    demand,
   }
   const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
   const a = document.createElement('a')

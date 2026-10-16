@@ -160,5 +160,54 @@ npm run build          # produção (build:core + tsc + vite)
 - Payload de reconstrução: `{"segments","signals","roads","removed"}`. Persistência: IDB `new-roads`, `removed-segs`; `roads`/`removed` no JSON de cenário. O histórico de desfazer é reconstruído a partir deles ao recarregar.
 - Limites: demolição é por chave de trecho (way:de:para) — se uma via nova depois dividir esse trecho, a demolição antiga deixa de casar; rotatórias/ilhas não têm ferramenta própria; sem ajuste de elevação (túneis/viadutos) nem snap de ângulo/grade; vias novas ficam em metros locais do mapa em uso (cenário só vale para o mesmo mapa).
 
+## Fase 3 — andamento
+
+### M0 — medições (mapa sintético de 17 MB: 22,8 mil nós, 45 mil trechos, 90 mil faixas)
+Nativo (`PERF_OSM=... cargo test --release perf_stages -- --ignored --nocapture`):
+| estágio | antes | depois |
+|---|---|---|
+| parse OSM | 180 ms | 180 ms (só na importação) |
+| grafo+faixas (`Net::build`) | 124 ms | ~70 ms (cache do que só depende do OSM) |
+| conexões (360 mil) | 68 ms | **0** (sob demanda por nó) |
+| malhas (543 mil tri) | 121 ms | **só ladrilhos sujos** (diff por hash) |
+| `set_edits` total | 304 ms | ~110 ms |
+No navegador, editar faixas: 350–1000 ms → **~210 ms incluindo debounce** (~120 ms de trabalho). Meta de 100 ms **ainda não** batida: o que sobra é o `Net::build` completo (segmentos 35 ms, recuos 12, ordenação de pontas 7, faixas 7) + cópia dos arrays de rede. **M2b (grafo incremental com ids estáveis) fica pendente** e não bloqueia a simulação (editar durante a simulação reinicia a simulação).
+
+### M1 — zonas e demanda (feito)
+- Núcleo `core/src/demand.rs`: `gravity()` (T_ij = O_i·A_j·f(t_ij)/Σ, f = exp(-β·t) com t em minutos, células fixadas pelo usuário, intrazona opcional), `resolve()` (nós/km de via por zona, centróide, geração na hora, avisos), `profile_at()` com interpolação 23→0. Tempo entre zonas: reta × 1,3 a 30 km/h; **vai virar tempo roteado no M3**.
+- UI: ferramenta **Zonas** (polígono por cliques; Enter/duplo clique/clique no 1º ponto fecha; arrastar vértices; botão direito remove vértice ou cancela), `ZonePanel` (nome, geração no pico, atração, perfil horário com gráfico, cor, hora do dia, β, intrazona, % ônibus, semente, **matriz OD editável** com células fixadas em laranja). Persistência IDB `demand` e no cenário (`demand`).
+- Linhas de ônibus: **ainda não** (entram com a simulação).
+
+### M2a — incremental (feito)
+- **Conexões sob demanda**: `conn::node_conns` gera as conexões de um nó (padrão, candidatas, restrições OSM e edições do usuário); a UI pede por nó (`fetchNodeConns`) e `Net.conns` só existe para testes/simulação (`ensure_conns`). As edições de conversão agora também vão ao núcleo (`connections` no payload, `set_conn_edits` sem reconstrução).
+- **Malhas em ladrilhos de 1 km** (`render.rs`: `TileSet`, `update_tiles`): assinatura (hash) por trecho e por nó; só os ladrilhos cujo conteúdo mudou são regenerados e enviados (`tiles_index/pos/idx`, delta acumulado até `clear_delta`). Teste de equivalência: incremental == reconstrução completa após uma sequência de edições (faixas, via nova, semáforo, demolição).
+- `BaseCache` (`net.rs`): vias aceitas, projeção, atributos, nós de quebra do OSM calculados uma vez.
+
+### M3 — simulação (feito, v1)
+- `core/src/sim/`: `route.rs` (grafo de trechos direcionados com transições = conversões ligadas; **Dijkstra reverso por zona-destino** → `próximo trecho`; penalidades de conversão/semáforo; velocidade livre por classe/`maxspeed`) e `mod.rs` (veículos em SoA; arestas = faixas + conversões; **IDM**; troca de faixa obrigatória (rota) e discricionária simples; **semáforo** com amarelo/dilema de parada e esquerda permissiva; **preferência** (via principal > secundária, rotatória, regra da direita) por **aceitação de brecha** usando conflitos entre curvas Bézier (calculados sob demanda por conversão); **keep-clear**; convergências "quem chega primeiro entra"; geração de viagens Poisson por par de zonas com a matriz gravitacional **roteada** (recalculada a cada 10 min simulados com o perfil horário); filas de entrada; PRNG com semente (determinístico); passo fixo de 0,2 s).
+- Estado da simulação vive no worker (`Network.sim`); editar a rede **encerra** a simulação. API WASM: `sim_init/step/snapshot/stats/stop`; o worker avança em fatias de ~10 ms e envia quadros a ≤30 Hz (`sim`), estatísticas a 1 Hz.
+- UI: `SimPanel` (iniciar/pausar/parar, 1×–30×, relógio, na rede/gerados/concluídos/fila/viagem média, legenda) e `VehicleLayer` (5 malhas por faixa de velocidade: parado/lento/médio/livre/ônibus; retângulos orientados ampliados em zoom baixo).
+- Testes: geração e conclusão de viagens, **nenhum veículo sobrepõe outro** (15 min), **nenhum avanço de sinal vermelho**, conservação (gerados = concluídos + perdidos + vivos), **determinismo** por semente, estresse (8 mil veíc./h na rede de exemplo: folga mínima 0,3 m, 0 perdidos).
+- **Desempenho** (mapa sintético de 22,8 mil nós): nativo 4,8 ms/passo com 16 mil veículos (≈0,29 µs/veículo/passo); **no navegador (WASM) a 10× a simulação acompanhou com 11 mil veículos e chegou a 9,2× com 28 mil**; desenho ~43 fps com 30 mil veículos na tela. Extrapolação para 50 mil: ~35 ms/passo em WASM ⇒ ~5× em tempo real. O portão de multi-thread (SharedArrayBuffer) **não** foi acionado.
+- Pendências do M3: linhas de ônibus com paradas (hoje ônibus = % do fluxo, sem paradas); re-roteamento por congestionamento (rotas seguem o tempo livre); interpolação visual entre quadros; geometria instanciada (hoje 5 malhas recriadas por quadro).
+
+### M4 — análise (feito, v1)
+- **Métricas no núcleo** (`sim/metrics.rs`): por trecho direcionado e balde de 60 s (ocupação, velocidade média, fração parada, entradas), janela de 5 s com média exponencial para o calor em tempo real, histórico de razão de velocidade por minuto (replay), atraso e fila máxima por cruzamento, matriz OD de tempo/atraso, série global por minuto e `report()` (JSON).
+- **Armadilha corrigida (importante para o A/B)**: o tempo médio só das viagens *concluídas* "melhora" quando um gargalo impede a maioria de concluir. O relatório inclui **atraso total incluindo veículos ainda na rede e na fila de entrada** (`totalDelayAllVehH`, `meanDelayAll`), vazão e velocidade média; a tela de comparação mostra isso e avisa. Teste `sim_ab_bottleneck_makes_things_worse`.
+- **Mapa de calor** (`HeatLayer.ts`): fita por trecho direcionado (metade da pista daquele sentido, sem os recuos), 5 níveis de cor; modos **Velocidade** e **Filas**; geometria única com só os índices trocados a 1 Hz; **replay** por minuto (clicar nos gráficos ou no controle); funciona a 30× com a simulação rodando.
+- **Gráficos** (`Charts.tsx`, SVG): veículos na rede, velocidade média, concluídos/min, fila de entrada.
+- **Cenários A/B** (`ScenarioPanel.tsx`): "Salvar atual" guarda as edições (JSON do núcleo) + demanda; "Rodar" executa **headless no worker** (`runBench`: rede nova a partir dos mesmos bytes OSM + edições, simulação por N minutos, mesma semente, progresso/cancelar); resultado salvo em IDB (`scenarios`). Comparação: tabela de métricas com deltas coloridos, séries sobrepostas, cruzamentos com maior variação de atraso, e **mapa de diferença** (B − A, alinhado por chave de trecho). Exemplo medido (avenida 2+2 → 1+1, 20 min, 3.600 veíc./h): vazão 2.040 → 1.095, atraso total 72 → 121 veíc·h, fila de entrada 124 → 412; o tempo médio das concluídas (203 s vs 189 s) sozinho enganaria.
+- Cenários só valem para o mapa importado (limpos a cada nova importação).
+- Pendências: exportar/importar cenários A/B no JSON; comparar por par OD na tela; calor 3D/instanciado; relatório em CSV.
+
 ### Próximas peças
 fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada edição); fase 3 (simulação).
+
+## Seleção de veículo e correção de conversão à esquerda
+- Clique num veículo (qualquer modo, camada Veículos ligada) mostra a rota restante até a zona de destino (`Sim::track`, `sim_track` no WASM, atualizada a ~4 Hz pelo worker) e o destino; painel na SimPanel. Snapshot de veículos agora tem stride 7 (último campo = id).
+- Correção: em cruzamento semaforizado, aproximações concorrentes com sinal vermelho não entram mais na checagem de brecha da esquerda permissiva (antes uma fila parada no vermelho transversal travava quem virava à esquerda).
+- Anti-impasse em `may_enter` (sim/mod.rs): fila justa por faixa de saída (quem espera há mais tempo passa; empate por id), veículo parado na linha deixa de arbitrar a brecha de quem espera >25 s, keep-clear relaxa gradualmente após 30 s parado, e aproximação em vermelho não conta na brecha da esquerda. Diagnóstico: `Sim::stuck_report` + teste `sim_stuck_diag` (`--ignored`); `REASON` (thread_local) indica o motivo do bloqueio. Mesmo cenário de teste: concluídos em 10 min 327 → 510.
+- Rota do veículo: lane_pts usa o sinal de `off` conforme o sentido (dir 1 invertido); JSON de `sim_track` inclui `id` para descartar respostas antigas.
+
+## Semáforo fora de cruzamento
+- Modo **Semáforo** (Toolbar): clique no corpo de uma via grava uma "via" especial `hw:"mark"` com 1 ponto `{x,y,way}` em `roadRecord` (persiste, entra em cenários e no desfazer como qualquer via). No núcleo (`net.rs`, após as vias novas) o ponto vira nó via `insert_on`, o trecho é dividido e o nó nasce com semáforo; padrão de 2 fases (trânsito 30/3/2 s + fase vazia de 12 s para pedestres, em `build_signals`). Remover o semáforo apaga o ponto. Teste: `signal_can_be_placed_mid_block`.

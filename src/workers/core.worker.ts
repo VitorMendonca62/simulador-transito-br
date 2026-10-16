@@ -1,13 +1,55 @@
 /// <reference lib="webworker" />
 import init, { import_osm, type Network } from '../../core/pkg/core.js'
-import type { NetworkData, NetworkMeta, WorkerIn, WorkerOut } from '../model/types'
+import type { NetworkData, NetworkMeta, SimStats, TileData, TileUpdate, WorkerIn, WorkerOut } from '../model/types'
 
 let ready: Promise<unknown> | null = null
 // A rede fica viva no worker (fases futuras: edição e simulação rodam aqui).
 let current: Network | null = null
+/** bytes do mapa importado, para criar redes extras (execução headless de cenários) */
+let sourceBytes: Uint8Array | null = null
+
+/** Ladrilhos sujos: buffers concatenados fatiados por visões (sem cópia), um conjunto de malhas por ladrilho. */
+function extractTiles(net: Network): TileUpdate {
+  const index = net.tiles_index()
+  const pos = net.tiles_pos()
+  const idx = net.tiles_idx()
+  const dirty: TileData[] = []
+  let po = 0
+  let io = 0
+  const takeF = (n: number) => {
+    const v = pos.subarray(po, po + n)
+    po += n
+    return v
+  }
+  const takeU = (n: number) => {
+    const v = idx.subarray(io, io + n)
+    io += n
+    return v
+  }
+  for (let i = 0; i < index.length; i += 12) {
+    const L = index.subarray(i + 1, i + 12)
+    const asphaltPos = takeF(L[0])
+    const busPos = takeF(L[1])
+    const whitePos = takeF(L[2])
+    const yellowPos = takeF(L[3])
+    const shape = takeF(L[4])
+    const minor = takeF(L[5])
+    const major = takeF(L[6])
+    dirty.push({
+      id: index[i],
+      asphalt: { pos: asphaltPos, idx: takeU(L[7]) },
+      bus: { pos: busPos, idx: takeU(L[8]) },
+      white: { pos: whitePos, idx: takeU(L[9]) },
+      yellow: { pos: yellowPos, idx: takeU(L[10]) },
+      shape,
+      minor,
+      major,
+    })
+  }
+  return { dirty, removed: Array.from(net.tiles_removed()) }
+}
 
 function extract(net: Network): NetworkData {
-  const mesh = (pos: Float32Array, idx: Uint32Array) => ({ pos, idx })
   return {
     meta: JSON.parse(net.meta_json()) as NetworkMeta,
     nodeXY: net.node_xy(),
@@ -15,34 +57,144 @@ function extract(net: Network): NetworkData {
     nodeOsm: net.node_osm_ids(),
     nodeEnds: net.node_ends(),
     nodeEndOff: net.node_end_off(),
-    shapeXY: net.shape_xy(),
     segU32: net.seg_u32(),
     laneU32: net.lane_u32(),
     laneF32: net.lane_f32(),
-    connU32: net.conn_u32(),
-    connF32: net.conn_f32(),
-    connOff: net.conn_off(),
-    asphalt: mesh(net.asphalt_pos(), net.asphalt_idx()),
-    bus: mesh(net.bus_pos(), net.bus_idx()),
-    white: mesh(net.white_pos(), net.white_idx()),
-    yellow: mesh(net.yellow_pos(), net.yellow_idx()),
+    tiles: extractTiles(net),
     labels: net.labels_f32(),
     segKeys: net.seg_keys(),
     segW: net.seg_w(),
+    segCuts: net.seg_cuts(),
     segPts: net.seg_pts(),
     segPtsOff: net.seg_pts_off(),
   }
 }
 
 function transferables(d: NetworkData): ArrayBuffer[] {
-  const out: ArrayBuffer[] = []
-  for (const v of Object.values(d)) {
-    if (ArrayBuffer.isView(v)) out.push(v.buffer as ArrayBuffer)
-    else if (v && typeof v === 'object' && 'pos' in v) {
-      out.push((v as { pos: Float32Array }).pos.buffer as ArrayBuffer, (v as { idx: Uint32Array }).idx.buffer as ArrayBuffer)
-    }
+  const seen = new Set<ArrayBuffer>()
+  const add = (b: ArrayBufferLike) => seen.add(b as ArrayBuffer)
+  for (const [k, v] of Object.entries(d)) {
+    if (k === 'tiles' || k === 'meta') continue
+    if (ArrayBuffer.isView(v)) add(v.buffer)
   }
-  return out
+  for (const t of d.tiles.dirty) {
+    for (const m of [t.asphalt, t.bus, t.white, t.yellow]) {
+      add(m.pos.buffer)
+      add(m.idx.buffer)
+    }
+    add(t.shape.buffer)
+    add(t.minor.buffer)
+    add(t.major.buffer)
+  }
+  return [...seen]
+}
+
+// ------------------------------------------------------------------ simulação
+let simRunning = false
+let simSpeed = 1
+let simLast = 0
+let simTimer = 0
+let simPost = 0
+let simCarry = 0
+let simStatsAt = 0
+let simHeatKind = 0 // -1 desligado
+let simTrackId: number | null = null
+let simTrackAt = 0
+const SIM_DT = 0.2
+
+const postSim = (msg: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, t)
+
+/** Avança a simulação por fatias de tempo real: passos fixos de 0,2 s, no máximo ~10 ms por fatia. */
+function simLoop() {
+  simTimer = 0
+  if (!current || !simRunning) return
+  if (!current.sim_active()) {
+    simRunning = false
+    postSim({ type: 'simEnded', reason: 'a rede foi editada' })
+    return
+  }
+  const now = performance.now()
+  simCarry += ((now - simLast) / 1000) * simSpeed
+  simLast = now
+  const budget = 10
+  const t0 = performance.now()
+  let ticks = 0
+  while (simCarry >= SIM_DT && performance.now() - t0 < budget) {
+    current.sim_step(1)
+    simCarry -= SIM_DT
+    ticks++
+  }
+  if (simCarry > 2) simCarry = 2 // não acumula atraso indefinido
+  if (ticks > 0 && now - simPost > 33) {
+    simPost = now
+    const buf = current.sim_snapshot()
+    let stats = lastStats
+    let heat: Uint8Array | undefined
+    let series: Float32Array | undefined
+    let histLen: number | undefined
+    if (now - simStatsAt > 1000) {
+      simStatsAt = now
+      stats = lastStats = JSON.parse(current.sim_stats())
+      if (simHeatKind >= 0) heat = current.sim_heat(simHeatKind)
+      series = current.sim_series()
+      histLen = current.sim_hist_len()
+    }
+    let track: string | undefined
+    if (simTrackId != null && now - simTrackAt > 250) {
+      simTrackAt = now
+      track = current.sim_track(simTrackId)
+    }
+    const tr: Transferable[] = [buf.buffer as ArrayBuffer]
+    if (heat) tr.push(heat.buffer as ArrayBuffer)
+    if (series) tr.push(series.buffer as ArrayBuffer)
+    postSim({ type: 'sim', time: current.sim_time(), stats, buf, heat, series, histLen, track }, tr)
+  }
+  simTimer = self.setTimeout(simLoop, 4)
+}
+let lastStats: SimStats = { time: 0, alive: 0, spawned: 0, finished: 0, lost: 0, queued: 0, meanTravel: 0, redRuns: 0, laneChanges: 0 }
+
+let benchCancel = false
+
+/** Executa um cenário sem desenhar: rede nova a partir dos mesmos bytes + edições, simulação por N minutos. */
+async function runBench(msg: Extract<WorkerIn, { type: 'bench' }>) {
+  benchCancel = false
+  const send = (m: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(m, t)
+  let net: Network | null = null
+  try {
+    if (!sourceBytes) throw new Error('Nenhum mapa carregado')
+    await ready
+    net = import_osm(sourceBytes)
+    net.apply_edits(msg.edits)
+    net.sim_init(msg.sim)
+    const total = Math.round((msg.minutes * 60) / SIM_DT)
+    let done = 0
+    let lastPost = 0
+    while (done < total) {
+      if (benchCancel) throw new Error('cancelado')
+      const t0 = performance.now()
+      while (done < total && performance.now() - t0 < 30) {
+        net.sim_step(25)
+        done += 25
+      }
+      if (performance.now() - lastPost > 200) {
+        lastPost = performance.now()
+        send({ type: 'benchProgress', id: msg.id, done: Math.min(1, done / total) })
+      }
+      await new Promise((r) => setTimeout(r, 0)) // deixa passar outras mensagens (cancelar, simulação ao vivo)
+    }
+    const result = {
+      report: JSON.parse(net.sim_report()),
+      series: net.sim_series(),
+      ratio: net.sim_run_ratio(),
+      segKeys: net.seg_keys(),
+      minutes: msg.minutes,
+    }
+    send({ type: 'benchDone', id: msg.id, result }, [result.series.buffer as ArrayBuffer, result.ratio.buffer as ArrayBuffer, result.segKeys.buffer as ArrayBuffer])
+  } catch (e) {
+    send({ type: 'benchError', id: msg.id, message: e instanceof Error ? e.message : String(e) })
+  } finally {
+    net?.free()
+  }
 }
 
 self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
@@ -51,16 +203,95 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   try {
     ready ??= init()
     await ready
+    if (msg.type === 'demand') {
+      try {
+        if (!current) throw new Error('Nenhum mapa carregado')
+        post({ type: 'result', id: msg.id, json: current.demand_json(msg.json) })
+      } catch (e) {
+        post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (msg.type === 'nodeConns') {
+      try {
+        if (!current) throw new Error('Nenhum mapa carregado')
+        const u32 = current.node_conns_u32(msg.node)
+        const f32 = current.node_conns_f32(msg.node)
+        post({ type: 'result', id: msg.id, u32, f32 }, [u32.buffer as ArrayBuffer, f32.buffer as ArrayBuffer])
+      } catch (e) {
+        post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (msg.type === 'simInit') {
+      try {
+        if (!current) throw new Error('Nenhum mapa carregado')
+        current.sim_init(msg.json)
+        simRunning = false
+        postSim({ type: 'simReady' })
+      } catch (e) {
+        postSim({ type: 'simReady', error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (msg.type === 'simRun') {
+      simSpeed = msg.speed
+      if (msg.running && !simRunning && current?.sim_active()) {
+        simRunning = true
+        simLast = performance.now()
+        simCarry = 0
+        if (!simTimer) simTimer = self.setTimeout(simLoop, 0)
+      } else if (!msg.running) simRunning = false
+      return
+    }
+    if (msg.type === 'simTrack') {
+      simTrackId = msg.veh
+      simTrackAt = 0
+      if (current && msg.veh != null && !simRunning) postSim({ type: 'sim', time: current.sim_time(), stats: lastStats, buf: current.sim_snapshot(), track: current.sim_track(msg.veh) })
+      return
+    }
+    if (msg.type === 'simHeat') {
+      simHeatKind = msg.kind
+      return
+    }
+    if (msg.type === 'simHist') {
+      try {
+        const u8 = current ? current.sim_hist(msg.bucket) : new Uint8Array(0)
+        post({ type: 'result', id: msg.id, u8 }, [u8.buffer as ArrayBuffer])
+      } catch (e) {
+        post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (msg.type === 'bench') {
+      void runBench(msg)
+      return
+    }
+    if (msg.type === 'benchCancel') {
+      benchCancel = true
+      return
+    }
+    if (msg.type === 'simStop') {
+      simRunning = false
+      current?.sim_stop()
+      return
+    }
+    if (msg.type === 'connEdits') {
+      current?.set_conn_edits(msg.json)
+      return
+    }
     const t0 = performance.now()
     if (msg.type === 'import') {
       current?.free()
-      current = import_osm(new Uint8Array(msg.buffer))
+      sourceBytes = new Uint8Array(msg.buffer)
+      current = import_osm(sourceBytes)
       if (msg.edits && msg.edits !== '[]') current.apply_edits(msg.edits)
     } else if (msg.type === 'edit') {
       if (!current) throw new Error('Nenhum mapa carregado')
       current.apply_edits(msg.edits)
     } else return
     const data = extract(current)
+    current.clear_delta()
     post({ type: 'done', data, ms: performance.now() - t0 }, transferables(data))
   } catch (e) {
     post({ type: 'error', message: e instanceof Error ? e.message : String(e) })
