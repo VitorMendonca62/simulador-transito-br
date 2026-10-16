@@ -3,6 +3,7 @@ import { MapView } from './engine/MapView'
 import { viewRef } from './engine/instance'
 import { getSegRecord, useStore } from './model/store'
 import { Inspector } from './ui/Inspector'
+import { BuildPanel, ErasePanel } from './ui/BuildPanel'
 import { SegmentPanel } from './ui/SegmentPanel'
 import { LayerPanel } from './ui/LayerPanel'
 import { SignalPanel } from './ui/SignalPanel'
@@ -17,6 +18,8 @@ export function App() {
     const view = new MapView(host.current!)
     view.onSelect = (n) => useStore.setState({ selected: n })
     view.onSegSelect = (sg) => useStore.setState({ selectedSeg: sg })
+    view.onBuildCommit = (pts, newChain) => useStore.getState().addRoad(pts, newChain)
+    view.onErase = (seg) => useStore.getState().eraseSegment(seg)
     view.onZoom = (z) => useStore.getState().setZoom(z)
     view.onConnClick = (c) => useStore.getState().toggleConns([c])
     view.onConnEdit = (from, to) => useStore.getState().connectLanes(from, to)
@@ -32,6 +35,19 @@ export function App() {
       viewRef.current = null
       view.destroy()
     }
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+        e.preventDefault()
+        useStore.getState().undo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   const onDrop = (e: React.DragEvent) => {
@@ -57,7 +73,10 @@ export function App() {
       {data && (
         <aside className="side">
           <LayerPanel />
-          {mode === 'nodes' ? <Inspector /> : <SegmentPanel />}
+          {mode === 'nodes' && <Inspector />}
+          {mode === 'lanes' && <SegmentPanel />}
+          {mode === 'build' && <BuildPanel />}
+          {mode === 'erase' && <ErasePanel />}
           <SignalPanel />
         </aside>
       )}

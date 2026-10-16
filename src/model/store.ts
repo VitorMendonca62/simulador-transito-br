@@ -9,24 +9,31 @@ import {
   connKey,
   exportScenario,
   loadConnEdits,
+  loadRemoved,
+  loadRoads,
   loadSigConfigs,
   loadMap,
   loadSegEdits,
   saveConnEdits,
+  saveRoads,
   saveSigConfigs,
   saveMap,
   saveSegEdits,
   segEditKey,
   type ConnEdits,
+  type NewPt,
+  type NewRoad,
   type ScenarioFile,
+  type SegKeyTuple,
   type SigConfigs,
   type SegEdit,
   type SegEdits,
 } from './persistence'
+import { ROAD_PRESETS } from './presets'
 import { applyPatch, segInfo, segsOfWay, type SegPatch } from './segments'
 import { CONN_ABSENT, CONN_ALLOWED, type NetworkData, type SignalDef } from './types'
 
-export type EditMode = 'nodes' | 'lanes'
+export type EditMode = 'nodes' | 'lanes' | 'build' | 'erase'
 export type EditScope = 'seg' | 'way'
 
 interface State {
@@ -52,10 +59,21 @@ interface State {
   connEdits: number
   segEdits: number
   sigEdits: number
+  /** tipo de via do construtor e modo reta/curva */
+  buildPreset: string
+  buildCurve: boolean
+  /** ações que podem ser desfeitas (construir/demolir) */
+  historyLen: number
 
   setLayer: (k: LayerKey, on: boolean) => void
   setMode: (m: EditMode) => void
   setScope: (s: EditScope) => void
+  setBuildPreset: (id: string) => void
+  setBuildCurve: (on: boolean) => void
+  /** Confirma um trecho desenhado; `newChain` inicia uma via nova (nome novo). */
+  addRoad: (pts: NewPt[], newChain: boolean) => void
+  eraseSegment: (seg: number) => void
+  undo: () => void
   select: (n: number | null, focus?: boolean) => void
   selectSeg: (s: number | null) => void
   setZoom: (z: number) => void
@@ -103,7 +121,14 @@ let connRecord: ConnEdits = {}
 let segRecord: SegEdits = {}
 /** Semáforos adicionados/removidos/reconfigurados. */
 let sigRecord: SigConfigs = {}
-const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord) })
+/** Vias criadas e trechos demolidos (ordem de criação importa: encaixes dependem das anteriores). */
+let roadRecord: NewRoad[] = []
+let removedRecord: SegKeyTuple[] = []
+type Action = { t: 'road'; id: number } | { t: 'removed'; key: SegKeyTuple }
+let history: Action[] = []
+let chainName = ''
+const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
+const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord })
 export const getSegRecord = () => segRecord
 
 const snapshotConns = (d: NetworkData) => {
@@ -139,6 +164,7 @@ export const useStore = create<State>((set, get) => {
       data,
       signals,
       sigEdits: Object.keys(sigRecord).length,
+      historyLen: history.length,
       editRev: s.editRev + 1,
       connEdits: Object.keys(connRecord).length,
       segEdits: Object.keys(segRecord).length,
@@ -153,10 +179,16 @@ export const useStore = create<State>((set, get) => {
         connRecord = {}
         segRecord = {}
         sigRecord = {}
+        roadRecord = []
+        removedRecord = []
+        history = []
       } else {
         connRecord = await loadConnEdits()
         segRecord = await loadSegEdits()
         sigRecord = await loadSigConfigs()
+        roadRecord = await loadRoads()
+        removedRecord = await loadRemoved()
+        history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
       }
       const { data, ms } = await importMap(buffer, name, editPayload())
       if (persist) await saveMap(name, buffer)
@@ -196,7 +228,8 @@ export const useStore = create<State>((set, get) => {
     rebuildTimer = window.setTimeout(() => void rebuild(), 90)
     saveSegEdits({ ...segRecord })
     saveSigConfigs({ ...sigRecord })
-    set((s) => ({ segEdits: Object.keys(segRecord).length, sigEdits: Object.keys(sigRecord).length, editRev: s.editRev }))
+    saveRoads([...roadRecord], [...removedRecord])
+    set((s) => ({ historyLen: history.length, segEdits: Object.keys(segRecord).length, sigEdits: Object.keys(sigRecord).length, editRev: s.editRev }))
   }
 
   /** Edita um semáforo sem reconstruir a rede (só dados de fase): atualiza o desenho e o registro salvo. */
@@ -234,6 +267,9 @@ export const useStore = create<State>((set, get) => {
     connEdits: 0,
     segEdits: 0,
     sigEdits: 0,
+    buildPreset: 'local',
+    buildCurve: false,
+    historyLen: 0,
 
     setLayer: (k, on) => {
       viewRef.current?.setLayer(k, on)
@@ -241,9 +277,47 @@ export const useStore = create<State>((set, get) => {
     },
     setMode: (m) => {
       viewRef.current?.setMode(m)
+      if (m === 'build') viewRef.current?.setBuild(ROAD_PRESETS.find((p) => p.id === get().buildPreset) ?? ROAD_PRESETS[0], get().buildCurve)
       set({ mode: m, selected: null, selectedSeg: null })
     },
     setScope: (scope) => set({ scope }),
+    setBuildPreset: (id) => {
+      set({ buildPreset: id })
+      viewRef.current?.setBuild(ROAD_PRESETS.find((p) => p.id === id) ?? ROAD_PRESETS[0], get().buildCurve)
+    },
+    setBuildCurve: (on) => {
+      set({ buildCurve: on })
+      viewRef.current?.setBuild(ROAD_PRESETS.find((p) => p.id === get().buildPreset) ?? ROAD_PRESETS[0], on)
+    },
+    addRoad: (pts, newChain) => {
+      const preset = ROAD_PRESETS.find((p) => p.id === get().buildPreset) ?? ROAD_PRESETS[0]
+      if (newChain || !chainName) {
+        const n = roadRecord.reduce((m, r) => Math.max(m, Number(/^Via nova (\d+)$/.exec(r.name)?.[1] ?? 0)), 0) + 1
+        chainName = `Via nova ${n}`
+      }
+      const road: NewRoad = { id: nextRoadId(), hw: preset.hw, name: chainName, oneway: preset.oneway, lf: preset.lf, lb: preset.oneway ? 0 : preset.lb, pts }
+      roadRecord.push(road)
+      history.push({ t: 'road', id: road.id })
+      scheduleRebuild()
+    },
+    eraseSegment: (seg) => {
+      const { data } = get()
+      if (!data) return
+      const key: SegKeyTuple = [data.segKeys[seg * 3], data.segKeys[seg * 3 + 1], data.segKeys[seg * 3 + 2]]
+      if (removedRecord.some((k) => k[0] === key[0] && k[1] === key[1] && k[2] === key[2])) return
+      removedRecord.push(key)
+      history.push({ t: 'removed', key })
+      set({ selectedSeg: null })
+      scheduleRebuild()
+    },
+    undo: () => {
+      const a = history.pop()
+      if (!a) return
+      if (a.t === 'road') roadRecord = roadRecord.filter((r) => r.id !== a.id)
+      else removedRecord = removedRecord.filter((k) => !(k[0] === a.key[0] && k[1] === a.key[1] && k[2] === a.key[2]))
+      set({ selectedSeg: null })
+      scheduleRebuild()
+    },
     select: (n, focus = false) => {
       viewRef.current?.select(n, focus)
       set({ selected: n })
@@ -264,6 +338,10 @@ export const useStore = create<State>((set, get) => {
           segRecord = Object.fromEntries((sc.segments ?? []).map((e) => [segEditKey(e), e]))
           connRecord = sc.connFormat === 2 ? { ...(sc.connections ?? {}) } : {}
           sigRecord = Object.fromEntries((sc.signalConfigs ?? []).map((c) => [String(c.node), c]))
+          roadRecord = sc.roads ?? []
+          removedRecord = sc.removed ?? []
+          history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
+          saveRoads([...roadRecord], [...removedRecord])
           saveSegEdits({ ...segRecord })
           saveConnEdits({ ...connRecord })
           saveSigConfigs({ ...sigRecord })
@@ -413,7 +491,7 @@ export const useStore = create<State>((set, get) => {
     },
     exportScenario: () => {
       const { data, fileName } = get()
-      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...segRecord })
+      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...segRecord }, [...roadRecord], [...removedRecord])
     },
     notify: (msg) => {
       set({ toast: msg })

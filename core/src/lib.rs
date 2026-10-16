@@ -45,17 +45,21 @@ impl Network {
         struct Payload {
             segments: Vec<SegEdit>,
             signals: Vec<SigEdit>,
+            roads: Vec<NewRoad>,
+            removed: Vec<SegKey>,
         }
         let payload: Payload = match serde_json::from_str::<Payload>(json) {
             Ok(p) => p,
             Err(_) => Payload {
                 segments: serde_json::from_str(json).map_err(|e| format!("edições inválidas: {e}"))?,
-                signals: Vec::new(),
+                ..Default::default()
             },
         };
         let edits = Edits {
             segs: payload.segments.into_iter().map(|e| (e.key(), e)).collect(),
             sigs: payload.signals.into_iter().map(|e| (e.node, e)).collect(),
+            roads: payload.roads,
+            removed: payload.removed.into_iter().collect(),
         };
         let (net, meshes) = build_parts(&self.raw, &edits)?;
         self.edits = edits;
@@ -136,7 +140,7 @@ impl Network {
         self.set_edits(json).map_err(|e| JsError::new(&e))
     }
     pub fn edit_count(&self) -> usize {
-        self.edits.segs.len() + self.edits.sigs.len()
+        self.edits.segs.len() + self.edits.sigs.len() + self.edits.roads.len() + self.edits.removed.len()
     }
     /// [way, nó_inicial, nó_final] (ids OSM, orientação original) por trecho.
     pub fn seg_keys(&self) -> Vec<f64> {

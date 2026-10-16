@@ -67,11 +67,99 @@ pub struct SigEdit {
     pub phases: Option<Vec<PhaseEdit>>,
 }
 
+/// Ponto de uma via nova (metros locais). `node` encaixa num nó existente; `way` encaixa no corpo de uma via.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct NewPt {
+    pub x: f64,
+    pub y: f64,
+    pub node: Option<i64>,
+    pub way: Option<i64>,
+}
+
+/// Via criada pelo usuário (estilo construtor do Cities: Skylines).
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct NewRoad {
+    /// id único da via (vira o `way` das chaves de trecho)
+    pub id: i64,
+    /// classe OSM: residential, tertiary, secondary, primary, trunk, service...
+    pub hw: String,
+    pub name: String,
+    pub oneway: bool,
+    pub lf: u8,
+    pub lb: u8,
+    pub pts: Vec<NewPt>,
+}
+
 /// Todas as edições do usuário aplicadas na reconstrução da rede.
 #[derive(Default, Clone)]
 pub struct Edits {
     pub segs: HashMap<SegKey, SegEdit>,
     pub sigs: HashMap<i64, SigEdit>,
+    pub roads: Vec<NewRoad>,
+    /// trechos demolidos
+    pub removed: std::collections::HashSet<SegKey>,
+}
+
+/// Id determinístico de um nó criado pelo editor, a partir da posição (resolução de 10 cm).
+fn coord_id(p: V2) -> i64 {
+    let xi = ((p[0] * 10.0).round() as i64 + (1 << 23)).clamp(0, (1 << 24) - 1);
+    let yi = ((p[1] * 10.0).round() as i64 + (1 << 23)).clamp(0, (1 << 24) - 1);
+    -((xi << 24 | yi) + 1)
+}
+
+/// Via com geometria projetada (base do OSM ou criada pelo usuário).
+struct W<'a> {
+    id: i64,
+    tags: &'a [(String, String)],
+    hw: u8,
+    link: bool,
+    pts: Vec<(i64, V2)>,
+}
+
+fn seg_cross(a: V2, b: V2, c: V2, d: V2) -> Option<(f64, f64)> {
+    let r = sub(b, a);
+    let s = sub(d, c);
+    let den = cross(r, s);
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let t = cross(sub(c, a), s) / den;
+    let u = cross(sub(c, a), r) / den;
+    let e = 1e-6;
+    (t > e && t < 1.0 - e && u > e && u < 1.0 - e).then_some((t, u))
+}
+
+/// Ponto mais próximo de `p` na polilinha de `w`: (aresta, t, posição, distância).
+fn nearest_on(w: &W, p: V2) -> Option<(usize, f64, V2, f64)> {
+    let mut best: Option<(usize, f64, V2, f64)> = None;
+    for i in 0..w.pts.len().saturating_sub(1) {
+        let (a, b) = (w.pts[i].1, w.pts[i + 1].1);
+        let v = sub(b, a);
+        let l2 = dot(v, v).max(1e-12);
+        let t = (dot(sub(p, a), v) / l2).clamp(0.0, 1.0);
+        let q = add(a, mul(v, t));
+        let d = len(sub(p, q));
+        if best.map_or(true, |x| d < x.3) {
+            best = Some((i, t, q, d));
+        }
+    }
+    best
+}
+
+/// Insere (ou reaproveita, se estiver a menos de 1 m de um vértice) um nó em `w` perto de `p`.
+fn insert_on(w: &mut W, p: V2) -> Option<(i64, V2)> {
+    let (i, t, q, _) = nearest_on(w, p)?;
+    for v in [&w.pts[i], &w.pts[i + 1]] {
+        if len(sub(v.1, q)) < 1.0 {
+            return Some(*v);
+        }
+    }
+    let _ = t;
+    let id = coord_id(q);
+    w.pts.insert(i + 1, (id, q));
+    Some((id, q))
 }
 
 /// Bits de manobra (máscara) e códigos de tipo de conexão.
@@ -378,13 +466,7 @@ const M_PER_DEG: f64 = 111_319.490_793_273_57;
 impl Net {
     pub fn build(raw: &RawOsm, edits: &Edits) -> Result<Net, String> {
         // 1. vias aceitas, com coordenadas resolvidas
-        struct W<'a> {
-            raw: &'a crate::osm::RawWay,
-            hw: u8,
-            link: bool,
-            pts: Vec<(i64, i32, i32)>,
-        }
-        let mut ways: Vec<W> = Vec::new();
+        let mut base: Vec<(&crate::osm::RawWay, u8, bool, Vec<(i64, i32, i32)>)> = Vec::new();
         for w in &raw.ways {
             let t = Tags(&w.tags);
             let Some((hw, link)) = t.get("highway").and_then(parse_highway) else { continue };
@@ -400,17 +482,17 @@ impl Net {
             let pts: Vec<(i64, i32, i32)> =
                 w.refs.iter().filter_map(|&r| raw.coord(r).map(|(la, lo)| (r, la, lo))).collect();
             if pts.len() >= 2 {
-                ways.push(W { raw: w, hw, link, pts });
+                base.push((w, hw, link, pts));
             }
         }
-        if ways.is_empty() {
+        if base.is_empty() {
             return Err("Nenhuma via veicular encontrada no arquivo".into());
         }
 
-        // 2. origem da projeção
+        // 2. origem da projeção (só das vias do OSM: estável diante de edições)
         let (mut la0, mut la1, mut lo0, mut lo1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-        for w in &ways {
-            for p in &w.pts {
+        for w in &base {
+            for p in &w.3 {
                 la0 = la0.min(p.1);
                 la1 = la1.max(p.1);
                 lo0 = lo0.min(p.2);
@@ -421,6 +503,104 @@ impl Net {
         let lon_c = (lo0 as f64 + lo1 as f64) / 2.0 * 1e-7;
         let kx = M_PER_DEG * lat_c.to_radians().cos();
         let proj = |la: i32, lo: i32| -> V2 { [(lo as f64 * 1e-7 - lon_c) * kx, -(la as f64 * 1e-7 - lat_c) * M_PER_DEG] };
+
+        let mut ways: Vec<W> = base
+            .iter()
+            .map(|(w, hw, link, pts)| W { id: w.id, tags: &w.tags, hw: *hw, link: *link, pts: pts.iter().map(|p| (p.0, proj(p.1, p.2))).collect() })
+            .collect();
+        let base_len = ways.len();
+
+        // 2b. vias criadas pelo usuário: encaixes, divisões e cruzamentos automáticos
+        let road_tags: Vec<Vec<(String, String)>> = edits.roads.iter().map(road_tags).collect();
+        if !edits.roads.is_empty() {
+            let mut known: HashMap<i64, V2> = HashMap::new();
+            for w in &ways {
+                for p in &w.pts {
+                    known.insert(p.0, p.1);
+                }
+            }
+            let by_id = |ways: &Vec<W>, id: i64| ways.iter().position(|w| w.id == id);
+            for (ri, r) in edits.roads.iter().enumerate() {
+                let Some((hw, link)) = parse_highway(&r.hw) else { continue };
+                let mut pts: Vec<(i64, V2)> = Vec::new();
+                for p in &r.pts {
+                    let pos = [p.x, p.y];
+                    let mut got: Option<(i64, V2)> = None;
+                    if let Some(n) = p.node {
+                        // o id é a autoridade (também vale para nós criados por cruzamentos automáticos)
+                        got = Some((n, known.get(&n).copied().unwrap_or(pos)));
+                    }
+                    if got.is_none() {
+                        if let Some(wid) = p.way {
+                            if let Some(wi) = by_id(&ways, wid) {
+                                got = insert_on(&mut ways[wi], pos);
+                            }
+                        }
+                    }
+                    let (id, q) = got.unwrap_or_else(|| (coord_id(pos), pos));
+                    known.insert(id, q);
+                    if pts.last().map_or(true, |l: &(i64, V2)| l.0 != id) {
+                        pts.push((id, q));
+                    }
+                }
+                if pts.len() >= 2 {
+                    ways.push(W { id: r.id, tags: &road_tags[ri], hw, link, pts });
+                }
+            }
+
+            // cruzamentos automáticos: onde a via nova atravessa outra, vira interseção
+            let bbox = |w: &W| -> [f64; 4] {
+                let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+                for p in &w.pts {
+                    b[0] = b[0].min(p.1[0]);
+                    b[1] = b[1].min(p.1[1]);
+                    b[2] = b[2].max(p.1[0]);
+                    b[3] = b[3].max(p.1[1]);
+                }
+                b
+            };
+            for ri in base_len..ways.len() {
+                let rb = bbox(&ways[ri]);
+                let mut ins_r: Vec<(usize, f64, (i64, V2))> = Vec::new();
+                let mut ins_o: Vec<(usize, usize, f64, (i64, V2))> = Vec::new();
+                for oi in 0..ri {
+                    let ob = bbox(&ways[oi]);
+                    if ob[0] > rb[2] || ob[2] < rb[0] || ob[1] > rb[3] || ob[3] < rb[1] {
+                        continue;
+                    }
+                    for e in 0..ways[ri].pts.len() - 1 {
+                        let (a, b) = (ways[ri].pts[e].1, ways[ri].pts[e + 1].1);
+                        for f in 0..ways[oi].pts.len() - 1 {
+                            let (c, d) = (ways[oi].pts[f].1, ways[oi].pts[f + 1].1);
+                            if let Some((t, u)) = seg_cross(a, b, c, d) {
+                                let q = add(a, mul(sub(b, a), t));
+                                // perto de um vértice da outra via: reaproveita-o
+                                let near = [ways[oi].pts[f], ways[oi].pts[f + 1]].into_iter().find(|v| len(sub(v.1, q)) < 1.0);
+                                if let Some(v) = near {
+                                    ins_r.push((e, t, v));
+                                } else {
+                                    let node = (coord_id(q), q);
+                                    ins_r.push((e, t, node));
+                                    ins_o.push((oi, f, u, node));
+                                }
+                            }
+                        }
+                    }
+                }
+                ins_r.sort_by(|x, y| (y.0, y.1).partial_cmp(&(x.0, x.1)).unwrap());
+                for (e, _, node) in ins_r {
+                    if ways[ri].pts[e].0 != node.0 && ways[ri].pts[e + 1].0 != node.0 {
+                        ways[ri].pts.insert(e + 1, node);
+                    }
+                }
+                ins_o.sort_by(|x, y| (y.0, y.1, y.2).partial_cmp(&(x.0, x.1, x.2)).unwrap());
+                for (oi, f, _, node) in ins_o {
+                    if ways[oi].pts[f].0 != node.0 && ways[oi].pts[f + 1].0 != node.0 {
+                        ways[oi].pts.insert(f + 1, node);
+                    }
+                }
+            }
+        }
 
         // 3. nós de quebra: usados 2+ vezes, pontas, semáforos, travessias
         let mut all: Vec<i64> = Vec::new();
@@ -454,7 +634,7 @@ impl Net {
 
         // 4. segmentos
         for w in &ways {
-            let t = Tags(&w.raw.tags);
+            let t = Tags(w.tags);
             let a = way_attrs(&t, w.hw, w.link);
             let name = match t.get("name") {
                 Some(n) => *names.entry(n.to_string()).or_insert_with(|| {
@@ -463,7 +643,7 @@ impl Net {
                 }),
                 None => NO_NAME,
             };
-            let mut pts: Vec<(i64, V2)> = w.pts.iter().map(|p| (p.0, proj(p.1, p.2))).collect();
+            let mut pts: Vec<(i64, V2)> = w.pts.clone();
             if a.oneway < 0 {
                 pts.reverse();
             }
@@ -474,7 +654,11 @@ impl Net {
                 if !is_split(k, pts[k].0) {
                     continue;
                 }
-                let key: SegKey = [w.raw.id, pts[start].0, pts[k].0];
+                let key: SegKey = [w.id, pts[start].0, pts[k].0];
+                if edits.removed.contains(&key) {
+                    start = k;
+                    continue;
+                }
                 let edit = edits.segs.get(&key);
                 let reverse = edit.map_or(false, |e| e.reverse);
                 let (mut from_i, mut to_i) = (start, k);
@@ -532,7 +716,7 @@ impl Net {
 
                 net.segs.push(Seg {
                     key,
-                    way_id: w.raw.id,
+                    way_id: w.id,
                     from: from as u32,
                     to: to as u32,
                     poly,
@@ -751,4 +935,24 @@ pub fn approach_key(net: &Net, node: u32, e: u32) -> String {
         e & 1
     };
     format!("{}:{}:{}:{}", s.key[0], s.key[1], s.key[2], side)
+}
+
+/// Tags OSM sintéticas de uma via criada (para reaproveitar `way_attrs`).
+fn road_tags(r: &NewRoad) -> Vec<(String, String)> {
+    let lf = r.lf.clamp(1, MAX_LANES);
+    let lb = r.lb.clamp(1, MAX_LANES);
+    let mut t = vec![("highway".to_string(), r.hw.clone())];
+    if !r.name.is_empty() {
+        t.push(("name".into(), r.name.clone()));
+    }
+    if r.oneway {
+        t.push(("oneway".into(), "yes".into()));
+        t.push(("lanes".into(), lf.to_string()));
+    } else {
+        t.push(("oneway".into(), "no".into()));
+        t.push(("lanes:forward".into(), lf.to_string()));
+        t.push(("lanes:backward".into(), lb.to_string()));
+        t.push(("lanes".into(), (lf as u32 + lb as u32).to_string()));
+    }
+    t
 }

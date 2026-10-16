@@ -37,13 +37,19 @@ export function Toolbar() {
               Exportar cenário
             </button>
             <span className="sep" />
-            <div className="mode-switch" role="group" aria-label="Ferramenta de edição">
-              <button aria-pressed={mode === 'nodes'} onClick={() => setMode('nodes')} title="Selecionar cruzamentos e editar conversões">
-                Conversões
-              </button>
-              <button aria-pressed={mode === 'lanes'} onClick={() => setMode('lanes')} title="Selecionar vias e editar faixas">
-                Faixas
-              </button>
+            <div className="mode-switch" role="group" aria-label="Ferramenta">
+              {(
+                [
+                  ['nodes', 'Conversões', 'Selecionar cruzamentos, editar conversões e semáforos'],
+                  ['lanes', 'Faixas', 'Selecionar vias e editar faixas'],
+                  ['build', 'Construir', 'Desenhar vias novas'],
+                  ['erase', 'Demolir', 'Remover trechos de via'],
+                ] as const
+              ).map(([m, label, tip]) => (
+                <button key={m} aria-pressed={mode === m} onClick={() => setMode(m)} title={tip}>
+                  {label}
+                </button>
+              ))}
             </div>
             <span className="sep" />
             <button className="btn icon" onClick={() => viewRef.current?.zoomBy(1.4)} aria-label="Aproximar">

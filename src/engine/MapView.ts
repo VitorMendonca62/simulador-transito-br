@@ -1,4 +1,6 @@
 import { Application, Container, Graphics } from 'pixi.js'
+import type { NewPt } from '../model/persistence'
+import { presetWidth, type RoadPreset, ROAD_PRESETS } from '../model/presets'
 import type { NetworkData, SignalDef } from '../model/types'
 import { C } from './colors'
 import { LabelLayer } from './LabelLayer'
@@ -37,6 +39,49 @@ function segBounds(d: NetworkData): Float32Array {
 }
 const LOD: Partial<Record<LayerKey, number>> = { markings: 0.35, nodes: 0.2, shapes: 2.2, signals: 0.3, labels: 0.3 }
 
+type V = [number, number]
+/** Alvo de encaixe do cursor: nó existente, corpo de uma via (divide) ou ponto livre. */
+interface Snap {
+  x: number
+  y: number
+  kind: 'node' | 'way' | 'free'
+  node?: number
+  way?: number
+}
+interface DrawState {
+  start: Snap | null
+  /** ponto de controle da curva (modo curva, 1º trecho) */
+  ctrl: V | null
+  /** tangente ao fim do último trecho (continuação suave da curva) */
+  lastDir: V | null
+  newChain: boolean
+}
+
+const quad = (a: V, c: V, b: V): V[] => {
+  const n = Math.min(40, Math.max(4, Math.ceil((Math.hypot(c[0] - a[0], c[1] - a[1]) + Math.hypot(b[0] - c[0], b[1] - c[1])) / 6)))
+  const out: V[] = []
+  for (let i = 0; i <= n; i++) {
+    const t = i / n
+    const u = 1 - t
+    out.push([u * u * a[0] + 2 * u * t * c[0] + t * t * b[0], u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]])
+  }
+  return out
+}
+const polyLen = (p: V[]) => p.reduce((a, q, i) => (i ? a + Math.hypot(q[0] - p[i - 1][0], q[1] - p[i - 1][1]) : 0), 0)
+const MIN_PIECE = 6
+/** Ângulo máximo (graus) entre o chord e cada tangente da curva; acima disso a curva faz laço e é recusada. */
+const MAX_BEND = 100
+const angleBetween = (a: V, b: V) => {
+  const l = Math.hypot(a[0], a[1]) * Math.hypot(b[0], b[1])
+  if (l < 1e-9) return 0
+  return (Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / l))) * 180) / Math.PI
+}
+/** Curva quadrática (a, c, b) é aceitável se as duas tangentes não passam de MAX_BEND em relação à corda. */
+const curveOk = (a: V, c: V, b: V) => {
+  const chord: V = [b[0] - a[0], b[1] - a[1]]
+  return angleBetween([c[0] - a[0], c[1] - a[1]], chord) <= MAX_BEND && angleBetween([b[0] - c[0], b[1] - c[1]], chord) <= MAX_BEND
+}
+
 export class MapView {
   readonly app = new Application()
   private world = new Container()
@@ -49,11 +94,20 @@ export class MapView {
   private hoverG = new Graphics()
   private labels!: LabelLayer
   private segG = new Graphics()
-  private mode: 'nodes' | 'lanes' = 'nodes'
+  private buildG = new Graphics()
+  private badge!: HTMLDivElement
+  private buildPreset: RoadPreset = ROAD_PRESETS[0]
+  private buildCurve = false
+  private draw: DrawState = { start: null, ctrl: null, lastDir: null, newChain: true }
+  private cursorSnap: Snap | null = null
+  private mode: 'nodes' | 'lanes' | 'build' | 'erase' = 'nodes'
   private selectedSeg: number | null = null
   private hoverSeg: number | null = null
   private segBox: Float32Array = new Float32Array(0)
   onSegSelect: (seg: number | null) => void = () => {}
+  /** Trecho desenhado confirmado (pontos em metros locais). */
+  onBuildCommit: (pts: NewPt[], newChain: boolean) => void = () => {}
+  onErase: (seg: number) => void = () => {}
   private signals = new SignalLayer()
   private data: NetworkData | null = null
   private cam = { x: 0, y: 0, z: 1 }
@@ -102,11 +156,15 @@ export class MapView {
     if (this.destroyed) return app.destroy(true)
     host.appendChild(app.canvas)
     this.labels = new LabelLayer(host)
+    this.badge = document.createElement('div')
+    this.badge.className = 'build-badge'
+    this.badge.hidden = true
+    host.appendChild(this.badge)
     app.canvas.style.display = 'block'
     app.canvas.style.touchAction = 'none'
 
     app.stage.addChild(this.gridG, this.world)
-    this.world.addChild(this.roads, this.markings, this.segG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
+    this.world.addChild(this.roads, this.markings, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
     this.bindEvents()
 
     this.ro = new ResizeObserver(() => {
@@ -123,6 +181,7 @@ export class MapView {
     clearTimeout(this.labelTimer)
     this.ro?.disconnect()
     this.labels?.destroy()
+    this.badge?.remove()
     if (this.app.renderer) this.app.destroy(true, { children: true })
   }
 
@@ -198,10 +257,11 @@ export class MapView {
     this.scheduleLabels()
     this.redrawOverlay(true)
     this.drawSeg()
+    this.drawBuild()
   }
 
   /** Alterna entre editar conversões (nós) e faixas (trechos). */
-  setMode(m: 'nodes' | 'lanes') {
+  setMode(m: 'nodes' | 'lanes' | 'build' | 'erase') {
     this.mode = m
     this.selected = null
     this.lanes = null
@@ -211,10 +271,27 @@ export class MapView {
     this.hover = null
     this.hoverSeg = null
     this.selectedSeg = null
+    this.resetDraw()
     this.turnsG.clear()
     this.hoverG.clear()
     this.drawSeg()
-    this.app.canvas.style.cursor = 'grab'
+    this.app.canvas.style.cursor = m === 'build' ? 'crosshair' : 'grab'
+    this.requestRender()
+  }
+
+  /** Tipo de via e modo reta/curva do construtor. */
+  setBuild(preset: RoadPreset, curve: boolean) {
+    this.buildPreset = preset
+    this.buildCurve = curve
+    if (curve && this.draw.start && this.draw.ctrl == null && this.draw.lastDir == null) this.draw.ctrl = null
+    this.drawBuild()
+  }
+
+  private resetDraw() {
+    this.draw = { start: null, ctrl: null, lastDir: null, newChain: true }
+    this.cursorSnap = null
+    this.badge.hidden = true
+    this.buildG.clear()
     this.requestRender()
   }
 
@@ -225,19 +302,26 @@ export class MapView {
 
   /** Trecho cujo corpo (asfalto) contém o ponto de tela, o mais próximo do eixo. */
   private pickSeg(sx: number, sy: number): number | null {
+    return this.nearestSeg(sx, sy)?.seg ?? null
+  }
+
+  /** Trecho sob o ponto de tela e o ponto mais próximo do seu eixo. */
+  private nearestSeg(sx: number, sy: number): { seg: number; x: number; y: number } | null {
     const d = this.data
     if (!d) return null
     const { x, y, z } = this.cam
     const wx = (sx - x) / z
     const wy = (sy - y) / z
     const n = d.segKeys.length / 3
-    let best: number | null = null
+    let best: { seg: number; x: number; y: number } | null = null
     let bd = Infinity
     for (let i = 0; i < n; i++) {
       const half = Math.max(((d.segU32[i * 9 + 2] + d.segU32[i * 9 + 3]) * d.segW[i]) / 2, 1.5) + 3 / z
       const bx = this.segBox
       if (wx < bx[i * 4] - half || wx > bx[i * 4 + 2] + half || wy < bx[i * 4 + 1] - half || wy > bx[i * 4 + 3] + half) continue
       let dm = Infinity
+      let px = 0
+      let py = 0
       for (let k = d.segPtsOff[i]; k < d.segPtsOff[i + 1] - 1; k++) {
         const ax = d.segPts[k * 2]
         const ay = d.segPts[k * 2 + 1]
@@ -245,14 +329,136 @@ export class MapView {
         const vy = d.segPts[k * 2 + 3] - ay
         const l2 = vx * vx + vy * vy || 1
         const t = Math.max(0, Math.min(1, ((wx - ax) * vx + (wy - ay) * vy) / l2))
-        dm = Math.min(dm, Math.hypot(ax + vx * t - wx, ay + vy * t - wy))
+        const qx = ax + vx * t
+        const qy = ay + vy * t
+        const dd = Math.hypot(qx - wx, qy - wy)
+        if (dd < dm) {
+          dm = dd
+          px = qx
+          py = qy
+        }
       }
       if (dm <= half && dm / half < bd) {
         bd = dm / half
-        best = i
+        best = { seg: i, x: px, y: py }
       }
     }
     return best
+  }
+
+  /** Alvo de encaixe sob o cursor: nó (14 px) > corpo de via > ponto livre. */
+  private snapAt(sx: number, sy: number): Snap {
+    const d = this.data!
+    const { x, y, z } = this.cam
+    const wx = (sx - x) / z
+    const wy = (sy - y) / z
+    const r2 = (14 / z) ** 2
+    let bi = -1
+    let bd = r2
+    for (let i = 0; i < d.nodeXY.length / 2; i++) {
+      const dd = (d.nodeXY[i * 2] - wx) ** 2 + (d.nodeXY[i * 2 + 1] - wy) ** 2
+      if (dd < bd) {
+        bd = dd
+        bi = i
+      }
+    }
+    if (bi >= 0) return { x: d.nodeXY[bi * 2], y: d.nodeXY[bi * 2 + 1], kind: 'node', node: d.nodeOsm[bi] }
+    const hit = this.nearestSeg(sx, sy)
+    if (hit) return { x: hit.x, y: hit.y, kind: 'way', way: d.segKeys[hit.seg * 3] }
+    return { x: wx, y: wy, kind: 'free' }
+  }
+
+  /** Polilinha do trecho em desenho até o cursor, ou null se ainda não há início. */
+  private currentPiece(end: Snap): { pts: V[]; ctrl: V | null; ok: boolean } | null {
+    const st = this.draw.start
+    if (!st) return null
+    const a: V = [st.x, st.y]
+    const b: V = [end.x, end.y]
+    if (!this.buildCurve) return { pts: [a, b], ctrl: null, ok: true }
+    if (this.draw.ctrl) return { pts: quad(a, this.draw.ctrl, b), ctrl: this.draw.ctrl, ok: curveOk(a, this.draw.ctrl, b) }
+    if (this.draw.lastDir) {
+      const k = Math.hypot(b[0] - a[0], b[1] - a[1]) / 2
+      const c: V = [a[0] + this.draw.lastDir[0] * k, a[1] + this.draw.lastDir[1] * k]
+      return { pts: quad(a, c, b), ctrl: c, ok: curveOk(a, c, b) }
+    }
+    return { pts: [a, b], ctrl: null, ok: true }
+  }
+
+  private toNewPts(pts: V[], start: Snap, end: Snap): NewPt[] {
+    return pts.map((p, i) => {
+      const s = i === 0 ? start : i === pts.length - 1 ? end : null
+      const out: NewPt = { x: Math.round(p[0] * 1000) / 1000, y: Math.round(p[1] * 1000) / 1000 }
+      if (s?.kind === 'node') out.node = s.node
+      if (s?.kind === 'way') out.way = s.way
+      return out
+    })
+  }
+
+  private buildClick() {
+    const snap = this.cursorSnap
+    if (!snap || !this.data) return
+    const dr = this.draw
+    if (!dr.start) {
+      this.draw = { start: snap, ctrl: null, lastDir: null, newChain: true }
+      return this.drawBuild()
+    }
+    if (this.buildCurve && !dr.ctrl && !dr.lastDir) {
+      dr.ctrl = [snap.x, snap.y] // 2º clique define a curvatura
+      return this.drawBuild()
+    }
+    const piece = this.currentPiece(snap)
+    if (!piece || !piece.ok || polyLen(piece.pts) < MIN_PIECE) return
+    this.onBuildCommit(this.toNewPts(piece.pts, dr.start, snap), dr.newChain)
+    const n = piece.pts.length
+    const t: V = [piece.pts[n - 1][0] - piece.pts[n - 2][0], piece.pts[n - 1][1] - piece.pts[n - 2][1]]
+    const tl = Math.hypot(t[0], t[1]) || 1
+    this.draw = { start: snap, ctrl: null, lastDir: [t[0] / tl, t[1] / tl], newChain: false }
+    this.drawBuild()
+  }
+
+  /** Prévia da via (largura real), marcadores de encaixe e rótulo de comprimento. */
+  private drawBuild() {
+    const g = this.buildG
+    g.clear()
+    const snap = this.cursorSnap
+    if (this.mode !== 'build' || !snap || !this.data) {
+      this.badge.hidden = true
+      return this.requestRender()
+    }
+    const px = 1 / this.cam.z
+    const st = this.draw.start
+    const piece = this.currentPiece(snap)
+    let len = 0
+    let valid = false
+    if (st && piece) {
+      len = polyLen(piece.pts)
+      valid = len >= MIN_PIECE && piece.ok
+      const color = valid ? 0x4cc9f0 : 0xef4444
+      g.moveTo(piece.pts[0][0], piece.pts[0][1])
+      for (let i = 1; i < piece.pts.length; i++) g.lineTo(piece.pts[i][0], piece.pts[i][1])
+      g.stroke({ width: presetWidth(this.buildPreset), color, alpha: 0.38, join: 'round', cap: 'butt' })
+      g.moveTo(piece.pts[0][0], piece.pts[0][1])
+      for (let i = 1; i < piece.pts.length; i++) g.lineTo(piece.pts[i][0], piece.pts[i][1])
+      g.stroke({ width: 1.8 * px, color: 0xffffff, alpha: 0.9, join: 'round' })
+      if (piece.ctrl && this.draw.ctrl) {
+        g.circle(piece.ctrl[0], piece.ctrl[1], 5 * px).stroke({ width: 1.6 * px, color: 0xffffff, alpha: 0.9 })
+      }
+      g.circle(st.x, st.y, 6 * px).fill({ color: 0xffffff, alpha: 0.95 }).stroke({ width: 2 * px, color: 0x0b1110 })
+    }
+    // alvo de encaixe sob o cursor
+    if (snap.kind === 'node') g.circle(snap.x, snap.y, 11 * px).stroke({ width: 2.4 * px, color: 0x4ade80 })
+    else if (snap.kind === 'way') g.circle(snap.x, snap.y, 8 * px).stroke({ width: 2.2 * px, color: 0xfacc15 })
+    g.circle(snap.x, snap.y, 3.5 * px).fill({ color: snap.kind === 'free' ? 0xffffff : snap.kind === 'node' ? 0x4ade80 : 0xfacc15 })
+
+    // rótulo
+    const hint = snap.kind === 'node' ? 'conectar' : snap.kind === 'way' ? 'dividir a via' : ''
+    const stage = this.buildCurve && st && !this.draw.ctrl && !this.draw.lastDir ? 'clique para definir a curva' : ''
+    const text = [st ? `${len.toFixed(0)} m${valid ? '' : piece?.ok === false ? ' · curva muito fechada' : ' · curto'}` : 'iniciar aqui', hint, stage].filter(Boolean).join(' · ')
+    this.badge.textContent = text
+    this.badge.hidden = false
+    this.badge.style.transform = `translate(${snap.x * this.cam.z + this.cam.x + 16}px, ${snap.y * this.cam.z + this.cam.y + 16}px)`
+    this.badge.classList.toggle('bad', !!st && !valid)
+    this.requestRender()
   }
 
   /** Realce do trecho selecionado/sob o mouse, com setas de sentido (A→B). */
@@ -271,7 +477,7 @@ export class MapView {
       const b = d.segPtsOff[seg + 1]
       g.moveTo(d.segPts[a * 2], d.segPts[a * 2 + 1])
       for (let k = a + 1; k < b; k++) g.lineTo(d.segPts[k * 2], d.segPts[k * 2 + 1])
-      g.stroke({ width: total + 1.4, color: C.nodeMinor, alpha: selected ? 0.3 : 0.16, cap: 'butt', join: 'round' })
+      g.stroke({ width: total + 1.4, color: this.mode === 'erase' ? 0xef4444 : C.nodeMinor, alpha: this.mode === 'erase' ? 0.5 : selected ? 0.3 : 0.16, cap: 'butt', join: 'round' })
       if (!selected) continue
       // chevrons de sentido ao longo do eixo (para quem trafega do início ao fim do trecho)
       const step = 46 * px
@@ -389,7 +595,15 @@ export class MapView {
       const f = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))
       this.zoomAt(e.clientX - r.left, e.clientY - r.top, f)
     }, { passive: false })
+    cv.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      if (this.mode === 'build') {
+        this.draw = { start: null, ctrl: null, lastDir: null, newChain: true }
+        this.drawBuild()
+      }
+    })
     cv.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return
       cv.setPointerCapture(e.pointerId)
       if (this.selected != null && this.data && this.lanes && this.user.turns) {
         const [wx, wy] = world(e)
@@ -428,7 +642,12 @@ export class MapView {
         this.camChanged()
         return
       }
-      if (this.mode === 'lanes') {
+      if (this.mode === 'build' && this.data) {
+        this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        this.drawBuild()
+        return
+      }
+      if (this.mode === 'lanes' || this.mode === 'erase') {
         const sg = this.pickSeg(e.clientX - r.left, e.clientY - r.top)
         if (sg !== this.hoverSeg) {
           this.hoverSeg = sg
@@ -465,6 +684,22 @@ export class MapView {
       const wasClick = !drag.moved
       drag = null
       cv.style.cursor = 'grab'
+      if (wasClick && this.mode === 'build') {
+        const r = cv.getBoundingClientRect()
+        this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        this.buildClick()
+        return
+      }
+      if (wasClick && this.mode === 'erase') {
+        const r = cv.getBoundingClientRect()
+        const sg = this.pickSeg(e.clientX - r.left, e.clientY - r.top)
+        if (sg != null) {
+          this.hoverSeg = null
+          this.drawSeg()
+          this.onErase(sg)
+        }
+        return
+      }
       if (wasClick && this.mode === 'lanes') {
         const r = cv.getBoundingClientRect()
         const sg = this.pickSeg(e.clientX - r.left, e.clientY - r.top)
@@ -498,6 +733,11 @@ export class MapView {
 
   private onKey = (e: KeyboardEvent) => {
     if (e.key !== 'Escape') return
+    if (this.mode === 'build') {
+      this.draw = { start: null, ctrl: null, lastDir: null, newChain: true }
+      this.drawBuild()
+      return
+    }
     if (this.mode === 'lanes') {
       this.selectedSeg = null
       this.drawSeg()
@@ -552,6 +792,7 @@ export class MapView {
     this.drawGrid()
     this.lastSignalDraw = 0
     if (this.selectedSeg != null) this.drawSeg()
+    if (this.mode === 'build') this.drawBuild()
     this.labels?.reposition(this.cam)
     this.scheduleLabels()
     if (this.selected != null && Math.abs(z / (this.overlayZoom || z) - 1) > 0.02) this.redrawOverlay(false)

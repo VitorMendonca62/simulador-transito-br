@@ -162,3 +162,19 @@ code { background: #172321; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .appr-ph button { width: 22px; height: 22px; border-radius: 6px; border: 1.5px solid; background: transparent; cursor: pointer; font-size: 11px; font-weight: 600; }
 .appr-ph button.on { color: #0b1110; }
 .appr-ph button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+
+.build-badge { position: absolute; left: 0; top: 0; pointer-events: none; white-space: nowrap; background: rgba(8, 13, 12, 0.92); border: 1px solid #2f4540; border-radius: 7px; padding: 3px 8px; font-size: 12px; color: var(--text); }
+.build-badge.bad { border-color: #7a3040; color: #ffb4c0; }
+kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; font: 11px/1.5 var(--font); }
+.presets { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 4px; }
+.presets button { width: 100%; display: flex; align-items: center; gap: 10px; background: #0e1514; border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px; cursor: pointer; text-align: left; }
+.presets button:hover { border-color: #2f4540; }
+.presets button.on { border-color: var(--accent); background: #12201c; }
+.presets button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pr-name { display: grid; font-size: 13px; }
+.pr-name i { color: var(--dim); font-style: normal; font-size: 11px; }
+.xs { display: inline-flex; flex: none; height: 20px; background: #37403e; border-radius: 3px; overflow: hidden; border: 1px solid #1e2926; }
+.xs i { flex: 1; border-left: 1px dashed rgba(233, 238, 235, .55); }
+.xs i:first-child { border-left: 0; }
+.xs i.mid { border-left: 2px solid #f3c63f; }
+.tips { margin: 6px 0; padding-left: 16px; color: var(--dim); font-size: 12px; display: grid; gap: 4px; }

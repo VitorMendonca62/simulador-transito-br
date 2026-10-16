@@ -269,3 +269,56 @@ fn signal_phase_config_is_applied_and_covers_all_approaches() {
     let total: usize = sig.phases.iter().map(|p| p.ends.len()).sum();
     assert_eq!(total, sig.ends.len(), "toda aproximação é atendida");
 }
+
+fn road_json(extra_roads: &str, removed: &str) -> String {
+    format!(r#"{{"roads":[{extra_roads}],"removed":[{removed}]}}"#)
+}
+
+#[test]
+fn new_road_crossing_creates_intersections() {
+    let mut n = sample();
+    let (nodes0, segs0) = (n.net.nodes.len(), n.net.segs.len());
+    // via vertical em x=-50 (metros locais, Y para baixo): cruza a Avenida (y=0) e a Rua Sentido Único (y=-150)
+    let road = r#"{"id":900000000000001,"hw":"secondary","name":"Rua Nova","oneway":false,"lf":2,"lb":2,
+        "pts":[{"x":-50,"y":-200},{"x":-50,"y":200}]}"#;
+    n.set_edits(&road_json(road, "")).unwrap();
+    assert_eq!(n.net.nodes.len(), nodes0 + 4, "2 pontas + 2 cruzamentos");
+    // 3 trechos novos + 2 trechos criados pela divisão das vias existentes
+    assert_eq!(n.net.segs.len(), segs0 + 3 + 2);
+    let crossings = n.net.nodes.iter().filter(|x| x.ends.len() == 4 && x.osm_id < 0).count();
+    assert_eq!(crossings, 2);
+    assert!(n.net.meshes_ok());
+    // conexões entre a via nova e as existentes
+    assert!(n.net.conns.iter().any(|c| c.state == CONN_ALLOWED && n.net.segs[n.net.lanes[c.from_lane as usize].seg as usize].way_id == 900000000000001));
+    // removendo a via, volta ao original
+    n.set_edits(r#"{"roads":[]}"#).unwrap();
+    assert_eq!((n.net.nodes.len(), n.net.segs.len()), (nodes0, segs0));
+}
+
+#[test]
+fn new_road_snaps_to_way_body_and_nodes() {
+    let mut n = sample();
+    let nodes0 = n.net.nodes.len();
+    let road = r#"{"id":900000000000002,"hw":"residential","oneway":true,"lf":1,
+        "pts":[{"x":-50,"y":0,"way":5001},{"x":-50,"y":120}]}"#;
+    n.set_edits(&road_json(road, "")).unwrap();
+    assert_eq!(n.net.nodes.len(), nodes0 + 2, "nó de divisão + ponta");
+    let t = n.net.nodes.iter().find(|x| x.osm_id < 0 && x.ends.len() == 3).expect("T na avenida");
+    assert!(t.ends.len() == 3);
+    // encaixe num nó existente (semáforo central, OSM 1004)
+    let road2 = r#"{"id":900000000000003,"hw":"residential","pts":[{"x":0,"y":0,"node":1004},{"x":60,"y":-90}]}"#;
+    n.set_edits(&road_json(road2, "")).unwrap();
+    let c = n.net.nodes.iter().find(|x| x.osm_id == 1004).unwrap();
+    assert_eq!(c.ends.len(), 5, "o nó central ganhou um ramo");
+}
+
+#[test]
+fn removed_segments_disappear() {
+    let mut n = sample();
+    let segs0 = n.net.segs.len();
+    let k = key_of(&n, "Rua do Parque", 1);
+    n.set_edits(&road_json("", &format!("[{},{},{}]", k[0], k[1], k[2]))).unwrap();
+    assert_eq!(n.net.segs.len(), segs0 - 1);
+    assert!(n.net.segs.iter().all(|s| s.key != k));
+    assert!(n.net.meshes_ok());
+}

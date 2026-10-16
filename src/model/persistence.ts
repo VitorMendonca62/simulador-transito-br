@@ -30,6 +30,25 @@ export interface SegEdit {
   reverse: boolean
 }
 export type SegEdits = Record<string, SegEdit>
+
+/** Ponto de uma via nova (metros locais). `node` encaixa num nó; `way` no corpo de uma via. */
+export interface NewPt {
+  x: number
+  y: number
+  node?: number
+  way?: number
+}
+export interface NewRoad {
+  id: number
+  hw: string
+  name: string
+  oneway: boolean
+  lf: number
+  lb: number
+  pts: NewPt[]
+}
+/** Trecho demolido: [way, nóOsmInicial, nóOsmFinal]. */
+export type SegKeyTuple = [number, number, number]
 export const segEditKey = (e: { way: number; from: number; to: number }) => `${e.way}:${e.from}:${e.to}`
 
 export interface ScenarioFile {
@@ -42,12 +61,16 @@ export interface ScenarioFile {
   connections?: ConnEdits
   connFormat?: 2
   segments?: SegEdit[]
+  roads?: NewRoad[]
+  removed?: SegKeyTuple[]
 }
 
 const K_MAP = 'last-map'
 const K_SIGS = 'sig-config'
 const K_CONNS = 'conn-edits-v2'
 const K_SEGS = 'seg-edits'
+const K_ROADS = 'new-roads'
+const K_REMOVED = 'removed-segs'
 
 const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => {
   try {
@@ -65,9 +88,13 @@ export const saveConnEdits = (e: ConnEdits) => safe(() => set(K_CONNS, e), undef
 export const loadConnEdits = () => safe(async () => (await get<ConnEdits>(K_CONNS)) ?? {}, {} as ConnEdits)
 export const saveSegEdits = (e: SegEdits) => safe(() => set(K_SEGS, e), undefined)
 export const loadSegEdits = () => safe(async () => (await get<SegEdits>(K_SEGS)) ?? {}, {} as SegEdits)
+export const saveRoads = (r: NewRoad[], removed: SegKeyTuple[]) =>
+  safe(async () => (await set(K_ROADS, r), await set(K_REMOVED, removed)), undefined)
+export const loadRoads = () => safe(async () => (await get<NewRoad[]>(K_ROADS)) ?? [], [] as NewRoad[])
+export const loadRemoved = () => safe(async () => (await get<SegKeyTuple[]>(K_REMOVED)) ?? [], [] as SegKeyTuple[])
 export const clearAll = () =>
   safe(async () => {
-    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, 'conn-edits', 'signal-edits']) await del(k)
+    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, K_ROADS, K_REMOVED, 'conn-edits', 'signal-edits']) await del(k)
   }, undefined)
 
 /** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
@@ -122,7 +149,7 @@ export function configFromDef(def: SignalDef): SigConfig {
   }
 }
 
-export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits) {
+export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[]) {
   const file: ScenarioFile = {
     version: 1,
     app: 'simulador-transito',
@@ -131,6 +158,8 @@ export function exportScenario(name: string, sigs: SigConfigs, connections: Conn
     connections,
     connFormat: 2,
     segments: Object.values(segments),
+    roads,
+    removed,
   }
   const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
   const a = document.createElement('a')

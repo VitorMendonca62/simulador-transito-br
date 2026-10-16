@@ -151,5 +151,14 @@ npm run build          # produção (build:core + tsc + vite)
 - Restaurar: por semáforo (volta ao padrão do OSM, ou remove se foi adicionado) e "Restaurar todos".
 - Limites: ciclo é de tempo fixo (sem detecção/atuado); sem fase de pedestres separada; sem conflito/semáforo-amarelo piscante; só em nós de grau >= 3.
 
-### Próximas peças da fase 2
-criar/apagar vias; fluxo de entrada (OD); reconstrução incremental.
+### Feito: criar e apagar vias, estilo Cities: Skylines (2026-10-16)
+- Ferramentas na barra: **Conversões | Faixas | Construir | Demolir**. Desfazer (Ctrl+Z / botão) cobre construir e demolir.
+- **Construir** (`BuildPanel`, `MapView`): escolhe o tipo de via (`model/presets.ts`: rua local, coletora, avenida 2+2/3+3, mão única, via expressa, viela; cada um vira classe OSM + faixas), modo **Reta** ou **Curva** (Bézier quadrática: 1º clique início, 2º curvatura, 3º fim; depois continua suave). Clique a clique o traçado é confirmado e **continua da última ponta** (cadeia); Esc/botão direito encerra. Prévia com a largura real da via, rótulo de comprimento e dica ("conectar", "dividir a via", "curva muito fechada"; curva > 100° recusada; trecho < 6 m recusado).
+- **Encaixe**: anel verde = nó existente (14 px); anel amarelo = corpo de uma via (divide a via e cria o cruzamento); senão ponto livre. **Cruzamentos automáticos** onde a via nova atravessa outra, sem clicar.
+- **Demolir**: passar o mouse realça o trecho (entre dois nós) em vermelho; clique remove. Funciona em vias do mapa e criadas.
+- Núcleo (`core/src/net.rs`): `Edits.roads: Vec<NewRoad>` (id, classe, nome, mão, faixas, pontos em **metros locais**; `node`/`way` indicam encaixe) e `Edits.removed: HashSet<SegKey>`. A projeção usa só as vias do OSM, então as coordenadas locais são estáveis. Nós criados pelo editor têm **id negativo determinístico** a partir da posição (`coord_id`, resolução 10 cm); isso faz pontos coincidentes se unirem. `insert_on` divide vias existentes; `seg_cross` acha cruzamentos. A via nova vira um `W` como as do OSM (tags sintéticas via `road_tags`), então faixas, conversões, semáforos e Faixas-mode funcionam nela.
+- Payload de reconstrução: `{"segments","signals","roads","removed"}`. Persistência: IDB `new-roads`, `removed-segs`; `roads`/`removed` no JSON de cenário. O histórico de desfazer é reconstruído a partir deles ao recarregar.
+- Limites: demolição é por chave de trecho (way:de:para) — se uma via nova depois dividir esse trecho, a demolição antiga deixa de casar; rotatórias/ilhas não têm ferramenta própria; sem ajuste de elevação (túneis/viadutos) nem snap de ângulo/grade; vias novas ficam em metros locais do mapa em uso (cenário só vale para o mesmo mapa).
+
+### Próximas peças
+fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada edição); fase 3 (simulação).
