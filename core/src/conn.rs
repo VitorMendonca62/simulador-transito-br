@@ -151,7 +151,32 @@ pub fn build_connections(net: &mut Net, raw: &RawOsm) {
                             from_lane: fl,
                             to_lane: tl,
                             kind,
-                            allowed: true,
+                            state: CONN_ALLOWED,
+                            curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind),
+                        });
+                    }
+                }
+            }
+        }
+
+        // candidatas: todo par entrada -> saída que ainda não existe (estado ausente)
+        let existing: std::collections::HashSet<(u32, u32)> =
+            conns[off[ni] as usize..].iter().map(|c| (c.from_lane, c.to_lane)).collect();
+        for a in 0..n {
+            for b in 0..n {
+                let kind = if a == b { K_UTURN } else { classify(mul(outw[a], -1.0), outw[b]) };
+                for &fl in &ap[a].0 {
+                    for &tl in &ap[b].1 {
+                        if existing.contains(&(fl, tl)) {
+                            continue;
+                        }
+                        let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
+                        conns.push(Conn {
+                            node: ni as u32,
+                            from_lane: fl,
+                            to_lane: tl,
+                            kind,
+                            state: CONN_ABSENT,
                             curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind),
                         });
                     }
@@ -178,8 +203,8 @@ fn apply_restrictions(net: &mut Net, raw: &RawOsm) {
                 continue;
             }
             let hit = if r.kind.starts_with("only_") { out_way != r.to } else if r.kind.starts_with("no_") { out_way == r.to } else { false };
-            if hit {
-                net.conns[ci].allowed = false;
+            if hit && net.conns[ci].state == CONN_ALLOWED {
+                net.conns[ci].state = CONN_BLOCKED;
             }
         }
     }

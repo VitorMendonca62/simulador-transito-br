@@ -125,11 +125,23 @@ npm run build          # produção (build:core + tsc + vite)
 
 ## Fase 2 — andamento
 
-### Feito: edição de conversões (2026-10-16)
-- Clique numa **curva tracejada** do nó selecionado (ou numa **seta** no painel) alterna permitido/proibido; hover realça a curva. "Restaurar nó" desfaz as edições daquele cruzamento.
-- Dados: `connU32[c*5+4]` é alterado em memória; o original fica em `connOrig` (store.ts). Edições = diferença contra o original, chaveadas por `osmIdDoNó:faixaOrigem:faixaDestino` (`persistence.ts`), salvas em IndexedDB e incluídas no JSON de "Exportar cenário" (campo `connections`). Ids de faixa são determinísticos para o mesmo arquivo; o cenário só vale para o mesmo mapa.
-- Limite atual: só alterna conexões que o núcleo já gerou; criar conexões novas entre faixas arbitrárias (como no TM:PE) ainda não existe.
-- A flag `allowed` ainda vive no TS; quando a simulação (fase 3) entrar, o cenário precisa ser enviado ao núcleo.
+### Feito: conector de faixas estilo TM:PE (2026-10-16)
+- Núcleo gera, além das conexões padrão, **todas as candidatas** entrada->saída do nó com estado `CONN_ABSENT` (`core/src/conn.rs`). Estados em `connU32[c*5+4]`: 1 ligada, 0 proibida por restrição OSM (vermelho tracejado), 2 ausente (invisível até ser ligada). Constantes em `net.rs` e `model/types.ts`.
+- Overlay (`TurnOverlay.ts`): origens = pontos **grandes e coloridos** (paleta por faixa, contorno branco); destinos = pontos **pequenos**; curva de cada conexão na cor da origem. Origem ativa realça suas conexões e esmaece as demais.
+- Interação (`MapView.ts`): com um cruzamento selecionado, **arrastar de uma origem até um destino** liga a conversão; arrastar o mesmo par de novo remove. Prévia branca durante o arrasto; destino sob o cursor ganha anel. Clique numa origem a deixa ativa; Esc ou clique no vazio solta. Clique numa curva remove; setas do painel ligam/removem em grupo. "Restaurar nó" desfaz.
+- Persistência: diferença contra o estado original, chave `osmDoNó:faixaOrigem:faixaDestino` -> estado, em IndexedDB e no JSON de "Exportar cenário" (`connections`). Ids de faixa são determinísticos para o mesmo arquivo; o cenário só vale para o mesmo mapa.
+- Custo: candidatas elevam as conexões (mapa sintético grande: 270 mil -> 361 mil; import nativo ~510 ms).
+- A flag de estado ainda vive no TS; quando a simulação (fase 3) entrar, o cenário precisa ir ao núcleo.
+
+### Feito: edição de faixas por trecho (2026-10-16)
+- Modo **Faixas** (alternador na barra): clique numa via seleciona o **trecho** (segmento entre cruzamentos); realce verde com chevrons de sentido (→ = do início ao fim do desenho).
+- Painel (`SegmentPanel`): mão única, nº de faixas por sentido (1–8, estilo "stepper"), largura da faixa (2,4–4,5 m), faixa de ônibus por faixa, inverter sentido, restaurar. Escopo: "Só este trecho" ou "Toda a via" (todos os trechos do mesmo way OSM).
+- Arquitetura: tudo derivado vive no núcleo. `Network` (Rust) guarda o OSM bruto e `SegEdit`s; `apply_edits(json)` reconstrói grafo, faixas, conexões, semáforos e malhas (`core/src/lib.rs`, `net.rs`). O worker devolve os buffers novos; `MapView.updateNetwork` troca a cena mantendo câmera e seleção.
+- Chave estável do trecho: `way:nóOsmInicial:nóOsmFinal` na orientação original (`SegKey`). Edições de trecho em `segRecord` (store.ts), IndexedDB (`seg-edits`) e `segments` no JSON de cenário.
+- **Edições de conversão passaram a usar chaves estáveis** (`nóOsm|way:de:para.dir.idx>...`, IDB `conn-edits-v2`, `connFormat: 2`), por isso sobrevivem à renumeração de faixas; `connRecord` é a autoridade e é reaplicado após cada reconstrução. Conversões que apontam para faixas que não existem mais são descartadas.
+- Ao mudar o nº de faixas, as conversões padrão do cruzamento vizinho são recalculadas (as conversões editadas que ainda existem são mantidas).
+- Custo: reconstrução total a cada edição (debounce 90 ms). Mapa pequeno: poucos ms; mapa de 17 MB: ~0,5 s + transferência. **Otimização futura:** reconstrução incremental só da vizinhança do trecho.
+- Limites: máscaras `turn:lanes` do OSM são descartadas se o nº de faixas do trecho muda; inverter sentido em via de mão dupla troca os sentidos e as faixas.
 
 ### Próximas peças da fase 2
-nº de faixas por trecho; criar/apagar vias; adicionar/remover semáforos; fluxo de entrada (OD).
+adicionar/remover semáforos; criar/apagar vias; fluxo de entrada (OD); reconstrução incremental.

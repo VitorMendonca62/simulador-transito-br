@@ -4,7 +4,7 @@ import { useStore } from '../model/store'
 
 export function Toolbar() {
   const input = useRef<HTMLInputElement>(null)
-  const { data, loading } = useStore()
+  const { data, loading, mode, setMode } = useStore()
   const st = useStore.getState
   return (
     <header className="toolbar">
@@ -36,6 +36,15 @@ export function Toolbar() {
             <button className="btn" onClick={() => st().exportScenario()} title="Exporta os tempos de semáforo editados">
               Exportar cenário
             </button>
+            <span className="sep" />
+            <div className="mode-switch" role="group" aria-label="Ferramenta de edição">
+              <button aria-pressed={mode === 'nodes'} onClick={() => setMode('nodes')} title="Selecionar cruzamentos e editar conversões">
+                Conversões
+              </button>
+              <button aria-pressed={mode === 'lanes'} onClick={() => setMode('lanes')} title="Selecionar vias e editar faixas">
+                Faixas
+              </button>
+            </div>
             <span className="sep" />
             <button className="btn icon" onClick={() => viewRef.current?.zoomBy(1.4)} aria-label="Aproximar">
               +

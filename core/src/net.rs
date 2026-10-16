@@ -17,6 +17,35 @@ pub const HW_BUSWAY: u8 = 9;
 
 pub const NO_NAME: u32 = u32::MAX;
 
+pub const MAX_LANES: u8 = 8;
+
+/// Identifica um trecho de forma estável entre reconstruções: (way OSM, nó OSM inicial, nó OSM final)
+/// na orientação original (antes de qualquer inversão editada).
+pub type SegKey = [i64; 3];
+
+/// Edição de um trecho: valores finais, já na orientação resultante (`reverse` aplica a inversão).
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SegEdit {
+    pub way: i64,
+    pub from: i64,
+    pub to: i64,
+    pub oneway: bool,
+    pub lf: u8,
+    pub lb: u8,
+    /// largura da faixa (m); 0 mantém a padrão da classe
+    pub w: f64,
+    pub bus_f: Vec<bool>,
+    pub bus_b: Vec<bool>,
+    pub reverse: bool,
+}
+
+impl SegEdit {
+    pub fn key(&self) -> SegKey {
+        [self.way, self.from, self.to]
+    }
+}
+
 /// Bits de manobra (máscara) e códigos de tipo de conexão.
 pub const K_LEFT: u8 = 0;
 pub const K_STRAIGHT: u8 = 1;
@@ -54,6 +83,7 @@ pub struct Node {
 }
 
 pub struct Seg {
+    pub key: SegKey,
     pub way_id: i64,
     pub from: u32,
     pub to: u32,
@@ -124,12 +154,18 @@ pub struct Lane {
     pub edir: [f32; 2],
 }
 
+/// Estado de uma conexão: ligada, proibida por restrição OSM (mostrada em vermelho) ou ausente (candidata
+/// que o usuário pode ligar arrastando, como no TM:PE).
+pub const CONN_BLOCKED: u8 = 0;
+pub const CONN_ALLOWED: u8 = 1;
+pub const CONN_ABSENT: u8 = 2;
+
 pub struct Conn {
     pub node: u32,
     pub from_lane: u32,
     pub to_lane: u32,
     pub kind: u8,
-    pub allowed: bool,
+    pub state: u8,
     pub curve: [f32; 8],
 }
 
@@ -310,7 +346,7 @@ fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
 const M_PER_DEG: f64 = 111_319.490_793_273_57;
 
 impl Net {
-    pub fn build(raw: &RawOsm) -> Result<Net, String> {
+    pub fn build(raw: &RawOsm, edits: &HashMap<SegKey, SegEdit>) -> Result<Net, String> {
         // 1. vias aceitas, com coordenadas resolvidas
         struct W<'a> {
             raw: &'a crate::osm::RawWay,
@@ -408,37 +444,81 @@ impl Net {
                 if !is_split(k, pts[k].0) {
                     continue;
                 }
-                let poly = Poly::new(pts[start..=k].iter().map(|p| p.1).collect());
-                let from = split.binary_search(&pts[start].0).unwrap();
-                let to = split.binary_search(&pts[k].0).unwrap();
+                let key: SegKey = [w.raw.id, pts[start].0, pts[k].0];
+                let edit = edits.get(&key);
+                let reverse = edit.map_or(false, |e| e.reverse);
+                let (mut from_i, mut to_i) = (start, k);
+                let mut pp: Vec<V2> = pts[start..=k].iter().map(|p| p.1).collect();
+                if reverse {
+                    pp.reverse();
+                    (from_i, to_i) = (k, start);
+                }
+                let poly = Poly::new(pp);
+                let from = split.binary_search(&pts[from_i].0).unwrap();
+                let to = split.binary_search(&pts[to_i].0).unwrap();
                 if node_pos[from].is_none() {
-                    node_pos[from] = Some(pts[start].1);
+                    node_pos[from] = Some(pts[from_i].1);
                 }
                 if node_pos[to].is_none() {
-                    node_pos[to] = Some(pts[k].1);
+                    node_pos[to] = Some(pts[to_i].1);
                 }
                 start = k;
                 if !poly.ok() {
                     continue;
                 }
+
+                let mut oneway = a.oneway != 0;
+                let (mut lf, mut lb) = (a.lf, if oneway { 0 } else { a.lb });
+                let (mut bus_f, mut bus_b) = (a.bus_f.clone(), a.bus_b.clone());
+                let (mut turn_f, mut turn_b) = (a.turn_f.clone(), a.turn_b.clone());
+                let mut lane_w = a.w;
+                if reverse && !oneway {
+                    std::mem::swap(&mut lf, &mut lb);
+                    std::mem::swap(&mut bus_f, &mut bus_b);
+                    std::mem::swap(&mut turn_f, &mut turn_b);
+                }
+                if let Some(e) = edit {
+                    oneway = e.oneway;
+                    let old = (lf, lb);
+                    lf = e.lf.clamp(1, MAX_LANES);
+                    lb = if oneway { 0 } else { e.lb.clamp(1, MAX_LANES) };
+                    if e.w >= 2.0 && e.w <= 5.0 {
+                        lane_w = e.w;
+                    }
+                    bus_f = (0..lf as usize).map(|i| e.bus_f.get(i).copied().unwrap_or(false)).collect();
+                    bus_b = (0..lb as usize).map(|i| e.bus_b.get(i).copied().unwrap_or(false)).collect();
+                    // máscaras de curva do OSM só valem se o nº de faixas não mudou
+                    if old.0 != lf {
+                        turn_f = vec![0; lf as usize];
+                    }
+                    if old.1 != lb {
+                        turn_b = vec![0; lb as usize];
+                    }
+                }
+                turn_f.resize(lf as usize, 0);
+                turn_b.resize(lb as usize, 0);
+                bus_f.resize(lf as usize, false);
+                bus_b.resize(lb as usize, false);
+
                 net.segs.push(Seg {
+                    key,
                     way_id: w.raw.id,
                     from: from as u32,
                     to: to as u32,
                     poly,
                     hw: w.hw,
                     link: w.link,
-                    oneway: a.oneway != 0,
+                    oneway,
                     roundabout: a.roundabout,
-                    lf: a.lf,
-                    lb: if a.oneway != 0 { 0 } else { a.lb },
-                    w: a.w,
+                    lf,
+                    lb,
+                    w: lane_w,
                     name,
                     maxspeed: a.maxspeed,
-                    bus_f: a.bus_f.clone(),
-                    bus_b: a.bus_b.clone(),
-                    turn_f: a.turn_f.clone(),
-                    turn_b: a.turn_b.clone(),
+                    bus_f,
+                    bus_b,
+                    turn_f,
+                    turn_b,
                     cut_from: 0.0,
                     cut_to: 0.0,
                     lane_base: 0,

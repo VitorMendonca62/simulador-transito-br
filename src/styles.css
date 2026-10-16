@@ -106,3 +106,31 @@ code { background: #172321; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .arrows button:hover { border-color: currentColor; }
 .arrows button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+
+.mode-switch { display: inline-flex; background: #0e1514; border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+.mode-switch button { background: none; border: 0; padding: 5px 12px; border-radius: 7px; cursor: pointer; color: var(--dim); }
+.mode-switch button[aria-pressed='true'] { background: #1c2b28; color: var(--text); box-shadow: inset 0 0 0 1px #2f4540; }
+.mode-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.busy { margin-left: auto; margin-right: 6px; text-transform: none; letter-spacing: 0; color: var(--orange); font-weight: 500; font-size: 12px; }
+.seg-title { display: flex; justify-content: space-between; gap: 8px; }
+.seg-title span { color: var(--dim); font-size: 12px; }
+.seg-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 0; }
+.seg-scope button { background: #0e1514; border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; cursor: pointer; font-size: 12px; }
+.seg-scope button.on { border-color: var(--accent); color: var(--accent); }
+.seg-scope button:disabled { opacity: .45; cursor: default; }
+.check { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 3px 0; }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+.field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }
+.field.col { flex-direction: column; align-items: stretch; gap: 4px; }
+.field.col input[type='range'] { width: 100%; accent-color: var(--accent); }
+.field em { color: var(--dim); font-style: normal; font-size: 12px; }
+.stepper { display: inline-flex; align-items: center; gap: 6px; }
+.stepper output { min-width: 22px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.btn.icon.sm { width: 26px; padding: 3px 0; }
+.lane-list { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; max-height: 190px; overflow-y: auto; scrollbar-width: thin; }
+.lane-dir { display: block; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; margin: 4px 0 2px; }
+.lane-row span { flex: 1; }
+.hintx { color: var(--dim); font-style: normal; font-size: 12px; }
+.bus { color: var(--dim); font-style: normal; font-size: 11px; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; }
+.bus.on { color: #ffb4b4; border-color: #7a3030; background: #2a1414; }

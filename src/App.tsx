@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { MapView } from './engine/MapView'
 import { viewRef } from './engine/instance'
-import { useStore } from './model/store'
+import { getSegRecord, useStore } from './model/store'
 import { Inspector } from './ui/Inspector'
+import { SegmentPanel } from './ui/SegmentPanel'
 import { LayerPanel } from './ui/LayerPanel'
 import { SignalPanel } from './ui/SignalPanel'
 import { Toolbar } from './ui/Toolbar'
@@ -10,18 +11,20 @@ import { Toolbar } from './ui/Toolbar'
 export function App() {
   const host = useRef<HTMLDivElement>(null)
   const [drag, setDrag] = useState(false)
-  const { data, loading, error, toast, fileName, importMs, zoom } = useStore()
+  const { data, loading, error, toast, fileName, importMs, zoom, mode } = useStore()
 
   useEffect(() => {
     const view = new MapView(host.current!)
     view.onSelect = (n) => useStore.setState({ selected: n })
+    view.onSegSelect = (sg) => useStore.setState({ selectedSeg: sg })
     view.onZoom = (z) => useStore.getState().setZoom(z)
     view.onConnClick = (c) => useStore.getState().toggleConns([c])
+    view.onConnEdit = (from, to) => useStore.getState().connectLanes(from, to)
     let alive = true
     view.init().then(() => {
       if (!alive) return
       viewRef.current = view
-      if (import.meta.env.DEV) Object.assign(window, { __view: view, __store: useStore })
+      if (import.meta.env.DEV) Object.assign(window, { __view: view, __store: useStore, __seg: getSegRecord })
       void useStore.getState().restore()
     })
     return () => {
@@ -54,7 +57,7 @@ export function App() {
       {data && (
         <aside className="side">
           <LayerPanel />
-          <Inspector />
+          {mode === 'nodes' ? <Inspector /> : <SegmentPanel />}
           <SignalPanel />
         </aside>
       )}

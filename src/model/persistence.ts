@@ -9,20 +9,41 @@ export interface PhaseEdit {
 /** Edições de semáforo indexadas pelo id OSM do nó (estável entre importações). */
 export type SignalEdits = Record<string, PhaseEdit[]>
 
-/** Conversões alteradas: "osmDoNó:faixaOrigem:faixaDestino" -> 1 permitida / 0 proibida. */
-export type ConnEdits = Record<string, 0 | 1>
+/** Conversões alteradas: chave estável -> estado (1 ligada, 0 proibida, 2 ausente). */
+export type ConnEdits = Record<string, number>
+
+/** Configuração de faixas de um trecho (valores finais; enviada ao núcleo). */
+export interface SegEdit {
+  way: number
+  from: number
+  to: number
+  oneway: boolean
+  lf: number
+  lb: number
+  /** largura da faixa em metros */
+  w: number
+  busF: boolean[]
+  busB: boolean[]
+  reverse: boolean
+}
+export type SegEdits = Record<string, SegEdit>
+export const segEditKey = (e: { way: number; from: number; to: number }) => `${e.way}:${e.from}:${e.to}`
 
 export interface ScenarioFile {
   version: 1
   app: 'simulador-transito'
   map: { name: string }
   signals: SignalEdits
+  /** formato 2: chaves estáveis `nóOsm|way:de:para.dir.idx>...` */
   connections?: ConnEdits
+  connFormat?: 2
+  segments?: SegEdit[]
 }
 
 const K_MAP = 'last-map'
 const K_EDITS = 'signal-edits'
-const K_CONNS = 'conn-edits'
+const K_CONNS = 'conn-edits-v2'
+const K_SEGS = 'seg-edits'
 
 const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => {
   try {
@@ -38,37 +59,43 @@ export const saveEdits = (e: SignalEdits) => safe(() => set(K_EDITS, e), undefin
 export const loadEdits = () => safe(async () => (await get<SignalEdits>(K_EDITS)) ?? {}, {} as SignalEdits)
 export const saveConnEdits = (e: ConnEdits) => safe(() => set(K_CONNS, e), undefined)
 export const loadConnEdits = () => safe(async () => (await get<ConnEdits>(K_CONNS)) ?? {}, {} as ConnEdits)
-export const clearAll = () => safe(async () => (await del(K_MAP), await del(K_EDITS), await del(K_CONNS)), undefined)
+export const saveSegEdits = (e: SegEdits) => safe(() => set(K_SEGS, e), undefined)
+export const loadSegEdits = () => safe(async () => (await get<SegEdits>(K_SEGS)) ?? {}, {} as SegEdits)
+export const clearAll = () =>
+  safe(async () => {
+    for (const k of [K_MAP, K_EDITS, K_CONNS, K_SEGS, 'conn-edits']) await del(k)
+  }, undefined)
 
-export const connKey = (data: NetworkData, c: number) =>
-  `${data.nodeOsm[data.connU32[c * 5]]}:${data.connU32[c * 5 + 1]}:${data.connU32[c * 5 + 2]}`
-
-/** Compara as permissões atuais com as originais e devolve só o que mudou. */
-export function collectConnEdits(data: NetworkData, original: Uint8Array): ConnEdits {
-  const out: ConnEdits = {}
-  for (let c = 0; c < original.length; c++) {
-    const now = data.connU32[c * 5 + 4] as 0 | 1
-    if (now !== original[c]) out[connKey(data, c)] = now
-  }
-  return out
+/** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
+export function laneKey(d: NetworkData, lane: number): string {
+  const seg = d.laneU32[lane * 6]
+  const k = seg * 3
+  return `${d.segKeys[k]}:${d.segKeys[k + 1]}:${d.segKeys[k + 2]}.${d.laneU32[lane * 6 + 1]}.${d.laneU32[lane * 6 + 2]}`
 }
 
-/** Aplica edições salvas (ignora conversões que não existem mais). Devolve quantas foram aplicadas. */
-export function applyConnEdits(data: NetworkData, edits: ConnEdits): number {
-  const keys = Object.keys(edits)
-  if (keys.length === 0) return 0
+export const connKey = (d: NetworkData, c: number) =>
+  `${d.nodeOsm[d.connU32[c * 5]]}|${laneKey(d, d.connU32[c * 5 + 1])}>${laneKey(d, d.connU32[c * 5 + 2])}`
+
+/** Aplica edições de conversão (ignora as que não existem mais). Devolve quantas foram aplicadas. */
+export function applyConnEdits(d: NetworkData, edits: ConnEdits): number {
+  const byNode = new Map<number, Map<string, number>>()
   const byOsm = new Map<number, number>()
-  for (let n = 0; n < data.nodeOsm.length; n++) byOsm.set(data.nodeOsm[n], n)
-  let applied = 0
-  for (const k of keys) {
-    const [osm, from, to] = k.split(':').map(Number)
+  for (const [k, v] of Object.entries(edits)) {
+    const osm = Number(k.slice(0, k.indexOf('|')))
+    if (!byOsm.size) for (let n = 0; n < d.nodeOsm.length; n++) byOsm.set(d.nodeOsm[n], n)
     const n = byOsm.get(osm)
     if (n == null) continue
-    for (let c = data.connOff[n]; c < data.connOff[n + 1]; c++) {
-      if (data.connU32[c * 5 + 1] === from && data.connU32[c * 5 + 2] === to) {
-        data.connU32[c * 5 + 4] = edits[k]
+    const m = byNode.get(n) ?? new Map<string, number>()
+    m.set(k, v)
+    byNode.set(n, m)
+  }
+  let applied = 0
+  for (const [n, m] of byNode) {
+    for (let c = d.connOff[n]; c < d.connOff[n + 1]; c++) {
+      const v = m.get(connKey(d, c))
+      if (v != null) {
+        d.connU32[c * 5 + 4] = v
         applied++
-        break
       }
     }
   }
@@ -92,8 +119,16 @@ export function applyEdits(data: NetworkData, edits: SignalEdits): SignalDef[] {
   })
 }
 
-export function exportScenario(name: string, data: NetworkData, signals: SignalDef[], connections: ConnEdits) {
-  const file: ScenarioFile = { version: 1, app: 'simulador-transito', map: { name }, signals: collectEdits(data, signals), connections }
+export function exportScenario(name: string, data: NetworkData, signals: SignalDef[], connections: ConnEdits, segments: SegEdits) {
+  const file: ScenarioFile = {
+    version: 1,
+    app: 'simulador-transito',
+    map: { name },
+    signals: collectEdits(data, signals),
+    connections,
+    connFormat: 2,
+    segments: Object.values(segments),
+  }
   const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)

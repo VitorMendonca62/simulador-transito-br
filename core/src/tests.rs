@@ -29,6 +29,7 @@ fn conn_indices_valid() {
         let l1 = &n.net.lanes[c.to_lane as usize];
         assert_eq!(l0.to, c.node, "faixa de origem termina no nó");
         assert_eq!(l1.from, c.node, "faixa de destino começa no nó");
+        assert!(c.state <= CONN_ABSENT);
         assert!(c.curve.iter().all(|v| v.is_finite()));
     }
     assert!(n.net.meshes_ok());
@@ -38,7 +39,7 @@ fn conn_indices_valid() {
 fn restriction_blocks_left_turn() {
     let n = sample();
     let net = &n.net;
-    let blocked: Vec<_> = net.conns.iter().filter(|c| !c.allowed).collect();
+    let blocked: Vec<_> = net.conns.iter().filter(|c| c.state == CONN_BLOCKED).collect();
     assert!(!blocked.is_empty(), "no_left_turn deve bloquear conexões");
     assert!(blocked.iter().all(|c| c.kind == K_LEFT));
     // somente o nó via
@@ -72,7 +73,7 @@ fn turn_lanes_tag_is_respected() {
     let s = &net.segs[seg];
     let lanes: Vec<u32> = (0..s.lf as u32).map(|i| s.lane_base + i).collect();
     let kinds_of = |lane: u32| -> Vec<u8> {
-        let mut k: Vec<u8> = net.conns.iter().filter(|c| c.from_lane == lane).map(|c| c.kind).collect();
+        let mut k: Vec<u8> = net.conns.iter().filter(|c| c.from_lane == lane && c.state == CONN_ALLOWED).map(|c| c.kind).collect();
         k.sort();
         k.dedup();
         k
@@ -94,7 +95,7 @@ fn roundabout_is_oneway_and_entries_only_turn_right() {
             continue;
         }
         let ni = net.nodes.iter().position(|x| std::ptr::eq(x, node)).unwrap() as u32;
-        for c in net.conns.iter().filter(|c| c.node == ni) {
+        for c in net.conns.iter().filter(|c| c.node == ni && c.state == CONN_ALLOWED) {
             let from_ring = net.segs[net.lanes[c.from_lane as usize].seg as usize].roundabout;
             let to_ring = net.segs[net.lanes[c.to_lane as usize].seg as usize].roundabout;
             assert!(from_ring || to_ring, "entrada não pode atravessar a rotatória direto");
@@ -136,8 +137,89 @@ fn pbf_matches_xml() {
     assert_eq!(xml.net.conns.len(), pbf.net.conns.len());
     assert_eq!(xml.net.signals.len(), pbf.net.signals.len());
     assert_eq!(
-        xml.net.conns.iter().filter(|c| !c.allowed).count(),
-        pbf.net.conns.iter().filter(|c| !c.allowed).count(),
+        xml.net.conns.iter().filter(|c| c.state == CONN_BLOCKED).count(),
+        pbf.net.conns.iter().filter(|c| c.state == CONN_BLOCKED).count(),
         "restrições também vêm do PBF"
     );
+}
+
+#[test]
+fn candidates_cover_every_lane_pair() {
+    let n = sample();
+    let net = &n.net;
+    // no cruzamento central (4 ramos), toda faixa de entrada tem uma conexão (ligada ou candidata) para toda faixa de saída
+    let ni = (0..net.nodes.len()).find(|&i| net.nodes[i].signal && net.nodes[i].ends.len() == 4).unwrap();
+    let (mut ins, mut outs) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    for &e in &net.nodes[ni].ends {
+        let (i, o) = net.approach_lanes(e);
+        ins.extend(i);
+        outs.extend(o);
+    }
+    let range = net.conn_off[ni] as usize..net.conn_off[ni + 1] as usize;
+    let pairs: std::collections::HashSet<_> = net.conns[range.clone()].iter().map(|c| (c.from_lane, c.to_lane)).collect();
+    assert_eq!(pairs.len(), range.len(), "sem pares duplicados");
+    assert_eq!(pairs.len(), ins.len() * outs.len());
+    assert!(net.conns[range].iter().any(|c| c.state == CONN_ABSENT));
+}
+
+fn key_of(n: &Network, name: &str, lanes_f: u8) -> SegKey {
+    let net = &n.net;
+    let idx = net.names.iter().position(|x| x == name).expect("nome") as u32;
+    net.segs.iter().find(|s| s.name == idx && s.lf == lanes_f).expect("trecho").key
+}
+
+fn edit_json(k: SegKey, extra: &str) -> String {
+    format!("[{{\"way\":{},\"from\":{},\"to\":{},{}}}]", k[0], k[1], k[2], extra)
+}
+
+#[test]
+fn edit_lane_count_rebuilds_everything() {
+    let mut n = sample();
+    let before = (n.net.lanes.len(), n.net.conns.len(), n.meshes.asphalt.pos.len());
+    let k = key_of(&n, "Rua das Palmeiras", 1);
+    n.set_edits(&edit_json(k, "\"oneway\":false,\"lf\":3,\"lb\":2")).unwrap();
+    let seg = n.net.segs.iter().find(|s| s.key == k).unwrap();
+    assert_eq!((seg.lf, seg.lb), (3, 2));
+    assert!(n.net.lanes.len() > before.0, "mais faixas");
+    assert!(n.net.conns.len() > before.1, "mais conexões candidatas");
+    assert!(n.meshes.asphalt.pos.len() > before.2 / 2);
+    assert!(n.net.meshes_ok());
+    // restrições OSM continuam valendo
+    assert!(n.net.conns.iter().any(|c| c.state == CONN_BLOCKED));
+    // remover edições volta ao original
+    n.set_edits("[]").unwrap();
+    assert_eq!(n.net.lanes.len(), before.0);
+    assert_eq!(n.net.conns.len(), before.1);
+}
+
+#[test]
+fn edit_oneway_and_reverse() {
+    let mut n = sample();
+    let k = key_of(&n, "Rua do Parque", 1);
+    let (from0, to0) = {
+        let s = n.net.segs.iter().find(|s| s.key == k).unwrap();
+        (s.from, s.to)
+    };
+    n.set_edits(&edit_json(k, "\"oneway\":true,\"lf\":2,\"reverse\":true")).unwrap();
+    let s = n.net.segs.iter().find(|s| s.key == k).unwrap();
+    assert!(s.oneway);
+    assert_eq!((s.lf, s.lb), (2, 0));
+    assert_eq!((s.from, s.to), (to0, from0), "sentido invertido");
+    assert_eq!(s.key, k, "a chave continua a original");
+    // faixas de ônibus por faixa
+    n.set_edits(&edit_json(k, "\"oneway\":false,\"lf\":2,\"lb\":1,\"busF\":[false,true]")).unwrap();
+    let s = n.net.segs.iter().find(|s| s.key == k).unwrap();
+    assert_eq!(s.bus_f, vec![false, true]);
+    assert_eq!(s.bus_b, vec![false]);
+}
+
+#[test]
+fn edit_clamps_and_rejects_bad_json() {
+    let mut n = sample();
+    let k = key_of(&n, "Rua do Parque", 1);
+    n.set_edits(&edit_json(k, "\"oneway\":false,\"lf\":99,\"lb\":0,\"w\":99")).unwrap();
+    let s = n.net.segs.iter().find(|s| s.key == k).unwrap();
+    assert_eq!((s.lf, s.lb), (MAX_LANES, 1));
+    assert!(s.w < 5.5);
+    assert!(n.set_edits("not json").is_err());
 }

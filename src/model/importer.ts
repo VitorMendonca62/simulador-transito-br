@@ -8,7 +8,17 @@ function getWorker(): Worker {
 }
 
 /** Importa um .osm/.pbf no núcleo WASM (Web Worker). O buffer é copiado: o original continua utilizável. */
-export function importMap(buffer: ArrayBuffer, name: string): Promise<{ data: NetworkData; ms: number }> {
+export function importMap(buffer: ArrayBuffer, name: string, edits?: string): Promise<{ data: NetworkData; ms: number }> {
+  const copy = buffer.slice(0)
+  return request({ type: 'import', buffer: copy, name, edits }, [copy])
+}
+
+/** Reconstrói a rede já carregada no worker com as edições de trecho (JSON). */
+export function editNetwork(edits: string): Promise<{ data: NetworkData; ms: number }> {
+  return request({ type: 'edit', edits }, [])
+}
+
+function request(msg: WorkerIn, transfer: Transferable[]): Promise<{ data: NetworkData; ms: number }> {
   const w = getWorker()
   return new Promise((resolve, reject) => {
     const onMsg = (ev: MessageEvent<WorkerOut>) => {
@@ -24,8 +34,6 @@ export function importMap(buffer: ArrayBuffer, name: string): Promise<{ data: Ne
     }
     w.addEventListener('message', onMsg)
     w.addEventListener('error', onErr)
-    const copy = buffer.slice(0)
-    const msg: WorkerIn = { type: 'import', buffer: copy, name }
-    w.postMessage(msg, [copy])
+    w.postMessage(msg, transfer)
   })
 }

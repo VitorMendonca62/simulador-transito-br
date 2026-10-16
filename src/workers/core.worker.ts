@@ -27,6 +27,10 @@ function extract(net: Network): NetworkData {
     white: mesh(net.white_pos(), net.white_idx()),
     yellow: mesh(net.yellow_pos(), net.yellow_idx()),
     labels: net.labels_f32(),
+    segKeys: net.seg_keys(),
+    segW: net.seg_w(),
+    segPts: net.seg_pts(),
+    segPtsOff: net.seg_pts_off(),
   }
 }
 
@@ -43,14 +47,19 @@ function transferables(d: NetworkData): ArrayBuffer[] {
 
 self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data
-  if (msg.type !== 'import') return
   const post = (m: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(m, t)
   try {
     ready ??= init()
     await ready
     const t0 = performance.now()
-    current?.free()
-    current = import_osm(new Uint8Array(msg.buffer))
+    if (msg.type === 'import') {
+      current?.free()
+      current = import_osm(new Uint8Array(msg.buffer))
+      if (msg.edits && msg.edits !== '[]') current.apply_edits(msg.edits)
+    } else if (msg.type === 'edit') {
+      if (!current) throw new Error('Nenhum mapa carregado')
+      current.apply_edits(msg.edits)
+    } else return
     const data = extract(current)
     post({ type: 'done', data, ms: performance.now() - t0 }, transferables(data))
   } catch (e) {

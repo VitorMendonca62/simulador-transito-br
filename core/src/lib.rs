@@ -14,17 +14,39 @@ use wasm_bindgen::prelude::*;
 /// Rede importada, mantida viva no worker; o JS lê os buffers por getters.
 #[wasm_bindgen]
 pub struct Network {
+    /// OSM bruto, guardado para reconstruir a rede quando há edições de trecho.
+    raw: osm::RawOsm,
+    edits: std::collections::HashMap<SegKey, SegEdit>,
     net: Net,
     meshes: render::Meshes,
 }
 
-pub fn build_network(data: &[u8]) -> Result<Network, String> {
-    let raw = osm::parse(data)?;
-    let mut net = Net::build(&raw)?;
-    conn::build_connections(&mut net, &raw);
+fn build_parts(raw: &osm::RawOsm, edits: &std::collections::HashMap<SegKey, SegEdit>) -> Result<(Net, render::Meshes), String> {
+    let mut net = Net::build(raw, edits)?;
+    conn::build_connections(&mut net, raw);
     conn::build_signals(&mut net);
     let meshes = render::build_meshes(&net);
-    Ok(Network { net, meshes })
+    Ok((net, meshes))
+}
+
+pub fn build_network(data: &[u8]) -> Result<Network, String> {
+    let raw = osm::parse(data)?;
+    let edits = std::collections::HashMap::new();
+    let (net, meshes) = build_parts(&raw, &edits)?;
+    Ok(Network { raw, edits, net, meshes })
+}
+
+impl Network {
+    /// Substitui o conjunto de edições de trecho e reconstrói a rede (JSON: lista de `SegEdit`).
+    pub fn set_edits(&mut self, json: &str) -> Result<(), String> {
+        let list: Vec<SegEdit> = serde_json::from_str(json).map_err(|e| format!("edições inválidas: {e}"))?;
+        let edits: std::collections::HashMap<SegKey, SegEdit> = list.into_iter().map(|e| (e.key(), e)).collect();
+        let (net, meshes) = build_parts(&self.raw, &edits)?;
+        self.edits = edits;
+        self.net = net;
+        self.meshes = meshes;
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -91,6 +113,33 @@ impl Network {
         out
     }
 
+    /// Reconstrói a rede com as edições de trecho (JSON). Os buffers antigos deixam de valer.
+    pub fn apply_edits(&mut self, json: &str) -> Result<(), JsError> {
+        self.set_edits(json).map_err(|e| JsError::new(&e))
+    }
+    pub fn edit_count(&self) -> usize {
+        self.edits.len()
+    }
+    /// [way, nó_inicial, nó_final] (ids OSM, orientação original) por trecho.
+    pub fn seg_keys(&self) -> Vec<f64> {
+        self.net.segs.iter().flat_map(|s| s.key.map(|v| v as f64)).collect()
+    }
+    /// Largura da faixa (m) por trecho.
+    pub fn seg_w(&self) -> Vec<f32> {
+        self.net.segs.iter().map(|s| s.w as f32).collect()
+    }
+    /// Eixo de cada trecho: pontos xy em sequência, com offsets em `seg_pts_off`.
+    pub fn seg_pts(&self) -> Vec<f32> {
+        self.net.segs.iter().flat_map(|s| s.poly.pts.iter().flat_map(|p| [p[0] as f32, p[1] as f32])).collect()
+    }
+    pub fn seg_pts_off(&self) -> Vec<u32> {
+        let mut o = vec![0u32];
+        for s in &self.net.segs {
+            o.push(o.last().unwrap() + s.poly.pts.len() as u32);
+        }
+        o
+    }
+
     // --- segmentos e faixas
     /// [from, to, lf, lb, hw, name, flags(bit0 oneway, bit1 rotatória, bit2 link), maxspeed, lane_base] por segmento.
     pub fn seg_u32(&self) -> Vec<u32> {
@@ -126,9 +175,9 @@ impl Network {
     }
 
     // --- conexões
-    /// [nó, faixa_origem, faixa_destino, tipo(0 esq,1 frente,2 dir,3 retorno), permitido]
+    /// [nó, faixa_origem, faixa_destino, tipo(0 esq,1 frente,2 dir,3 retorno), estado(1 ligada, 0 proibida, 2 ausente)]
     pub fn conn_u32(&self) -> Vec<u32> {
-        self.net.conns.iter().flat_map(|c| [c.node, c.from_lane, c.to_lane, c.kind as u32, c.allowed as u32]).collect()
+        self.net.conns.iter().flat_map(|c| [c.node, c.from_lane, c.to_lane, c.kind as u32, c.state as u32]).collect()
     }
     /// Bézier cúbica (p0,p1,p2,p3) por conexão.
     pub fn conn_f32(&self) -> Vec<f32> {

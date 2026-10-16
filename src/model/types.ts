@@ -52,6 +52,10 @@ export interface NetworkData {
   white: MeshData
   yellow: MeshData
   labels: Float32Array // [x,y,ang,len,rank,name,width] x7
+  segKeys: Float64Array // [way, nóOsmInicial, nóOsmFinal] x3, orientação original
+  segW: Float32Array // largura da faixa (m) por trecho
+  segPts: Float32Array // eixo dos trechos (xy), offsets em segPtsOff
+  segPtsOff: Uint32Array
 }
 
 export const SEG_STRIDE = 9
@@ -63,7 +67,14 @@ export const KIND_STRAIGHT = 1
 export const KIND_RIGHT = 2
 export const KIND_UTURN = 3
 
-export type WorkerIn = { type: 'import'; buffer: ArrayBuffer; name: string }
+export type WorkerIn =
+  | { type: 'import'; buffer: ArrayBuffer; name: string; edits?: string }
+  | { type: 'edit'; edits: string }
 export type WorkerOut =
   | { type: 'done'; data: NetworkData; ms: number }
   | { type: 'error'; message: string }
+
+/** Estado de uma conexão de faixa (connU32[c*5+4]). */
+export const CONN_BLOCKED = 0 // proibida por restrição OSM (vermelho)
+export const CONN_ALLOWED = 1 // ligada
+export const CONN_ABSENT = 2 // candidata não ligada (só aparece ao arrastar)
