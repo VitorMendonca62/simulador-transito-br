@@ -1,3 +1,5 @@
+import { perf } from '../engine/perf'
+import type { Approach } from '../engine/SignLayer'
 import type { BenchResult, NetworkData, NodeConns, SimStats, WorkerIn, WorkerOut } from './types'
 
 let worker: Worker | null = null
@@ -39,8 +41,20 @@ function request(msg: WorkerIn, transfer: Transferable[]): Promise<{ data: Netwo
   })
 }
 
+let perfAttached = false
+/** Passa a registrar a ocupação do worker e a memória do WASM em `perf`. */
+export function watchWorkerPerf() {
+  if (perfAttached) return
+  perfAttached = true
+  getWorker().addEventListener('message', (ev: MessageEvent<WorkerOut>) => {
+    if (ev.data.type !== 'perf') return
+    perf.simBusyMs = ev.data.busyMs
+    perf.wasmBytes = ev.data.wasmBytes
+  })
+}
+
 let callSeq = 0
-type CallMsg = { type: 'demand'; json: string } | { type: 'nodeConns'; node: number } | { type: 'simHist'; bucket: number }
+type CallMsg = { type: 'demand'; json: string } | { type: 'nodeConns'; node: number } | { type: 'approaches'; node: number } | { type: 'simHist'; bucket: number } | { type: 'simStuck'; n: number }
 type CallResult = Extract<WorkerOut, { type: 'result' }>
 
 /** Chamada avulsa ao núcleo (demanda, conexões do nó…); várias podem estar em voo. */
@@ -82,6 +96,16 @@ export async function fetchNodeConns(node: number): Promise<NodeConns> {
   return { node, n, u32, f32: r.f32 ?? new Float32Array(0), base }
 }
 
+/** Ramos do nó com faixa de entrada, para as placas de preferência. */
+export async function fetchApproaches(node: number): Promise<Approach[]> {
+  return JSON.parse((await call({ type: 'approaches', node })).json ?? '[]') as Approach[]
+}
+
+/** Atualiza no núcleo as placas de preferência (valem a partir da próxima simulação). */
+export function sendPrioEdits(record: Record<string, number>) {
+  getWorker().postMessage({ type: 'prioEdits', json: JSON.stringify(record) } satisfies WorkerIn)
+}
+
 /** Atualiza no núcleo as conversões editadas (sem reconstruir a rede). */
 export function sendConnEdits(record: Record<string, number>) {
   getWorker().postMessage({ type: 'connEdits', json: JSON.stringify(record) } satisfies WorkerIn)
@@ -108,7 +132,12 @@ function attachSim() {
   if (simAttached) return
   simAttached = true
   getWorker().addEventListener('message', (ev: MessageEvent<WorkerOut>) => {
-    if (ev.data.type === 'sim' || ev.data.type === 'simEnded') simListener?.(ev.data)
+    if (ev.data.type !== 'sim' && ev.data.type !== 'simEnded') return
+    const t0 = performance.now()
+    simListener?.(ev.data)
+    perf.uiMs += performance.now() - t0
+    // confirma depois do próximo quadro pintado: o worker só manda outro quando a UI deu conta do anterior
+    if (ev.data.type === 'sim') requestAnimationFrame(() => getWorker().postMessage({ type: 'simAck' } satisfies WorkerIn))
   })
 }
 
@@ -136,6 +165,26 @@ export function simStart(payload: unknown): Promise<void> {
 
 export const simRun = (running: boolean, speed: number) => getWorker().postMessage({ type: 'simRun', running, speed } satisfies WorkerIn)
 export const simTrack = (veh: number | null) => getWorker().postMessage({ type: 'simTrack', veh } satisfies WorkerIn)
+/** Com a simulação pausada, avança `seconds` s simulados (depuração passo a passo). */
+export const simStepBy = (seconds: number) => getWorker().postMessage({ type: 'simStepBy', seconds } satisfies WorkerIn)
+
+export interface StuckItem {
+  id: number
+  wait: number
+  ok: boolean
+  reason: string
+  code: number
+  blocker: number
+  street: string
+  signal: number
+}
+
+/** Veículos na frente de faixa parados há mais tempo, com o motivo. */
+export async function fetchStuck(n = 12): Promise<StuckItem[]> {
+  const r = await call({ type: 'simStuck', n })
+  return r.json ? (JSON.parse(r.json) as StuckItem[]) : []
+}
+
 export const simStop = () => getWorker().postMessage({ type: 'simStop' } satisfies WorkerIn)
 
 /** Tipo de mapa de calor pedido ao núcleo: 0 velocidade, 1 fila, -1 desligado. */

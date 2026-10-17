@@ -72,6 +72,7 @@ impl Network {
             roads: Vec<NewRoad>,
             removed: Vec<SegKey>,
             connections: std::collections::HashMap<String, u8>,
+            priorities: std::collections::HashMap<String, u8>,
         }
         let payload: Payload = match serde_json::from_str::<Payload>(json) {
             Ok(p) => p,
@@ -86,6 +87,7 @@ impl Network {
             roads: payload.roads,
             removed: payload.removed.into_iter().collect(),
             conns: Default::default(),
+            prios: payload.priorities.into_iter().filter(|(_, v)| (1..=3).contains(v)).collect(),
         };
         edits.set_conns(payload.connections);
         let net = build_parts(&self.raw, &self.base, &edits, self.lazy)?;
@@ -103,7 +105,8 @@ impl Network {
     /// Inicia a simulação (JSON: `{"zones":[…],"params":{…}}`).
     pub fn start_sim(&mut self, json: &str) -> Result<(), String> {
         self.ensure_conns();
-        let init: sim::SimInit = serde_json::from_str(json).map_err(|e| format!("simulação inválida: {e}"))?;
+        let mut init: sim::SimInit = serde_json::from_str(json).map_err(|e| format!("simulação inválida: {e}"))?;
+        init.prios = self.edits.prios.clone();
         self.sim = Some(sim::Sim::new(&self.net, &init)?);
         Ok(())
     }
@@ -140,6 +143,7 @@ impl Network {
             .collect();
         json!({
             "bounds": n.bounds,
+            "geo": n.geo,
             "counts": {"nodes": n.nodes.len(), "segments": n.segs.len(), "lanes": n.lanes.len(), "connections": n.conns.len(), "signals": n.signals.len()},
             "names": n.names,
             "signals": signals,
@@ -271,7 +275,7 @@ impl Network {
     pub fn sim_time(&self) -> f64 {
         self.sim.as_ref().map_or(0.0, |s| s.time)
     }
-    /// Veículos: [x, y, rumo, velocidade, tipo(0 carro, 1 ônibus), comprimento] cada.
+    /// Veículos indexados pelo slot (id = posição): [x, y, dx, dy, velocidade, comprimento (negativo = ônibus)] cada; slot livre = zeros.
     pub fn sim_snapshot(&self) -> Vec<f32> {
         let mut out = Vec::new();
         if let Some(s) = &self.sim {
@@ -280,10 +284,25 @@ impl Network {
         out
     }
     /// Rota restante do veículo `id` (JSON); `{"alive":false}` se já saiu.
-    pub fn sim_track(&self, id: u32) -> String {
-        match self.sim.as_ref().and_then(|s| s.track(&self.net, id as usize)) {
-            Some((pts, zone, kind, v, wait)) => json!({ "alive": true, "id": id, "zone": zone, "kind": kind, "v": v, "wait": wait, "pts": pts }).to_string(),
+    pub fn sim_track(&mut self, id: u32) -> String {
+        let net = &self.net;
+        match self.sim.as_mut() {
+            Some(s) => match s.track(net, id as usize) {
+                Some((pts, zone, kind, v, wait)) => {
+                    let info = s.explain(net, id as usize);
+                    json!({ "alive": true, "id": id, "zone": zone, "kind": kind, "v": v, "wait": wait, "pts": pts, "info": info }).to_string()
+                }
+                None => json!({ "alive": false, "id": id }).to_string(),
+            },
             None => json!({ "alive": false, "id": id }).to_string(),
+        }
+    }
+    /// Os `n` veículos parados há mais tempo na frente de uma faixa, com o motivo (JSON).
+    pub fn sim_stuck(&mut self, n: u32) -> String {
+        let net = &self.net;
+        match self.sim.as_mut() {
+            Some(s) => serde_json::Value::Array(s.stuck_list(net, n as usize)).to_string(),
+            None => "[]".to_string(),
         }
     }
     pub fn sim_stats(&self) -> String {
@@ -298,6 +317,8 @@ impl Network {
                 "meanTravel": if s.stats.finished > 0 { s.stats.travel_sum / s.stats.finished as f64 } else { 0.0 },
                 "redRuns": s.stats.red_runs,
                 "laneChanges": s.stats.lane_changes,
+                "illegalMoves": s.stats.illegal_moves,
+                "skipped": s.stats.skipped,
             })
             .to_string(),
             None => "{}".to_string(),
@@ -340,6 +361,54 @@ impl Network {
         self.net.conns.clear();
         self.net.conn_off.clear();
         Ok(())
+    }
+    /// Atualiza a sinalização de preferência (sem reconstruir; vale a partir da próxima simulação). JSON: chave -> nível.
+    pub fn set_prio_edits(&mut self, json: &str) -> Result<(), JsError> {
+        let m: std::collections::HashMap<String, u8> = serde_json::from_str(json).map_err(|e| JsError::new(&format!("preferências inválidas: {e}")))?;
+        self.edits.prios = m.into_iter().filter(|(_, v)| (1..=3).contains(v)).collect();
+        Ok(())
+    }
+    /// Aproximações do nó (ramos com faixa de entrada) para colocar placas: JSON `[{key,x,y,dx,dy,name,hw,level,auto}]`.
+    /// `auto`: 1 = pelo mapa esta via tem preferência, 2 = deve ceder.
+    pub fn node_approaches_json(&self, node: u32) -> String {
+        let n = &self.net;
+        let ni = node as usize;
+        if ni >= n.nodes.len() {
+            return "[]".into();
+        }
+        let osm = n.nodes[ni].osm_id;
+        let mut ends: Vec<u32> = Vec::new();
+        let mut sum: std::collections::HashMap<u32, (f64, f64, f64, f64, f64)> = Default::default();
+        for l in n.lanes.iter().filter(|l| l.to == node) {
+            let e = l.seg * 2 + if l.dir == 0 { 1 } else { 0 };
+            let a = sum.entry(e).or_insert_with(|| {
+                ends.push(e);
+                (0.0, 0.0, 0.0, 0.0, 0.0)
+            });
+            a.0 += l.end[0] as f64;
+            a.1 += l.end[1] as f64;
+            a.2 += l.edir[0] as f64;
+            a.3 += l.edir[1] as f64;
+            a.4 += 1.0;
+        }
+        let best = ends.iter().map(|e| sim::approach_rank(n, *e)).min().unwrap_or(0);
+        let out: Vec<_> = ends
+            .iter()
+            .map(|e| {
+                let (x, y, dx, dy, c) = sum[e];
+                let s = &n.segs[(*e >> 1) as usize];
+                let key = approach_key(n, node, *e);
+                let level = self.edits.prios.get(&format!("{osm}|{key}")).copied().unwrap_or(0);
+                let len = (dx * dx + dy * dy).sqrt().max(1e-9);
+                json!({
+                    "key": key, "x": x / c, "y": y / c, "dx": dx / len, "dy": dy / len,
+                    "name": n.names.get(s.name as usize).cloned().unwrap_or_default(),
+                    "level": level,
+                    "auto": if sim::approach_rank(n, *e) <= best { 1 } else { 2 },
+                })
+            })
+            .collect();
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
     }
     /// [faixa_origem, faixa_destino, tipo, estado, estado_padrão] por conexão do nó.
     pub fn node_conns_u32(&self, node: u32) -> Vec<u32> {

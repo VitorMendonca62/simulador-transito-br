@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { SEG_STRIDE } from '../model/types'
 import type { BenchResult, SimReport } from '../model/types'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 import { col, LineChart } from './Charts'
 
 type Metric = { label: string; get: (r: SimReport) => number; fmt: (v: number) => string; better: 'up' | 'down' | 'none' }
@@ -36,7 +37,7 @@ function Delta({ a, b, better, fmt }: { a: number; b: number; better: Metric['be
 }
 
 function Compare({ A, B, nameA, nameB }: { A: BenchResult; B: BenchResult; nameA: string; nameB: string }) {
-  const { data, compare, setCompare } = useStore()
+  const { data, compare, setCompare } = useStore(useShallow((s) => ({ data: s.data, compare: s.compare, setCompare: s.setCompare })))
   const nodeLabel = useMemo(() => {
     const byOsm = new Map<number, number>()
     if (data) for (let n = 0; n < data.nodeOsm.length; n++) byOsm.set(data.nodeOsm[n], n)
@@ -123,7 +124,7 @@ function Compare({ A, B, nameA, nameB }: { A: BenchResult; B: BenchResult; nameA
 }
 
 export function ScenarioPanel() {
-  const { scenarios, bench, compare, saveScenario, deleteScenario, runScenario, cancelBench, setCompare, zones } = useStore()
+  const { scenarios, bench, compare, saveScenario, deleteScenario, runScenario, cancelBench, setCompare, zones } = useStore(useShallow((s) => ({ scenarios: s.scenarios, bench: s.bench, compare: s.compare, saveScenario: s.saveScenario, deleteScenario: s.deleteScenario, runScenario: s.runScenario, cancelBench: s.cancelBench, setCompare: s.setCompare, zones: s.zones })))
   const [name, setName] = useState('')
   const [minutes, setMinutes] = useState(30)
   const a = scenarios.find((s) => s.id === compare.a)

@@ -1,5 +1,6 @@
 import { del, get, set } from 'idb-keyval'
 import type { DemandParams, Zone } from './demand'
+import type { OdImport } from './odImport'
 import type { NetworkData, SignalDef } from './types'
 
 /** Configuração de um semáforo (enviada ao núcleo e salva): liga/desliga e fases. */
@@ -15,6 +16,9 @@ export type SigConfigs = Record<string, SigConfig>
 
 /** Conversões alteradas: chave estável -> estado (1 ligada, 0 proibida, 2 ausente). */
 export type ConnEdits = Record<string, number>
+
+/** Placas de preferência: `nóOsm|way:de:para:lado` -> 1 preferencial, 2 dê a preferência, 3 pare (ausente = automático). */
+export type PrioEdits = Record<string, number>
 
 /** Configuração de faixas de um trecho (valores finais; enviada ao núcleo). */
 export interface SegEdit {
@@ -61,6 +65,7 @@ export interface ScenarioFile {
   /** formato 2: chaves estáveis `nóOsm|way:de:para.dir.idx>...` */
   connections?: ConnEdits
   connFormat?: 2
+  priorities?: PrioEdits
   segments?: SegEdit[]
   roads?: NewRoad[]
   removed?: SegKeyTuple[]
@@ -72,11 +77,14 @@ export interface DemandFile {
   zones: Zone[]
   params: DemandParams
   odManual: Record<string, number>
+  /** matriz horária importada da Pesquisa OD (substitui `odManual` enquanto ativa) */
+  odImport?: OdImport | null
 }
 
 const K_MAP = 'last-map'
 const K_SIGS = 'sig-config'
 const K_CONNS = 'conn-edits-v2'
+const K_PRIOS = 'prio-edits'
 const K_SEGS = 'seg-edits'
 const K_ROADS = 'new-roads'
 const K_REMOVED = 'removed-segs'
@@ -97,6 +105,8 @@ export const saveSigConfigs = (e: SigConfigs) => safe(() => set(K_SIGS, e), unde
 export const loadSigConfigs = () => safe(async () => (await get<SigConfigs>(K_SIGS)) ?? {}, {} as SigConfigs)
 export const saveConnEdits = (e: ConnEdits) => safe(() => set(K_CONNS, e), undefined)
 export const loadConnEdits = () => safe(async () => (await get<ConnEdits>(K_CONNS)) ?? {}, {} as ConnEdits)
+export const savePrioEdits = (e: PrioEdits) => safe(() => set(K_PRIOS, e), undefined)
+export const loadPrioEdits = () => safe(async () => (await get<PrioEdits>(K_PRIOS)) ?? {}, {} as PrioEdits)
 export const saveSegEdits = (e: SegEdits) => safe(() => set(K_SEGS, e), undefined)
 export const loadSegEdits = () => safe(async () => (await get<SegEdits>(K_SEGS)) ?? {}, {} as SegEdits)
 export const saveRoads = (r: NewRoad[], removed: SegKeyTuple[]) =>
@@ -118,7 +128,7 @@ export const saveScenarios = (s: ScenarioRec[]) => safe(() => set(K_SCEN, s), un
 export const loadScenarios = () => safe(async () => (await get<ScenarioRec[]>(K_SCEN)) ?? [], [] as ScenarioRec[])
 export const clearAll = () =>
   safe(async () => {
-    for (const k of [K_MAP, K_SIGS, K_CONNS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)
+    for (const k of [K_MAP, K_SIGS, K_CONNS, K_PRIOS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)
   }, undefined)
 
 /** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
@@ -146,7 +156,7 @@ export function configFromDef(def: SignalDef): SigConfig {
   }
 }
 
-export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[], demand: DemandFile) {
+export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, priorities: PrioEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[], demand: DemandFile) {
   const file: ScenarioFile = {
     version: 1,
     app: 'simulador-transito',
@@ -154,6 +164,7 @@ export function exportScenario(name: string, sigs: SigConfigs, connections: Conn
     signalConfigs: Object.values(sigs),
     connections,
     connFormat: 2,
+    priorities,
     segments: Object.values(segments),
     roads,
     removed,

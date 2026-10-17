@@ -11,6 +11,8 @@ export interface Zone {
   attr: number
   /** id do perfil horário */
   profile: string
+  /** perfil próprio (24 fatores), usado no lugar de `profile` (zonas importadas da Pesquisa OD) */
+  profileValues?: number[]
   color: number
 }
 
@@ -22,10 +24,12 @@ export interface DemandParams {
   hour: number
   /** % de ônibus no fluxo gerado (reservado para a simulação) */
   busShare: number
+  /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
+  illegalPct: number
   seed: number
 }
 
-export const DEFAULT_PARAMS: DemandParams = { beta: 0.08, intrazone: false, hour: 8, busShare: 2, seed: 1 }
+export const DEFAULT_PARAMS: DemandParams = { beta: 0.08, intrazone: false, hour: 8, busShare: 2, illegalPct: 0, seed: 1 }
 
 export interface Profile {
   id: string
@@ -54,7 +58,7 @@ export const hexColor = (c: number) => `#${c.toString(16).padStart(6, '0')}`
 /** Payload para o núcleo (`demand_json`). */
 export function demandPayload(zones: Zone[], params: DemandParams, odManual: Record<string, number>) {
   return {
-    zones: zones.map((z) => ({ id: z.id, poly: z.poly, gen: z.gen, attr: z.attr, profile: profileById(z.profile).values })),
+    zones: zones.map((z) => ({ id: z.id, poly: z.poly, gen: z.gen, attr: z.attr, profile: z.profileValues ?? profileById(z.profile).values })),
     params: { beta: params.beta, intrazone: params.intrazone, hour: params.hour, odManual },
   }
 }

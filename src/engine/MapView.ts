@@ -4,11 +4,13 @@ import type { NewPt } from '../model/persistence'
 import { presetWidth, type RoadPreset, ROAD_PRESETS } from '../model/presets'
 import type { NetworkData, NodeConns, SignalDef, TileUpdate } from '../model/types'
 import { C } from './colors'
+import { GpuTimer, perf } from './perf'
 import { LabelLayer } from './LabelLayer'
 import { makeDots, makeMesh } from './meshes'
 import { SignalLayer } from './SignalLayer'
 import { HEAT_PALETTE, HeatLayer } from './HeatLayer'
 import { VehicleLayer } from './VehicleLayer'
+import { SignLayer, type Approach } from './SignLayer'
 import { drawHover, drawTurns, nodeLanes, pickConn, pickDst, pickSrc, type NodeLanes } from './TurnOverlay'
 
 export type LayerKey = 'vehicles' | 'roads' | 'markings' | 'labels' | 'nodes' | 'shapes' | 'signals' | 'turns' | 'grid' | 'zones'
@@ -40,7 +42,7 @@ function segBounds(d: NetworkData): Float32Array {
   }
   return out
 }
-const LOD: Partial<Record<LayerKey, number>> = { markings: 0.35, nodes: 0.2, shapes: 2.2, signals: 0.3, labels: 0.3 }
+const LOD: Partial<Record<LayerKey, number>> = { markings: 0.6, nodes: 0.4, shapes: 2.2, signals: 0.3, labels: 0.3 }
 
 type V = [number, number]
 /** Alvo de encaixe do cursor: nó existente, corpo de uma via (divide) ou ponto livre. */
@@ -98,7 +100,10 @@ export class MapView {
   private trackG = new Graphics()
   private trackId: number | null = null
   private trackPts: Float32Array | null = null
+  private trackBlocker: number | null = null
+  private follow = false
   private labels!: LabelLayer
+  private signs!: SignLayer
   private vehicles = new VehicleLayer()
   private heat = new HeatLayer()
   private segG = new Graphics()
@@ -140,18 +145,17 @@ export class MapView {
   private labelTimer = 0
   private lastLabelRun = 0
   private overlayZoom = 0
-  private playing = true
-  private speed = 1
-  private clock = 0
-  /** relógio da simulação (s); quando definido, os semáforos desenhados seguem o mesmo ciclo do núcleo */
+  /** relógio da simulação (s); sem simulação os semáforos ficam parados no instante 0 */
   private simClock: number | null = null
   private simClockDrawn = -1
-  private lastFrame = performance.now()
   private lastSignalDraw = 0
   private ro?: ResizeObserver
   private destroyed = false
+  private gpu: GpuTimer | null = null
 
   onSelect: (node: number | null) => void = () => {}
+  /** O usuário escolheu uma placa de preferência para um ramo do nó selecionado. */
+  onPriority: (key: string, level: number) => void = () => {}
   onZoom: (z: number) => void = () => {}
   /** Chamado ao clicar numa curva de conversão do nó selecionado. */
   onConnClick: (conn: number) => void = () => {}
@@ -180,8 +184,11 @@ export class MapView {
       powerPreference: 'high-performance',
     })
     if (this.destroyed) return app.destroy(true)
+    this.gpu = new GpuTimer(app.renderer)
     host.appendChild(app.canvas)
     this.labels = new LabelLayer(host)
+    this.signs = new SignLayer(host)
+    this.signs.onPick = (k, lv) => this.onPriority(k, lv)
     this.zoneEl = document.createElement('div')
     this.zoneEl.className = 'zone-labels'
     host.appendChild(this.zoneEl)
@@ -210,6 +217,7 @@ export class MapView {
     clearTimeout(this.labelTimer)
     this.ro?.disconnect()
     this.labels?.destroy()
+    this.signs?.destroy()
     this.badge?.remove()
     this.zoneEl?.remove()
     if (this.app.renderer) this.app.destroy(true, { children: true })
@@ -218,10 +226,16 @@ export class MapView {
   // ------------------------------------------------------------ dados
 
   private tileObjs = new Map<number, Mesh[]>()
+  /** caixa (xmin,ymin,xmax,ymax) de cada ladrilho em metros, para não enviar à GPU o que está fora da tela */
+  private tileBox = new Map<number, [number, number, number, number]>()
+  /** coordenadas dos pontos de cada ladrilho; os círculos só são gerados quando a camada aparece naquele ladrilho */
+  private tileDots = new Map<number, { shape: Float32Array; minor: Float32Array; major: Float32Array; shapeDone: boolean; nodesDone: boolean }>()
 
   private clearScene() {
     for (const meshes of this.tileObjs.values()) for (const m of meshes) m.destroy(true)
     this.tileObjs.clear()
+    this.tileBox.clear()
+    this.tileDots.clear()
     this.labels.clear()
   }
 
@@ -244,10 +258,56 @@ export class MapView {
       add(this.roads, mesh(t.bus, C.bus))
       add(this.markings, mesh(t.white, C.white))
       add(this.markings, mesh(t.yellow, C.yellow))
-      add(this.shapes, makeDots(t.shape, 0.7, C.nodeShape, 8))
-      add(this.nodes, makeDots(t.minor, 1.25, C.nodeMinor, 12))
-      add(this.nodes, makeDots(t.major, 2.0, C.nodeJunction, 14))
+      // círculos dos nós/pontos de forma são caros de gerar: criados sob demanda (ver cullTiles)
+      this.tileDots.set(t.id, { shape: t.shape.slice(), minor: t.minor.slice(), major: t.major.slice(), shapeDone: false, nodesDone: false })
       this.tileObjs.set(t.id, meshes)
+      const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity]
+      for (const pos of [t.asphalt.pos, t.bus.pos, t.white.pos, t.yellow.pos, t.shape, t.minor, t.major]) {
+        for (let i = 0; i < pos.length; i += 2) {
+          const x = pos[i]
+          const y = pos[i + 1]
+          if (x < box[0]) box[0] = x
+          if (x > box[2]) box[2] = x
+          if (y < box[1]) box[1] = y
+          if (y > box[3]) box[3] = y
+        }
+      }
+      this.tileBox.set(t.id, box)
+    }
+  }
+
+  /** Mostra só os ladrilhos que cruzam a tela (com folga): corta milhares de draw calls por quadro. */
+  private cullTiles() {
+    const { x, y, z } = this.cam
+    const pad = 20 / z
+    const x0 = -x / z - pad
+    const y0 = -y / z - pad
+    const x1 = (this.host.clientWidth - x) / z + pad
+    const y1 = (this.host.clientHeight - y) / z + pad
+    const shapesOn = this.user.shapes && z >= (LOD.shapes ?? 0)
+    const nodesOn = this.user.nodes && z >= (LOD.nodes ?? 0)
+    for (const [id, meshes] of this.tileObjs) {
+      const b = this.tileBox.get(id)
+      const vis = !b || (b[2] >= x0 && b[0] <= x1 && b[3] >= y0 && b[1] <= y1)
+      const dots = this.tileDots.get(id)
+      if (vis && dots) {
+        const add = (parent: Container, m: Mesh | null) => {
+          if (m) {
+            parent.addChild(m)
+            meshes.push(m)
+          }
+        }
+        if (shapesOn && !dots.shapeDone) {
+          dots.shapeDone = true
+          add(this.shapes, makeDots(dots.shape, 0.7, C.nodeShape, 6))
+        }
+        if (nodesOn && !dots.nodesDone) {
+          dots.nodesDone = true
+          add(this.nodes, makeDots(dots.minor, 1.25, C.nodeMinor, 8))
+          add(this.nodes, makeDots(dots.major, 2.0, C.nodeJunction, 10))
+        }
+      }
+      for (const m of meshes) m.visible = vis
     }
   }
 
@@ -255,6 +315,8 @@ export class MapView {
     const old = this.tileObjs.get(id)
     if (old) for (const m of old) m.destroy(true)
     this.tileObjs.delete(id)
+    this.tileBox.delete(id)
+    this.tileDots.delete(id)
   }
 
   /** Estruturas derivadas da rede inteira (seleção, rótulos, caixas): leves, refeitas a cada atualização. */
@@ -335,6 +397,7 @@ export class MapView {
     if (m !== 'zones') this.selZone = null
     this.drawZones()
     this.turnsG.clear()
+    this.signs.clear()
     this.hoverG.clear()
     this.drawSeg()
     this.app.canvas.style.cursor = m === 'build' || m === 'zones' ? 'crosshair' : 'grab'
@@ -710,11 +773,13 @@ export class MapView {
     this.requestRender()
   }
 
-  /** Relógio da simulação para os semáforos (null volta ao relógio livre). */
+  /** Relógio da simulação para os semáforos (null = sem simulação: semáforos parados no instante 0). */
   setSimClock(t: number | null) {
     this.simClock = t
-    if (t == null) this.simClockDrawn = -1
-    else if (this.signals.g.visible && t !== this.simClockDrawn) {
+    if (t == null) {
+      this.simClockDrawn = -1
+      this.lastSignalDraw = 0
+    } else if (this.signals.g.visible && t !== this.simClockDrawn) {
       this.simClockDrawn = t
       this.signals.draw(t, this.cam.z, this.selected)
       this.requestRender()
@@ -724,13 +789,33 @@ export class MapView {
   /** Quadro da simulação (null limpa). */
   setVehicles(buf: Float32Array | null) {
     this.vehicles.set(buf, this.cam.z)
-    if (this.trackId != null) this.drawTrack()
+    this.followTrack()
     this.requestRender()
   }
 
+  /** Câmera e realce do veículo acompanhado, na posição interpolada do instante atual. */
+  private followTrack() {
+    if (this.trackId == null) return
+    if (this.follow) {
+      const me = this.vehicles.find(this.trackId)
+      if (me) {
+        this.cam.x = this.app.screen.width / 2 - me.x * this.cam.z
+        this.cam.y = this.app.screen.height / 2 - me.y * this.cam.z
+        this.camChanged()
+      }
+    }
+    this.drawTrack()
+  }
+
+  /** A câmera acompanha o veículo selecionado. */
+  setFollow(on: boolean) {
+    this.follow = on
+  }
+
   /** Rota restante do veículo selecionado (pontos xy planos); null limpa. O último ponto é o destino. */
-  setTrack(id: number | null, pts: ArrayLike<number> | null) {
+  setTrack(id: number | null, pts: ArrayLike<number> | null, blocker: number | null = null) {
     this.trackId = id
+    this.trackBlocker = blocker
     this.trackPts = pts && pts.length >= 4 ? Float32Array.from(pts) : null
     this.drawTrack()
     this.requestRender()
@@ -761,6 +846,12 @@ export class MapView {
     if (me) {
       const r = Math.max(me.len * 0.9, 9 * px)
       g.circle(me.x, me.y, r).stroke({ width: 2.5 * px, color: 0xffffff })
+      // quem está impedindo este veículo de seguir
+      const bl = this.trackBlocker != null ? this.vehicles.find(this.trackBlocker) : null
+      if (bl) {
+        g.moveTo(me.x, me.y).lineTo(bl.x, bl.y).stroke({ width: 3 * px, color: 0xfb923c, alpha: 0.95 })
+        g.circle(bl.x, bl.y, Math.max(bl.len * 0.9, 9 * px)).stroke({ width: 2.5 * px, color: 0xfb923c })
+      }
     }
   }
 
@@ -770,12 +861,6 @@ export class MapView {
     this.requestRender()
   }
 
-  setPlaying(p: boolean) {
-    this.playing = p
-  }
-  setSpeed(s: number) {
-    this.speed = s
-  }
 
   setLayer(key: LayerKey, on: boolean) {
     this.user[key] = on
@@ -791,6 +876,7 @@ export class MapView {
     this.connDrag = null
     this.nodeConns = null
     this.lanes = null
+    this.signs.clear()
     this.redrawOverlay(true)
     if (node != null && focus && this.data) {
       const d = this.data
@@ -1107,6 +1193,12 @@ export class MapView {
     this.redrawOverlay(true)
   }
 
+  /** Placas de preferência do nó selecionado (lista vazia remove). Ignora respostas de um nó que já não está selecionado. */
+  setApproaches(list: Approach[], node: number | null) {
+    if (node !== this.selected) return
+    this.signs.setApproaches(list, this.cam)
+  }
+
   /** Redesenha o overlay do nó selecionado (após editar conversões). */
   refreshOverlay() {
     this.redrawOverlay(true)
@@ -1148,6 +1240,7 @@ export class MapView {
     this.vehicles.rezoom(z)
     if (this.trackId != null) this.drawTrack()
     this.labels?.reposition(this.cam)
+    this.signs?.reposition(this.cam)
     this.scheduleLabels()
     if (this.selected != null && Math.abs(z / (this.overlayZoom || z) - 1) > 0.02) this.redrawOverlay(false)
     if (this.hover != null && this.data) drawHover(this.hoverG, this.data, this.hover === this.selected ? null : this.hover, z)
@@ -1156,6 +1249,7 @@ export class MapView {
   }
 
   private applyLayers() {
+    this.cullTiles()
     const z = this.cam.z
     const on = (k: LayerKey) => this.user[k] && z >= (LOD[k] ?? 0)
     this.roads.visible = this.user.roads
@@ -1223,33 +1317,36 @@ export class MapView {
 
   private loop = () => {
     if (this.destroyed) return
+    const t0 = performance.now()
     try {
       this.frame()
     } catch (e) {
       console.error('Erro no quadro de render', e)
       this.dirty = true
     }
+    perf.uiMs += performance.now() - t0
     this.raf = requestAnimationFrame(this.loop)
   }
 
   private frame() {
-    const now = performance.now()
-    const dt = (now - this.lastFrame) / 1000
-    this.lastFrame = now
-    if (this.playing && this.simClock == null) this.clock += dt * this.speed
-    if (this.simClock != null && this.signals.g.visible && this.lastSignalDraw === 0) {
-      this.lastSignalDraw = now
-      this.signals.draw(this.simClock, this.cam.z, this.selected)
+    // veículos: a interpolação entre quadros da simulação roda na GPU; aqui só avança o instante
+    if (this.vehicles.tick(performance.now())) {
+      this.followTrack()
       this.dirty = true
     }
-    if (this.simClock == null && this.signals.g.visible && (this.lastSignalDraw === 0 || (this.playing && now - this.lastSignalDraw > 120))) {
-      this.lastSignalDraw = now
-      this.signals.draw(this.clock, this.cam.z, this.selected)
+    // os semáforos só mudam com o relógio da simulação (ou ao pedir redesenho: zoom, seleção, edição)
+    if (this.signals.g.visible && this.lastSignalDraw === 0) {
+      this.lastSignalDraw = performance.now()
+      this.signals.draw(this.simClock ?? 0, this.cam.z, this.selected)
       this.dirty = true
     }
     if (this.dirty) {
       this.dirty = false
+      this.gpu?.begin()
       this.app.render()
+      this.gpu?.end()
+      perf.renders++
     }
+    this.gpu?.poll()
   }
 }

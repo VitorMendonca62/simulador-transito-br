@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { MAX_LANES, MAX_W, MIN_W, segInfo, segsOfWay } from '../model/segments'
 import { getSegRecord, useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 function Stepper({ value, min, max, onChange, label }: { value: number; min: number; max: number; onChange: (v: number) => void; label: string }) {
   return (
@@ -17,7 +18,7 @@ function Stepper({ value, min, max, onChange, label }: { value: number; min: num
 }
 
 export function SegmentPanel() {
-  const { data, selectedSeg, editRev, scope, setScope, editSegment, resetSegment, rebuilding, selectSeg } = useStore()
+  const { data, selectedSeg, editRev, scope, setScope, editSegment, resetSegment, rebuilding, selectSeg } = useStore(useShallow((s) => ({ data: s.data, selectedSeg: s.selectedSeg, editRev: s.editRev, scope: s.scope, setScope: s.setScope, editSegment: s.editSegment, resetSegment: s.resetSegment, rebuilding: s.rebuilding, selectSeg: s.selectSeg })))
   const info = useMemo(
     () => (data && selectedSeg != null && selectedSeg < data.segKeys.length / 3 ? segInfo(data, selectedSeg, getSegRecord()) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps

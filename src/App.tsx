@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { MapView } from './engine/MapView'
 import { viewRef } from './engine/instance'
 import { getSegRecord, useStore } from './model/store'
+import { useShallow } from 'zustand/react/shallow'
 import { Inspector } from './ui/Inspector'
 import { BuildPanel, ErasePanel } from './ui/BuildPanel'
 import { SegmentPanel } from './ui/SegmentPanel'
@@ -10,16 +11,24 @@ import { LayerPanel } from './ui/LayerPanel'
 import { SignalPanel } from './ui/SignalPanel'
 import { ScenarioPanel } from './ui/ScenarioPanel'
 import { SimPanel } from './ui/SimPanel'
+import { PerfStats } from './ui/PerfStats'
 import { Toolbar } from './ui/Toolbar'
+
+/** Só este componente assina o zoom: o pan (zoom igual) não re-renderiza o resto da tela. */
+function ZoomLabel() {
+  const zoom = useStore((s) => Math.round(s.zoom * 100) / 100)
+  return <span>{zoom.toFixed(2)} px/m</span>
+}
 
 export function App() {
   const host = useRef<HTMLDivElement>(null)
   const [drag, setDrag] = useState(false)
-  const { data, loading, error, toast, fileName, importMs, zoom, mode } = useStore()
+  const { data, loading, error, toast, fileName, importMs, mode } = useStore(useShallow((s) => ({ data: s.data, loading: s.loading, error: s.error, toast: s.toast, fileName: s.fileName, importMs: s.importMs, mode: s.mode })))
 
   useEffect(() => {
     const view = new MapView(host.current!)
     view.onSelect = (n) => useStore.getState().onViewSelect(n)
+    view.onPriority = (key, level) => useStore.getState().setPriority(key, level)
     view.onSegSelect = (sg) => useStore.setState({ selectedSeg: sg })
     view.onSignalPlace = (p) => useStore.getState().placeSignal(p)
     view.onBuildCommit = (pts, newChain) => useStore.getState().addRoad(pts, newChain)
@@ -126,7 +135,8 @@ export function App() {
           <span>{data.meta.counts.lanes.toLocaleString('pt-BR')} faixas</span>
           <span>{data.meta.counts.signals} semáforos</span>
           <span>importado em {importMs.toFixed(0)} ms</span>
-          <span>{zoom.toFixed(2)} px/m</span>
+          <ZoomLabel />
+          <PerfStats />
         </div>
       )}
 

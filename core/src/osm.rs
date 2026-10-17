@@ -33,6 +33,30 @@ impl RawOsm {
             self.nodes.sort_unstable_by_key(|n| n.0);
             self.nodes.dedup_by_key(|n| n.0);
         }
+        self.drop_far_ways();
+    }
+
+    /// Remove vias a mais de ~110 km da mediana das vias (sobras de conversões/consultas mal filtradas,
+    /// que esticariam a caixa do mapa e deixariam a cidade invisível).
+    fn drop_far_ways(&mut self) {
+        let firsts: Vec<(i32, i32)> = self.ways.iter().filter_map(|w| w.refs.first().and_then(|&r| self.coord(r))).collect();
+        if firsts.len() < 2 {
+            return;
+        }
+        let med = |mut v: Vec<i32>| {
+            let m = v.len() / 2;
+            *v.select_nth_unstable(m).1
+        };
+        let (mlat, mlon) = (med(firsts.iter().map(|c| c.0).collect()), med(firsts.iter().map(|c| c.1).collect()));
+        let k = (mlat as f64 * 1e-7).to_radians().cos();
+        let far = |c: (i32, i32)| {
+            let (dy, dx) = ((c.0 - mlat) as f64 * 1e-7, (c.1 - mlon) as f64 * 1e-7 * k);
+            dy * dy + dx * dx > 1.0
+        };
+        let nodes = std::mem::take(&mut self.nodes);
+        let coord = |id: i64| nodes.binary_search_by_key(&id, |n| n.0).ok().map(|i| (nodes[i].1, nodes[i].2));
+        self.ways.retain(|w| !w.refs.iter().any(|&r| coord(r).is_some_and(far)));
+        self.nodes = nodes;
     }
 
     pub fn coord(&self, id: i64) -> Option<(i32, i32)> {
@@ -150,6 +174,11 @@ fn attr(e: &BytesStart, name: &[u8]) -> Option<String> {
     None
 }
 
+/// Aceita ids numéricos e no formato `way/123` (exports GeoJSON→OSM).
+fn parse_id(s: &str) -> Option<i64> {
+    s.rsplit('/').next().and_then(|t| t.parse().ok())
+}
+
 fn deg7(s: &str) -> i32 {
     (s.parse::<f64>().unwrap_or(0.0) * 1e7).round() as i32
 }
@@ -183,7 +212,7 @@ fn parse_xml(data: &[u8]) -> Result<RawOsm, String> {
                 let empty = matches!(ev, Event::Empty(_));
                 match e.name().as_ref() {
                     b"node" => {
-                        let id = attr(e, b"id").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let id = attr(e, b"id").and_then(|s| parse_id(&s)).unwrap_or(0);
                         let lat = deg7(&attr(e, b"lat").unwrap_or_default());
                         let lon = deg7(&attr(e, b"lon").unwrap_or_default());
                         let n = Cur::Node { id, lat, lon, tags: Vec::new() };
@@ -194,7 +223,7 @@ fn parse_xml(data: &[u8]) -> Result<RawOsm, String> {
                         }
                     }
                     b"way" => {
-                        let id = attr(e, b"id").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let id = attr(e, b"id").and_then(|s| parse_id(&s)).unwrap_or(0);
                         if !empty {
                             cur = Cur::Way(RawWay { id, refs: Vec::new(), tags: Vec::new() });
                         }
@@ -206,7 +235,7 @@ fn parse_xml(data: &[u8]) -> Result<RawOsm, String> {
                     }
                     b"nd" => {
                         if let Cur::Way(w) = &mut cur {
-                            if let Some(r) = attr(e, b"ref").and_then(|s| s.parse().ok()) {
+                            if let Some(r) = attr(e, b"ref").and_then(|s| parse_id(&s)) {
                                 w.refs.push(r);
                             }
                         }
@@ -218,7 +247,7 @@ fn parse_xml(data: &[u8]) -> Result<RawOsm, String> {
                                 Some("way") => 1,
                                 _ => 2,
                             };
-                            let r = attr(e, b"ref").and_then(|s| s.parse().ok()).unwrap_or(0);
+                            let r = attr(e, b"ref").and_then(|s| parse_id(&s)).unwrap_or(0);
                             members.push((t, r, attr(e, b"role").unwrap_or_default()));
                         }
                     }

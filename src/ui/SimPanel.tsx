@@ -1,5 +1,7 @@
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 import { col, LineChart } from './Charts'
+import { StepControls, StuckList, VehicleCard } from './DebugPanel'
 
 const SPEEDS = [1, 2, 5, 10, 20, 30]
 const hhmm = (sec: number) => {
@@ -8,7 +10,7 @@ const hhmm = (sec: number) => {
 }
 
 export function SimPanel() {
-  const { sim, simToggle, simSpeed, simReset, zones, demandParams, setHeat, setReplay, pickVehicle } = useStore()
+  const { sim, simToggle, simSpeed, simReset, zones, demandParams, setHeat, setReplay } = useStore(useShallow((s) => ({ sim: s.sim, simToggle: s.simToggle, simSpeed: s.simSpeed, simReset: s.simReset, zones: s.zones, demandParams: s.demandParams, setHeat: s.setHeat, setReplay: s.setReplay })))
   const st = sim.stats
   const running = sim.phase === 'running'
   return (
@@ -59,28 +61,19 @@ export function SimPanel() {
             <dt>Na fila de entrada</dt>
             <dd>{st.queued.toLocaleString('pt-BR')}</dd>
           </div>
+          <div title="Veículos que fizeram uma manobra proibida (faixa errada) para seguir a rota">
+            <dt>Manobras irregulares</dt>
+            <dd>{(st.illegalMoves ?? 0).toLocaleString('pt-BR')}</dd>
+          </div>
           <div>
             <dt>Viagem média</dt>
             <dd>{st.meanTravel ? `${(st.meanTravel / 60).toFixed(1)} min` : '—'}</dd>
           </div>
         </dl>
       )}
-      {sim.track && (
-        <div className="veh-card">
-          <div>
-            <strong>{sim.track.kind === 1 ? 'Ônibus' : 'Carro'} #{sim.track.id}</strong>
-            <button className="link" onClick={() => pickVehicle(null)}>fechar</button>
-          </div>
-          {sim.track.alive ? (
-            <div>
-              Destino: <b>{zones.find((z) => z.id === sim.track!.zone)?.name ?? 'zona'}</b> · {(sim.track.v * 3.6).toFixed(0)} km/h
-              {sim.track.wait > 3 ? ` · parado há ${sim.track.wait.toFixed(0)} s` : ''}
-            </div>
-          ) : (
-            <div>Chegou ao destino.</div>
-          )}
-        </div>
-      )}
+      <StepControls />
+      <VehicleCard />
+      <StuckList />
       {sim.phase !== 'idle' && (
         <div className="seg-scope three" role="radiogroup" aria-label="Mapa de calor">
           {(

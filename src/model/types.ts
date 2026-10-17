@@ -63,6 +63,8 @@ export interface SignalDef {
 
 export interface NetworkMeta {
   bounds: [number, number, number, number]
+  /** origem da projeção: [lat_centro, lon_centro, metros por grau de longitude] */
+  geo: [number, number, number]
   counts: { nodes: number; segments: number; lanes: number; connections: number; signals: number }
   names: string[]
   signals: SignalDef[]
@@ -103,11 +105,17 @@ export type WorkerIn =
   | { type: 'demand'; id: number; json: string }
   | { type: 'nodeConns'; id: number; node: number }
   | { type: 'connEdits'; json: string }
+  | { type: 'prioEdits'; json: string }
+  | { type: 'approaches'; id: number; node: number }
   | { type: 'simInit'; json: string }
   | { type: 'simRun'; running: boolean; speed: number }
   | { type: 'simStop' }
+  /** a UI aplicou e pintou o último quadro da simulação: o worker pode enviar o próximo */
+  | { type: 'simAck' }
   | { type: 'simHeat'; kind: number }
   | { type: 'simTrack'; veh: number | null }
+  | { type: 'simStepBy'; seconds: number }
+  | { type: 'simStuck'; id: number; n: number }
   | { type: 'simHist'; id: number; bucket: number }
   | { type: 'bench'; id: number; edits: string; sim: string; minutes: number }
   | { type: 'benchCancel' }
@@ -120,6 +128,8 @@ export type WorkerOut =
   | { type: 'benchError'; id: number; message: string }
   | { type: 'simEnded'; reason: string }
   | { type: 'simReady'; error?: string }
+  /** uma vez por segundo: tempo acumulado calculando a simulação e memória do WASM */
+  | { type: 'perf'; busyMs: number; wasmBytes: number }
   | { type: 'result'; id: number; json?: string; u32?: Uint32Array; f32?: Float32Array; u8?: Uint8Array; error?: string }
 
 /** Estado de uma conexão de faixa (connU32[c*5+4]). */
@@ -138,6 +148,9 @@ export interface SimStats {
   meanTravel: number
   redRuns: number
   laneChanges: number
+  illegalMoves?: number
+  /** viagens da matriz que não nasceram (sem caminho da origem ao destino) */
+  skipped?: number
 }
 
 /** Resultado de uma execução headless de um cenário (comparação A/B). */
@@ -170,4 +183,40 @@ export interface SimReport {
   maxQueue: number
   od: { from: number; to: number; n: number; meanTravel: number; meanDelay: number }[]
   junctions: { node: number; osm: number; delayVehH: number; queueMax: number }[]
+}
+
+/** Estado detalhado de um veículo (depuração), vindo de `Sim::explain`. */
+export interface VehicleInfo {
+  id: number
+  kind: string
+  origin: number
+  dest: number
+  targetNode: number
+  where: string
+  way: number
+  street: string
+  laneIdx: number
+  s: number
+  len: number
+  rest: number
+  front: boolean
+  v: number
+  vDesired: number
+  acc: number
+  wait: number
+  leader: { id: number; gap: number; v: number; wait: number } | null
+  choice: string | { conn: number; kind: string; len: number; pen: number; toLane: number; toIdx: number }
+  enter: { ok: boolean; code: number; reason: string; blocker: number } | null
+  signal: string
+  redAge: number
+  rank: number
+  toNode: number
+  laneChangeCooldown: number
+  costOwn: number | null
+  lanes: { idx: number; here: boolean; cost: number | null; conn: string | null }[]
+  ruleBreaker: boolean
+  elapsed: number
+  freeTime: number
+  remainingFree: number | null
+  delay: number
 }

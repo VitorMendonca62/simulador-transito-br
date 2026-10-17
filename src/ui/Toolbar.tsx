@@ -1,10 +1,11 @@
 import { useRef } from 'react'
 import { viewRef } from '../engine/instance'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 export function Toolbar() {
   const input = useRef<HTMLInputElement>(null)
-  const { data, loading, mode, setMode } = useStore()
+  const { data, loading, mode, setMode } = useStore(useShallow((s) => ({ data: s.data, loading: s.loading, mode: s.mode, setMode: s.setMode })))
   const st = useStore.getState
   return (
     <header className="toolbar">

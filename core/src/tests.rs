@@ -811,3 +811,196 @@ fn signal_can_be_placed_mid_block() {
     n.set_edits("{}").unwrap();
     assert_eq!(n.net.segs.len(), segs0);
 }
+
+#[test]
+#[ignore]
+fn recife_stuck() {
+    let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
+    let data = std::fs::read(path).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let zones = [q(1, -1250.0, -150.0, -700.0, 300.0, 900.0), q(2, 700.0, -250.0, 1250.0, 200.0, 900.0), q(3, -250.0, -600.0, 250.0, -250.0, 600.0)].join(",");
+    n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0}}}}"#)).unwrap();
+    for _ in 0..(900.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+    }
+    let net = &n.net;
+    let s = n.sim.as_mut().unwrap();
+    eprintln!("vivos {} {:?}", s.n_alive, s.stats);
+    let rep = s.stuck_report(net, 120.0);
+    let mut by: std::collections::BTreeMap<String, u32> = Default::default();
+    for l in &rep {
+        if l.starts_with("veh") {
+            let ch = if l.contains("choice=NONE") { "SEM_CONVERSAO" } else { "tem_conv" };
+            let why = l.split("why=").nth(1).unwrap().split(' ').next().unwrap();
+            *by.entry(format!("{ch} why={why}")).or_default() += 1;
+        }
+    }
+    eprintln!("parados>120s: {:?}", by);
+    for r in s.red_log.iter().take(3) { eprintln!("INFO {}", s.lane_info(r.0 as usize)); }
+    for r in s.red_log.iter().take(15) { eprintln!("RED lane {} v={:.1} choice={} wait={:.1} red_age={:.1}", r.0, r.1, r.2, r.3, r.4); }
+    for l in rep.iter().filter(|l| l.contains("choice=NONE")).take(5) {
+        eprintln!("{l}");
+    }
+}
+
+#[test]
+fn sim_routes_by_lane_without_illegal_moves() {
+    let zones = r#"{"zones":[
+      {"id":1,"gen":1500,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+      {"id":2,"gen":1500,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]},
+      {"id":3,"gen":900,"attr":2,"poly":[[-60,-320],[60,-320],[60,-250],[-60,-250]]},
+      {"id":4,"gen":900,"attr":2,"poly":[[-60,250],[60,250],[60,320],[-60,320]]}],
+      "params":{"seed":5,"hour":8,"busShare":3,"beta":0.01}}"#;
+    let mut n = sample();
+    n.start_sim(zones).unwrap();
+    run(&mut n, 900.0);
+    let s = n.sim.as_ref().unwrap();
+    assert_eq!(s.stats.illegal_moves, 0, "sem infração configurada, ninguém usa conversão proibida");
+    assert_eq!(s.stats.lost, 0);
+    assert!(s.stats.finished > 100);
+}
+
+#[test]
+fn sim_illegal_pct_param_is_accepted() {
+    let zones = r#"{"zones":[
+      {"id":1,"gen":900,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]},
+      {"id":2,"gen":900,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]}],
+      "params":{"seed":5,"hour":8,"illegalPct":100}}"#;
+    let mut n = sample();
+    n.start_sim(zones).unwrap();
+    run(&mut n, 300.0);
+    assert!(n.sim.as_ref().unwrap().stats.finished > 0);
+}
+
+#[test]
+#[ignore]
+fn recife_wait_reasons() {
+    let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
+    let data = std::fs::read(path).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let zones = [q(1, -1250.0, -150.0, -700.0, 300.0, 900.0), q(2, 700.0, -250.0, 1250.0, 200.0, 900.0), q(3, -250.0, -600.0, 250.0, -250.0, 600.0)].join(",");
+    n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0}}}}"#)).unwrap();
+    for _ in 0..(300.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+    }
+    let net = &n.net;
+    let s = n.sim.as_mut().unwrap();
+    // amostra a cada 1 s por 10 min: quem está na frente da faixa, parado, sem semáforo, e por que não entra
+    let mut hist: std::collections::BTreeMap<(String, String), u32> = Default::default();
+    let mut total = 0u32;
+    for _ in 0..600 {
+        for _ in 0..5 {
+            s.step(net);
+        }
+        let rep = s.stuck_report(net, 3.0);
+        for (idx, l) in rep.iter().enumerate() {
+            if l.starts_with("veh") && l.contains("why=4") && l.contains("end_state=0") && idx > 0 && rep[idx - 1].starts_with("   -> exit") {
+                let prev = &rep[idx - 1];
+                let v: f32 = prev.split(" v=").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                let nveh: u32 = prev.split(" n=").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let k = (format!("saida_primeiro_v{}", if v > 1.5 { ">1.5 (andando)" } else { "<=1.5 (parado/lento)" }), format!("n_na_saida{}", if nveh <= 3 { "<=3 (livre)" } else { ">3 (fila)" }));
+                *hist.entry(k).or_default() += 1;
+            }
+            if !l.starts_with("veh") || !l.contains("end_state=0") || l.contains("choice=NONE") {
+                continue;
+            }
+            let why = l.split("why=").nth(1).unwrap().split(' ').next().unwrap().to_string();
+            let ok = l.split("may_enter=").nth(1).unwrap().split(' ').next().unwrap().to_string();
+            total += 1;
+            *hist.entry((ok, why)).or_default() += 1;
+        }
+    }
+    eprintln!("AMOSTRAS (parado >3 s na frente, sem semáforo): {total}");
+    for (k, v) in &hist {
+        eprintln!("  may_enter={} motivo={} -> {}", k.0, k.1, v);
+    }
+}
+
+#[test]
+#[ignore]
+fn recife_blockers() {
+    let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
+    let data = std::fs::read(path).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let zones = [q(1, -1250.0, -150.0, -700.0, 300.0, 900.0), q(2, 700.0, -250.0, 1250.0, 200.0, 900.0), q(3, -250.0, -600.0, 250.0, -250.0, 600.0)].join(",");
+    n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0}}}}"#)).unwrap();
+    for _ in 0..(600.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+    }
+    let net = &n.net;
+    let s = n.sim.as_mut().unwrap();
+    let list = s.stuck_list(net, 400);
+    let mut by_blocker: std::collections::BTreeMap<String, u32> = Default::default();
+    for it in &list {
+        if it["code"] == 4 {
+            let b = it["blocker"].as_i64().unwrap_or(-1);
+            if b >= 0 {
+                let info = s.explain(net, b as usize);
+                let key = format!(
+                    "{} v={:.1} wait={:.0} escolha={} sinal={} front={} resto={:.0}",
+                    info["where"], info["v"].as_f64().unwrap_or(0.0), info["wait"].as_f64().unwrap_or(0.0),
+                    if info["choice"].is_string() { info["choice"].as_str().unwrap().to_string() } else { info["choice"]["kind"].to_string() },
+                    info["signal"], info["front"], info["rest"].as_f64().unwrap_or(0.0).min(999.0).round()
+                );
+                *by_blocker.entry(key).or_default() += 1;
+            }
+        }
+    }
+    eprintln!("parados >=5s: {} ; bloqueadores de 'saída ocupada':", list.len());
+    let mut v: Vec<_> = by_blocker.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    for (k, c) in v.iter().take(12) {
+        eprintln!("  {c:>3}x  {k}");
+    }
+}
+
+// ------------------------------------------------------------------ placas de preferência
+
+/// Nós de cruzamento sem semáforo (3+ ramos).
+fn plain_junctions(n: &Network) -> Vec<u32> {
+    (0..n.net.nodes.len() as u32).filter(|&i| !n.net.nodes[i as usize].signal && n.net.nodes[i as usize].ends.len() >= 3).collect()
+}
+
+#[test]
+fn priority_signs_list_approaches_and_apply_to_the_sim() {
+    let mut n = sample();
+    let j = *plain_junctions(&n).first().expect("o exemplo tem cruzamento sem semáforo");
+    let list: Vec<serde_json::Value> = serde_json::from_str(&n.node_approaches_json(j)).unwrap();
+    assert!(list.len() >= 3, "uma aproximação por ramo com faixa de entrada: {list:?}");
+    assert!(list.iter().all(|a| a["level"] == 0));
+    assert!(list.iter().any(|a| a["auto"] == 1), "alguma via tem preferência pelo mapa");
+    // pare em todos os ramos do cruzamento
+    let osm = n.net.nodes[j as usize].osm_id;
+    let m: std::collections::HashMap<String, u8> = list.iter().map(|a| (format!("{osm}|{}", a["key"].as_str().unwrap()), 3u8)).collect();
+    n.set_prio_edits(&serde_json::to_string(&m).unwrap()).unwrap();
+    let list: Vec<serde_json::Value> = serde_json::from_str(&n.node_approaches_json(j)).unwrap();
+    assert!(list.iter().all(|a| a["level"] == 3), "nível salvo volta na listagem");
+    n.start_sim(SIM_ZONES).unwrap();
+    for _ in 0..(600.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for l in s.edge_lists() {
+            for w in l.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição com placas de pare");
+            }
+        }
+    }
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert_eq!(st.spawned, st.finished + st.lost + n.sim.as_ref().unwrap().n_alive as u64);
+    assert!(st.finished > 5, "a simulação continua fluindo com pare: {st:?}");
+}
+
+#[test]
+fn priority_signs_survive_rebuild_payload() {
+    let mut n = sample();
+    n.set_edits(r#"{"priorities":{"1|1:2:3:0":2,"9|x":0,"9|y":7}}"#).unwrap();
+    assert_eq!(n.edits.prios.len(), 1, "níveis fora de 1..3 são descartados");
+}

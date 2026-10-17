@@ -15,7 +15,11 @@ use crate::net::*;
 use route::*;
 use serde::Deserialize;
 
-thread_local! { pub static REASON: std::cell::Cell<u32> = std::cell::Cell::new(0); }
+thread_local! {
+    pub static REASON: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    /// veículo responsável pelo último bloqueio em `may_enter` (-1 = nenhum)
+    pub static BLOCKER: std::cell::Cell<i64> = std::cell::Cell::new(-1);
+}
 pub const SINK: u32 = u32::MAX - 1;
 const LOOKAHEAD: f32 = 150.0;
 const MIN_GAP: f32 = 0.3;
@@ -29,11 +33,16 @@ pub struct SimParams {
     pub bus_share: f64,
     pub beta: f64,
     pub intrazone: bool,
+    /// % de motoristas que ignoram a proibição de conversão quando estão na faixa errada
+    pub illegal_pct: f64,
     pub od_manual: std::collections::HashMap<String, f64>,
+    /// Matriz fixada por hora do dia (24 entradas, veíc./h por "idOrigem>idDestino"). Quando presente,
+    /// substitui `od_manual` e acompanha o relógio da simulação (importação da Pesquisa OD).
+    pub od_hourly: Vec<std::collections::HashMap<String, f64>>,
 }
 impl Default for SimParams {
     fn default() -> Self {
-        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, od_manual: Default::default() }
+        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new() }
     }
 }
 
@@ -42,6 +51,15 @@ impl Default for SimParams {
 pub struct SimInit {
     pub zones: Vec<demand::ZoneIn>,
     pub params: SimParams,
+    /// placas de preferência escolhidas pelo usuário (`nóOsm|approach_key` -> 1 preferencial, 2 dê a preferência, 3 pare)
+    #[serde(skip)]
+    pub prios: std::collections::HashMap<String, u8>,
+}
+
+/// Hierarquia padrão de uma aproximação (menor = mais preferencial): rotatória, depois classe da via.
+pub fn approach_rank(net: &Net, end: u32) -> i16 {
+    let s = &net.segs[(end >> 1) as usize];
+    if s.roundabout { 0 } else { s.hw as i16 + 1 }
 }
 
 struct Rng(u64);
@@ -86,6 +104,8 @@ struct LaneRt {
     bus: bool,
     vfree: f32,
     rank: i16,
+    /// placa "Pare": exige parada total antes de entrar
+    stop: bool,
     ring: bool,
     dirseg: u32,
     /// arestas de saída (conversões ligadas)
@@ -99,6 +119,7 @@ struct ConnRt {
     kind: u8,
     len: f32,
     curve: [f32; 8],
+    pen: f32,
     vturn: f32,
     rank: i16,
     ring: bool,
@@ -129,7 +150,13 @@ pub struct Stats {
     pub travel_sum: f64,
     pub red_runs: u64,
     pub lane_changes: u64,
+    pub illegal_moves: u64,
+    /// viagens da matriz que não nasceram: nenhuma faixa de origem da zona tem caminho até o destino
+    pub skipped: u64,
 }
+
+/// floats por veículo no quadro enviado à interface (ver `Sim::snapshot`)
+pub const SNAP_STRIDE: usize = 6;
 
 pub struct Sim {
     pub time: f64,
@@ -143,7 +170,15 @@ pub struct Sim {
     node_conns: Vec<Vec<u32>>,
     conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
     router: Router,
-    hops: Vec<Vec<u32>>,
+    /// tempo até a zona de destino por faixa (roteamento por faixa)
+    tree_dist: Vec<Vec<f32>>,
+    /// nó de destino de cada árvore e as árvores de cada zona (destinos sorteados dentro da zona)
+    tree_node: Vec<u32>,
+    zone_trees: Vec<Vec<u32>>,
+    tgt: Vec<u32>,
+    /// custo de trocar de faixa em cada faixa (s)
+    lane_w: Vec<f32>,
+    rule_breaker: Vec<bool>,
     dists: Vec<Vec<f32>>,
     zone_ids: Vec<i64>,
     zone_poly: Vec<Vec<[f64; 2]>>,
@@ -152,6 +187,8 @@ pub struct Sim {
     zone_attr: Vec<f64>,
     sink: Vec<Vec<bool>>,
     gates: Vec<Vec<u32>>,
+    /// comprimento acumulado das faixas de origem de cada zona (sorteio proporcional à extensão de rua)
+    gate_cum: Vec<Vec<f32>>,
     params: SimParams,
     /// taxa de viagens (veículos/s) por par origem->destino na hora corrente
     rate: Vec<Vec<f64>>,
@@ -183,6 +220,8 @@ pub struct Sim {
     acc: Vec<f32>,
     /// decisão de entrada em cruzamento reaproveitada por 1 passo (reavaliada a cada 2)
     enter_ok: Vec<bool>,
+    /// faixa (+1) em cuja linha de "Pare" o veículo já parou
+    stop_ok: Vec<u32>,
     tick: u64,
     multi: Vec<u32>,
     pub n_alive: usize,
@@ -192,6 +231,7 @@ pub struct Sim {
     start_time: f64,
     /// tempo acumulado (ms) por fase do passo — só nativo, para os testes de desempenho
     pub prof: [f64; 7],
+    pub red_log: Vec<(u32, f32, u32, f32, f32)>,
 }
 
 impl Sim {
@@ -218,12 +258,29 @@ impl Sim {
                 end_id,
                 bus: l.bus,
                 vfree: free_speed(s),
-                rank: if s.roundabout { 0 } else { s.hw as i16 + 1 },
+                rank: approach_rank(net, end_id),
+                stop: false,
                 ring: s.roundabout,
                 dirseg: l.seg * 2 + l.dir as u32,
                 conns: Vec::new(),
             });
             let _ = li;
+        }
+        // ---- placas de preferência do usuário: preferencial vence tudo, pare/dê a preferência cedem a todos
+        if !init.prios.is_empty() {
+            for l in lanes.iter_mut() {
+                let osm = net.nodes[l.to_node as usize].osm_id;
+                let key = approach_key(net, l.to_node, l.end_id);
+                match init.prios.get(&format!("{osm}|{key}")) {
+                    Some(1) => l.rank = -1,
+                    Some(2) => l.rank = 100,
+                    Some(3) => {
+                        l.rank = 100;
+                        l.stop = true;
+                    }
+                    _ => {}
+                }
+            }
         }
         // ---- conversões ligadas
         let mut conns: Vec<ConnRt> = Vec::new();
@@ -254,6 +311,7 @@ impl Sim {
                 kind: c.kind,
                 len: len.max(0.5),
                 curve: c.curve,
+                pen: route::turn_penalty(net, c.kind, c.node),
                 vturn,
                 rank: fl_rank,
                 ring: fl_ring,
@@ -283,15 +341,53 @@ impl Sim {
 
         // ---- roteamento
         let router = Router::new(net);
-        let mut hops = Vec::with_capacity(nz);
         let mut dists = Vec::with_capacity(nz);
         for sk in &sink {
             let targets: Vec<u32> = (0..net.segs.len() as u32 * 2).filter(|&d| router.time[d as usize].is_finite() && sk[dirseg_end_node(net, d) as usize]).collect();
             let (mut h, mut dd) = (Vec::new(), Vec::new());
             router.tree(&targets, &mut h, &mut dd);
-            hops.push(h);
             dists.push(dd);
         }
+        // por faixa: conversões ligadas + trocas de faixa
+        let lane_len: Vec<f32> = lanes.iter().map(|l| l.len).collect();
+        let lane_speed: Vec<f32> = lanes.iter().map(|l| l.vfree).collect();
+        let conn_list: Vec<(u32, u32, f32)> = conns.iter().map(|c| (c.from, c.to, c.pen)).collect();
+        let lrouter = LaneRouter::new(net, &lane_len, &lane_speed, &conn_list);
+        // destinos: vários nós sorteados (de forma determinística) dentro de cada zona, cada um com a sua árvore
+        let per_zone = (8_000_000 / (nl.max(1) * nz.max(1))).clamp(1, 16);
+        let mut tree_dist: Vec<Vec<f32>> = Vec::new();
+        let mut tree_node: Vec<u32> = Vec::new();
+        let mut zone_trees: Vec<Vec<u32>> = Vec::with_capacity(nz);
+        let mut incoming = vec![false; net.nodes.len()];
+        for l in &lanes {
+            if !l.bus {
+                incoming[l.to_node as usize] = true;
+            }
+        }
+        for sk in &sink {
+            let mut cand: Vec<u32> = (0..net.nodes.len() as u32).filter(|&n| sk[n as usize] && incoming[n as usize]).collect();
+            let key = |n: u32| (net.nodes[n as usize].osm_id as u64 ^ init.params.seed.wrapping_mul(0x517C_C1B7_2722_0A95)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            cand.sort_by_key(|&n| key(n));
+            cand.truncate(per_zone);
+            let mut ids = Vec::new();
+            for n in cand {
+                let targets: Vec<u32> = (0..nl as u32).filter(|&l| lanes[l as usize].to_node == n && !lanes[l as usize].bus).collect();
+                let mut dd = Vec::new();
+                lrouter.tree(&targets, &mut dd);
+                ids.push(tree_dist.len() as u32);
+                tree_dist.push(dd);
+                tree_node.push(n);
+            }
+            zone_trees.push(ids);
+        }
+        let lane_w = lrouter.change.clone();
+        let gate_cum: Vec<Vec<f32>> = gates
+            .iter()
+            .map(|g: &Vec<u32>| {
+                let mut a = 0.0f32;
+                g.iter().map(|&l| { a += lanes[l as usize].len; a }).collect()
+            })
+            .collect();
 
         // ---- semáforos
         let mut sigs = Vec::new();
@@ -313,7 +409,12 @@ impl Sim {
             node_conns,
             conflicts: vec![None; ne],
             router,
-            hops,
+            tree_dist,
+            tree_node,
+            zone_trees,
+            tgt: Vec::new(),
+            lane_w,
+            rule_breaker: Vec::new(),
             dists,
             zone_ids: init.zones.iter().map(|z| z.id).collect(),
             zone_poly: init.zones.iter().map(|z| z.poly.clone()).collect(),
@@ -321,6 +422,7 @@ impl Sim {
             zone_gen: init.zones.iter().map(|z| z.gen).collect(),
             zone_attr: init.zones.iter().map(|z| z.attr).collect(),
             sink,
+            gate_cum,
             gates,
             params: init.params.clone(),
             rate: vec![vec![0.0; nz]; nz],
@@ -350,6 +452,7 @@ impl Sim {
             cool: Vec::new(),
             acc: Vec::new(),
             enter_ok: Vec::new(),
+            stop_ok: Vec::new(),
             tick: 0,
             multi: Vec::new(),
             n_alive: 0,
@@ -358,6 +461,7 @@ impl Sim {
             origin: Vec::new(),
             start_time: 0.0,
             prof: [0.0; 7],
+            red_log: Vec::new(),
         };
         sim.start_time = sim.time;
         sim.refresh_matrix(net);
@@ -388,6 +492,22 @@ impl Sim {
         }
     }
 
+    /// Células fixadas da matriz na hora `hour`: a fatia horária (interpolada como o perfil das
+    /// zonas, ver `demand::profile_at`), se houver, ou `od_manual`.
+    fn od_at(&self, hour: f64) -> std::collections::HashMap<String, f64> {
+        let h = &self.params.od_hourly;
+        if h.len() != 24 {
+            return self.params.od_manual.clone();
+        }
+        let hr = hour.rem_euclid(24.0);
+        let (i, f) = (hr.floor() as usize % 24, hr - hr.floor());
+        let mut out: std::collections::HashMap<String, f64> = h[i].iter().map(|(k, v)| (k.clone(), v * (1.0 - f))).collect();
+        for (k, v) in &h[(i + 1) % 24] {
+            *out.entry(k.clone()).or_insert(0.0) += v * f;
+        }
+        out
+    }
+
     /// Recalcula a matriz OD para a hora atual e as taxas de chegada.
     fn refresh_matrix(&mut self, net: &Net) {
         let hour = (self.time / 3600.0).rem_euclid(24.0);
@@ -395,7 +515,7 @@ impl Sim {
             zones: (0..self.zone_ids.len())
                 .map(|i| demand::ZoneIn { id: self.zone_ids[i], poly: self.zone_poly[i].clone(), gen: self.zone_gen[i], attr: self.zone_attr[i], profile: self.zone_profile[i].clone() })
                 .collect(),
-            params: demand::ParamsIn { beta: self.params.beta, intrazone: self.params.intrazone, hour, od_manual: self.params.od_manual.clone() },
+            params: demand::ParamsIn { beta: self.params.beta, intrazone: self.params.intrazone, hour, od_manual: self.od_at(hour) },
         };
         let me: &Sim = self;
         let travel = |i: usize, j: usize, _c: &[[f64; 2]; 2]| me.zone_minutes(i, j);
@@ -475,6 +595,22 @@ impl Sim {
     // ------------------------------------------------------------------ veículos
 
     fn spawn_vehicle(&mut self, lane: u32, origin: u16, dest: u16, kind: u8) -> bool {
+        let Some(tree) = self.pick_tree(dest as usize, lane as usize) else { return false };
+        // nasce na faixa do mesmo trecho que melhor leva ao destino escolhido
+        let lane = {
+            let (lo, hi) = self.lanes_of(lane as usize);
+            let mut best = (f32::INFINITY, lane as usize);
+            for cl in lo..hi {
+                if kind == 0 && self.lanes[cl].bus {
+                    continue;
+                }
+                let c = self.stay_cost(tree as usize, cl, kind).0;
+                if c < best.0 {
+                    best = (c, cl);
+                }
+            }
+            best.1 as u32
+        };
         let l = &self.lanes[lane as usize];
         if kind == 0 && l.bus {
             return false;
@@ -484,13 +620,33 @@ impl Sim {
         } else {
             (self.rng.range(4.1, 4.9), self.rng.range(0.9, 1.5), self.rng.range(1.6, 2.6), self.rng.range(2.2, 3.4), self.rng.range(0.9, 1.15))
         };
-        // há espaço na entrada?
-        let list = &self.edge_veh[lane as usize];
-        if let Some(&j) = list.first() {
-            let j = j as usize;
-            if self.s[j] - self.vlen[j] < vlen + 3.0 + self.v[j] * 0.8 {
-                return false;
+        // posição de nascimento: em faixas longas, um ponto qualquer ao longo dela (não só logo após o cruzamento)
+        let llen = self.lanes[lane as usize].len;
+        let mut s0 = vlen + 0.5;
+        let mut placed = false;
+        let attempts = if llen >= 45.0 { 4 } else { 1 };
+        for k in 0..attempts {
+            let cand = if llen >= 45.0 && k < attempts - 1 { self.rng.range((vlen + 12.0).min(llen * 0.4), llen - 12.0) } else { vlen + 0.5 };
+            let list = &self.edge_veh[lane as usize];
+            let p = list.partition_point(|&j| self.s[j as usize] < cand);
+            let lead_ok = list.get(p).map_or(true, |&j| {
+                let j = j as usize;
+                self.s[j] - self.vlen[j] - cand >= 6.0 + self.v[j] * 0.8
+            });
+            let foll_ok = if p > 0 {
+                let f = list[p - 1] as usize;
+                cand - vlen - self.s[f] >= 4.0 + self.v[f] * 1.0
+            } else {
+                true
+            };
+            if lead_ok && foll_ok {
+                s0 = cand;
+                placed = true;
+                break;
             }
+        }
+        if !placed {
+            return false;
         }
         let id = match self.free.pop() {
             Some(i) => i as usize,
@@ -514,14 +670,17 @@ impl Sim {
                 self.cool.push(0.0);
                 self.acc.push(0.0);
                 self.enter_ok.push(false);
+                self.stop_ok.push(0);
                 self.t_free.push(0.0);
                 self.origin.push(0);
+                self.rule_breaker.push(false);
+                self.tgt.push(0);
                 i
             }
         };
         self.alive[id] = true;
         self.edge[id] = lane;
-        self.s[id] = vlen + 0.5;
+        self.s[id] = s0;
         self.v[id] = (self.lanes[lane as usize].vfree * vfac * 0.4).min(8.0);
         self.lat[id] = 0.0;
         self.kind[id] = kind;
@@ -532,19 +691,45 @@ impl Sim {
         self.bcomf[id] = bcomf;
         self.dest[id] = dest;
         self.origin[id] = origin;
+        self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
+        self.tgt[id] = tree;
         self.t_free[id] = {
-            let d = self.dists[dest as usize][self.lanes[lane as usize].dirseg as usize];
+            let d = self.tree_dist[tree as usize][lane as usize];
             if d.is_finite() { d } else { 0.0 }
         };
         self.t_spawn[id] = self.time as f32;
         self.wait[id] = 0.0;
+        self.stop_ok[id] = 0;
         self.cool[id] = self.rng.range(0.0, 2.0);
-        self.edge_veh[lane as usize].insert(0, id as u32);
+        self.insert_sorted(lane, id);
         self.metrics.entered(self.lanes[lane as usize].dirseg as usize);
         self.n_alive += 1;
         self.stats.spawned += 1;
         self.choose_conn(id);
         true
+    }
+
+    /// Faixa de origem sorteada com probabilidade proporcional ao comprimento.
+    fn pick_gate(&mut self, zone: usize) -> u32 {
+        let cum = &self.gate_cum[zone];
+        let total = cum.last().copied().unwrap_or(0.0);
+        let r = self.rng.f() * total;
+        let k = cum.partition_point(|&c| c <= r).min(cum.len() - 1);
+        self.gates[zone][k]
+    }
+
+    fn zone_reaches(&self, zone: usize, lane: usize) -> bool {
+        self.zone_trees[zone].iter().any(|&t| self.tree_dist[t as usize][lane].is_finite())
+    }
+
+    /// Sorteia um destino dentro da zona `dest` que seja alcançável a partir da faixa `lane`.
+    fn pick_tree(&mut self, dest: usize, lane: usize) -> Option<u32> {
+        let n = self.zone_trees[dest].len();
+        if n == 0 {
+            return None;
+        }
+        let start = self.rng.below(n);
+        (0..n).map(|k| self.zone_trees[dest][(start + k) % n]).find(|&t| self.tree_dist[t as usize][lane].is_finite())
     }
 
     fn remove_vehicle(&mut self, id: usize) {
@@ -564,33 +749,44 @@ impl Sim {
         self.edge_veh[edge as usize].insert(pos, id as u32);
     }
 
-    /// Escolhe a conversão que leva ao próximo trecho da rota a partir da faixa atual.
+    /// Melhor conversão da faixa `l` para o destino: (custo até a zona, conversão). Carros ignoram faixas de ônibus.
+    fn stay_cost(&self, tree: usize, l: usize, kind: u8) -> (f32, u32) {
+        let lane = &self.lanes[l];
+        if lane.to_node == self.tree_node[tree] {
+            return (0.0, SINK);
+        }
+        if kind == 0 && lane.bus {
+            return (f32::INFINITY, NONE);
+        }
+        let mut best = (f32::INFINITY, NONE);
+        for &c in &lane.conns {
+            let cn = &self.conns[c as usize - self.nl];
+            if kind == 0 && self.lanes[cn.to as usize].bus {
+                continue;
+            }
+            let d = cn.pen + self.tree_dist[tree][cn.to as usize];
+            if d < best.0 {
+                best = (d, c);
+            }
+        }
+        best
+    }
+
+    /// Escolhe a conversão da faixa atual com menor custo até o destino (se a faixa não leva ao destino por
+    /// um caminho curto, ela leva por um mais longo: o veículo "dá a volta" em vez de empacar).
     fn choose_conn(&mut self, id: usize) {
         let e = self.edge[id] as usize;
         if e >= self.nl {
             return;
         }
-        let lane = &self.lanes[e];
-        let dest = self.dest[id] as usize;
-        if self.sink[dest][lane.to_node as usize] {
-            self.choice[id] = SINK;
-            return;
-        }
-        let nh = self.hops[dest][lane.dirseg as usize];
-        if nh == NONE {
-            // sem rota a partir daqui: qualquer saída (vai se perder no fim)
-            self.choice[id] = lane.conns.first().copied().unwrap_or(NONE);
-            return;
-        }
-        let mut best = NONE;
-        for &c in &lane.conns {
-            let to = self.conns[c as usize - self.nl].to;
-            if self.lanes[to as usize].dirseg == nh {
-                best = c;
-                break;
-            }
-        }
-        self.choice[id] = best;
+        let (cost, c) = self.stay_cost(self.tgt[id] as usize, e, self.kind[id]);
+        self.choice[id] = if c == SINK {
+            SINK
+        } else if cost.is_finite() {
+            c
+        } else {
+            NONE
+        };
     }
 
     // ---- cruzamentos
@@ -661,6 +857,8 @@ impl Sim {
 
     /// Pode entrar na conversão `cc` agora? (semáforo, preferência por brecha, espaço de saída)
     fn may_enter(&mut self, net: &Net, id: usize, cc: u32) -> bool {
+        REASON.with(|r| r.set(0));
+        BLOCKER.with(|b| b.set(-1));
         if cc == NONE {
             { REASON.with(|r| r.set(1)); return false; }
         }
@@ -680,6 +878,15 @@ impl Sim {
         if st == 2 && v * v / (2.0 * b) < d_end - 1.0 {
             { REASON.with(|r| r.set(3)); return false; } // amarelo e dá para parar
         }
+        // placa "Pare": para na linha por ~1,5 s antes de avaliar a brecha
+        if !signaled && self.lanes[lane_id].stop && self.stop_ok[id] != lane_id as u32 + 1 {
+            if v < 0.3 && d_end < 5.0 && self.wait[id] >= 1.5 {
+                self.stop_ok[id] = lane_id as u32 + 1;
+            } else {
+                REASON.with(|r| r.set(10));
+                return false;
+            }
+        }
         let (me_idx, to_lane) = (cc as usize - self.nl, self.conns[cc as usize - self.nl].to);
         // fila justa na saída: quem espera há mais tempo, vindo de outra faixa para a mesma faixa de saída, passa antes
         {
@@ -697,6 +904,7 @@ impl Sim {
                     let j = j as usize;
                     if self.choice[j] == o && self.v[j] < 0.5 && self.enter_ok[j] && (self.wait[j] > my_wait + 2.0 || (self.wait[j] >= my_wait - 2.0 && j < id)) {
                         REASON.with(|r| r.set(9));
+                        BLOCKER.with(|b| b.set(j as i64));
                         return false;
                     }
                 }
@@ -705,22 +913,30 @@ impl Sim {
         // espaço de saída (keep-clear): fim da faixa de destino e entrada da conversão
         // impasse prolongado (anel/entroncamento travado): aceita "bloquear o cruzamento", reduzindo a folga exigida
         let need = (self.vlen[id] + 2.0) * (1.0 - ((self.wait[id] - 30.0) / 50.0).clamp(0.0, 1.0)).max(0.1);
+        // quem já está andando na faixa de saída vai estar mais à frente quando eu chegar lá
+        let t_enter = (d_end + self.conns[me_idx].len) / v.max(3.0);
         if let Some(&j) = self.edge_veh[to_lane as usize].first() {
             let j = j as usize;
-            if self.s[j] - self.vlen[j] < need {
-                { REASON.with(|r| r.set(4)); return false; }
+            let moving = if self.v[j] > 1.5 { self.v[j].min(8.0) * 0.6 * t_enter } else { 0.0 };
+            if self.s[j] - self.vlen[j] + moving < need {
+                { REASON.with(|r| r.set(4)); BLOCKER.with(|b| b.set(j as i64)); return false; }
             }
         }
         if let Some(&j) = self.edge_veh[cc as usize].first() {
             let j = j as usize;
             if self.s[j] - self.vlen[j] < 2.0 {
-                { REASON.with(|r| r.set(5)); return false; }
+                { REASON.with(|r| r.set(5)); BLOCKER.with(|b| b.set(j as i64)); return false; }
             }
         }
-        let relaxed = self.wait[id] > 25.0;
+        let relaxed = self.wait[id] > 10.0;
         let conflicts = self.conflicts_of(net, cc);
         let t_gap = if relaxed { 1.0 } else { 2.2 };
         let v_me = v.max(2.0);
+        // tempo para percorrer `dist` partindo da velocidade atual e acelerando (parado, não se cruza a 2 m/s constantes)
+        let a_me = (self.amax[id] * 0.6).max(0.5);
+        let t_reach = |dist: f32| (-v + (v * v + 2.0 * a_me * dist.max(0.0)).sqrt()) / a_me;
+        // paciência: quem espera muito só cede a quem realmente chega logo
+        let patient = self.wait[id] > 30.0;
         for &cf in conflicts.iter() {
             let oi = cf.other as usize - self.nl;
             let (me, o) = (&self.conns[me_idx], &self.conns[oi]);
@@ -728,26 +944,26 @@ impl Sim {
                 // convergência na mesma faixa sem preferência: quem chega primeiro entra (desempate pelo id)
                 if cf.merge && !signaled_green_streams(signaled, me, o) {
                     let t_me = (d_end + cf.s_me) / v_me;
-                    let blocked = self.edge_veh[cf.other as usize].iter().any(|&j| {
+                    let blocked = self.edge_veh[cf.other as usize].iter().find(|&&j| {
                         let j = j as usize;
                         let t_j = ((cf.s_other - self.s[j]).max(0.0)) / self.v[j].max(2.0);
                         t_j < t_me || (t_j == t_me && cf.other < cc)
-                    }) || self.edge_veh[o.from as usize].iter().rev().take(2).any(|&j| {
+                    }).or_else(|| self.edge_veh[o.from as usize].iter().rev().take(2).find(|&&j| {
                         let j = j as usize;
                         if self.v[j] < 0.5 {
                             return false; // parado na linha: a ordem de espera (acima) arbitra
                         }
                         let t_j = (self.lanes[o.from as usize].len - self.s[j] + cf.s_other) / self.v[j].max(2.0);
                         t_j < t_me || (t_j == t_me && cf.other < cc)
-                    });
-                    if blocked {
-                        { REASON.with(|r| r.set(6)); return false; }
+                    })).copied();
+                    if let Some(j) = blocked {
+                        { REASON.with(|r| r.set(6)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                     }
                 }
                 continue;
             }
             // chegada minha ao ponto de conflito
-            let t_me = (d_end + cf.s_me) / v_me;
+            let t_me = t_reach(d_end + cf.s_me).min((d_end + cf.s_me) / v_me);
             // veículos já na conversão concorrente
             for &j in &self.edge_veh[cf.other as usize] {
                 let j = j as usize;
@@ -757,7 +973,7 @@ impl Sim {
                 }
                 let t_j = if sj >= cf.s_other { 0.0 } else { (cf.s_other - sj) / self.v[j].max(2.0) };
                 if !(t_me + t_gap < t_j) {
-                    { REASON.with(|r| r.set(7)); return false; }
+                    { REASON.with(|r| r.set(7)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                 }
             }
             // os que estão chegando pela faixa que alimenta a conversão
@@ -772,14 +988,21 @@ impl Sim {
                 if !signaled && self.v[j] < 0.5 && self.wait[j] + 3.0 < self.wait[id] {
                     continue;
                 }
+                // parado na linha e sem poder entrar (fila, saída cheia): não vai ocupar o cruzamento agora
+                if self.v[j] < 0.5 && !self.enter_ok[j] {
+                    continue;
+                }
                 // quem está parado na linha há tempo está bloqueado (não vai ocupar o cruzamento já): não prende quem espera muito
-                if self.v[j] < 0.5 && self.wait[j] > 8.0 && self.wait[id] > 25.0 {
+                if self.v[j] < 0.5 && self.wait[j] > 3.0 && self.wait[id] > 6.0 {
                     continue;
                 }
                 let d_j = self.lanes[fl].len - self.s[j];
                 let t_j = (d_j + cf.s_other) / self.v[j].max(2.0);
+                if patient && t_j > 4.0 {
+                    continue;
+                }
                 if !(t_me + t_gap < t_j) {
-                    { REASON.with(|r| r.set(8)); return false; }
+                    { REASON.with(|r| r.set(8)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                 }
             }
         }
@@ -820,17 +1043,30 @@ impl Sim {
                 return Some((rest.max(0.0), 0.0));
             }
             // dentro da conversão escolhida
-            if let Some(&j) = self.edge_veh[cc as usize].first() {
-                let j = j as usize;
-                return Some((rest + self.s[j] - self.vlen[j], self.v[j]));
-            }
             let to = self.conns[cc as usize - self.nl].to;
             let clen = self.edge_len[cc as usize];
-            if let Some(&j) = self.edge_veh[to as usize].first() {
+            let other = if let Some(&j) = self.edge_veh[cc as usize].first() {
                 let j = j as usize;
-                return Some((rest + clen + self.s[j] - self.vlen[j], self.v[j]));
+                Some((rest + self.s[j] - self.vlen[j], self.v[j]))
+            } else if let Some(&j) = self.edge_veh[to as usize].first() {
+                let j = j as usize;
+                Some((rest + clen + self.s[j] - self.vlen[j], self.v[j]))
+            } else {
+                None
+            };
+            // faixa de destino curta que termina em semáforo fechado: a retenção dela também vale para quem ainda está antes
+            let tl = &self.lanes[to as usize];
+            if tl.len < 30.0 {
+                let st = self.end_state[tl.end_id as usize];
+                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) < rest + clen + tl.len - 1.0) {
+                    let stop = (rest + clen + tl.len - 0.5, 0.0);
+                    return Some(match other {
+                        Some(o) if o.0 < stop.0 => o,
+                        _ => stop,
+                    });
+                }
             }
-            None
+            other
         } else {
             let to = self.conns[e - self.nl].to;
             if let Some(&j) = self.edge_veh[to as usize].first() {
@@ -1019,6 +1255,7 @@ impl Sim {
                 let end = self.lanes[e].end_id as usize;
                 if self.end_state[end] == 1 && self.red_age[end] > 1.5 {
                     self.stats.red_runs += 1;
+                    if self.red_log.len() < 40 { self.red_log.push((e as u32, self.v[i], self.choice[i], self.wait[i], self.red_age[end])); }
                 }
                 let over = self.s[i] - self.edge_len[e];
                 let p = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
@@ -1053,29 +1290,80 @@ impl Sim {
         }
     }
 
+    /// Melhor conversão (custo, conversão) entre as faixas vizinhas da mesma via, ignorando se a faixa atual a permite.
+    fn best_neighbor_conn(&self, i: usize) -> Option<(f32, u32)> {
+        let e = self.edge[i] as usize;
+        let (lo, hi) = self.lanes_of(e);
+        let mut best: Option<(f32, u32)> = None;
+        for cl in lo..hi {
+            if cl == e {
+                continue;
+            }
+            let (c, conn) = self.stay_cost(self.tgt[i] as usize, cl, self.kind[i]);
+            if conn != NONE && conn != SINK && c.is_finite() && best.map_or(true, |b| c < b.0) {
+                best = Some((c, conn));
+            }
+        }
+        best
+    }
+
     fn consider_lane_change(&mut self, i: usize) {
         let e = self.edge[i] as usize;
-        let lane = &self.lanes[e];
-        let dest = self.dest[i] as usize;
-        let mandatory_target = if self.choice[i] == NONE || self.choice[i] == SINK && false {
-            let nh = self.hops[dest][lane.dirseg as usize];
-            if nh == NONE {
-                None
-            } else {
-                self.lane_toward(e, nh)
-            }
-        } else {
-            None
-        };
-        let rest = lane.len - self.s[i];
-        if let Some(target) = mandatory_target {
-            let forced = rest < 40.0 || self.wait[i] > 6.0;
-            if self.try_change(i, target, forced) {
-                self.cool[i] = 1.0;
-            } else {
-                self.cool[i] = 0.4;
-            }
+        let dest = self.tgt[i] as usize;
+        let kind = self.kind[i];
+        let rest = self.lanes[e].len - self.s[i];
+        // tempo de viagem anormal (voltas sem fim): vira "infrator" e, no limite, desiste
+        let elapsed = self.time as f32 - self.t_spawn[i];
+        let tf = self.t_free[i];
+        if elapsed > (3.0 * tf).max(900.0) {
+            self.rule_breaker[i] = true;
+        }
+        if elapsed > (6.0 * tf).max(1800.0) {
+            self.stats.lost += 1;
+            self.remove_vehicle(i);
             return;
+        }
+        let own = self.stay_cost(dest, e, kind).0;
+        // infração: parado no fim da faixa sem saída boa; quem não infringe só o faz depois de muito tempo preso
+        if self.choice[i] != SINK && rest < 25.0 && self.wait[i] > 8.0 {
+            if self.rule_breaker[i] || self.wait[i] > 45.0 {
+                if let Some((cost, c)) = self.best_neighbor_conn(i) {
+                    if !own.is_finite() || own - cost > 20.0 {
+                        if self.choice[i] != c {
+                            self.stats.illegal_moves += 1;
+                        }
+                        self.choice[i] = c;
+                        self.cool[i] = 1.0;
+                        return;
+                    }
+                }
+            }
+            if !own.is_finite() && self.wait[i] > 90.0 {
+                self.stats.lost += 1;
+                self.remove_vehicle(i);
+                return;
+            }
+        }
+        // troca de faixa para a faixa de menor custo até o destino (conta o custo de trocar)
+        if self.choice[i] != SINK {
+            let (lo, hi) = self.lanes_of(e);
+            let w = self.lane_w[e];
+            let mut best = (own, e);
+            for cl in lo..hi {
+                if cl == e || !self.compatible(i, cl) {
+                    continue;
+                }
+                let tot = self.stay_cost(dest, cl, kind).0 + w * (cl as i32 - e as i32).unsigned_abs() as f32;
+                if tot + 2.0 < best.0 {
+                    best = (tot, cl);
+                }
+            }
+            if best.1 != e {
+                let target = if best.1 > e { e + 1 } else { e - 1 };
+                let forced = rest < 40.0 || self.wait[i] > 6.0;
+                self.cool[i] = if self.try_change(i, target, forced) { 1.0 } else { 0.4 };
+                return;
+            }
         }
         // discricionária: leva-se em conta o líder lento
         if self.choice[i] == SINK || rest < 60.0 || self.v[i] > 0.85 * self.desired_speed(i) {
@@ -1141,26 +1429,6 @@ impl Sim {
         }
     }
 
-    /// Faixa vizinha (um passo) na direção da faixa do mesmo trecho/sentido que tem conversão para `nh`.
-    fn lane_toward(&self, e: usize, nh: u32) -> Option<usize> {
-        let (lo, hi) = self.lanes_of(e);
-        let mut best: Option<(usize, usize)> = None;
-        for cl in lo..hi {
-            let ok = self.lanes[cl].conns.iter().any(|&c| self.lanes[self.conns[c as usize - self.nl].to as usize].dirseg == nh);
-            if ok {
-                let d = (cl as i32 - e as i32).unsigned_abs() as usize;
-                if best.map_or(true, |b| d < b.1) {
-                    best = Some((cl, d));
-                }
-            }
-        }
-        let (target, _) = best?;
-        if target == e {
-            return None;
-        }
-        Some(if target > e { e + 1 } else { e - 1 })
-    }
-
     fn try_change(&mut self, i: usize, to: usize, forced: bool) -> bool {
         let e = self.edge[i] as usize;
         if !self.compatible(i, to) {
@@ -1222,7 +1490,19 @@ impl Sim {
                         self.next_spawn[i][j] = f64::INFINITY;
                         break;
                     }
-                    let gate = self.gates[i][self.rng.below(self.gates[i].len())];
+                    // só nasce onde existe caminho até o destino (sorteia algumas entradas)
+                    let mut gate = self.pick_gate(i);
+                    for _ in 0..6 {
+                        if self.zone_reaches(j, gate as usize) && self.lanes[gate as usize].len >= 15.0 {
+                            break;
+                        }
+                        gate = self.pick_gate(i);
+                    }
+                    if !self.zone_reaches(j, gate as usize) || self.lanes[gate as usize].len < 15.0 {
+                        self.stats.skipped += 1;
+                        self.next_spawn[i][j] += self.rng.exp(rate);
+                        continue;
+                    }
                     let kind = if (self.rng.f() as f64) < self.params.bus_share / 100.0 { 1 } else { 0 };
                     if !self.spawn_vehicle(gate, i as u16, j as u16, kind) {
                         if self.pending[gate as usize].len() < 200 {
@@ -1239,7 +1519,8 @@ impl Sim {
     // ------------------------------------------------------------------ saída
 
     /// Posição (x, y, rumo) do veículo `i`.
-    fn pose(&self, net: &Net, i: usize) -> (f32, f32, f32) {
+    /// Posição da frente do veículo e direção unitária (dx, dy).
+    fn pose_dir(&self, net: &Net, i: usize) -> (f32, f32, f32, f32) {
         let e = self.edge[i] as usize;
         if e < self.nl {
             let l = &self.lanes[e];
@@ -1249,27 +1530,36 @@ impl Sim {
             let (p, t) = seg.poly.at(a);
             let sign = if l.dir == 0 { 1.0 } else { -1.0 };
             let q = add(p, mul(right(t), (l.off + self.lat[i]) as f64));
-            (q[0] as f32, q[1] as f32, (t[1] * sign).atan2(t[0] * sign) as f32)
+            (q[0] as f32, q[1] as f32, (t[0] * sign) as f32, (t[1] * sign) as f32)
         } else {
             let c = &self.conns[e - self.nl];
             let u = (self.s[i] / c.len).clamp(0.0, 1.0);
             let p = bez8(&c.curve, u);
             let q = bez8(&c.curve, (u + 0.02).min(1.0));
             let p0 = bez8(&c.curve, (u - 0.02).max(0.0));
-            let d = sub(q, p0);
-            (p[0] as f32, p[1] as f32, d[1].atan2(d[0]) as f32)
+            let d = norm(sub(q, p0));
+            (p[0] as f32, p[1] as f32, d[0] as f32, d[1] as f32)
         }
     }
 
-    /// Estado dos veículos: por veículo [x, y, rumo, velocidade, tipo, comprimento, id].
+    fn pose(&self, net: &Net, i: usize) -> (f32, f32, f32) {
+        let (x, y, dx, dy) = self.pose_dir(net, i);
+        (x, y, dy.atan2(dx))
+    }
+
+    /// Estado dos veículos indexado pelo slot (o id do veículo é a posição): 6 floats por slot,
+    /// [x, y, dx, dy, velocidade, comprimento] da frente do veículo, com comprimento negativo para ônibus.
+    /// Slot livre = tudo zero (comprimento 0).
     pub fn snapshot(&self, net: &Net, out: &mut Vec<f32>) {
         out.clear();
+        out.resize(self.alive.len() * SNAP_STRIDE, 0.0);
         for i in 0..self.alive.len() {
             if !self.alive[i] {
                 continue;
             }
-            let (x, y, a) = self.pose(net, i);
-            out.extend_from_slice(&[x, y, a, self.v[i], self.kind[i] as f32, self.vlen[i], i as f32]);
+            let (x, y, dx, dy) = self.pose_dir(net, i);
+            let len = if self.kind[i] == 1 { -self.vlen[i] } else { self.vlen[i] };
+            out[i * SNAP_STRIDE..(i + 1) * SNAP_STRIDE].copy_from_slice(&[x, y, dx, dy, self.v[i], len]);
         }
     }
 
@@ -1278,7 +1568,8 @@ impl Sim {
         if i >= self.alive.len() || !self.alive[i] {
             return None;
         }
-        let dest = self.dest[i] as usize;
+        let dest = self.tgt[i] as usize;
+        let zone_dest = self.dest[i] as usize;
         let mut pts: Vec<V2> = Vec::new();
         let (x, y, _) = self.pose(net, i);
         pts.push([x as f64, y as f64]);
@@ -1309,63 +1600,65 @@ impl Sim {
             }).collect()
         };
         let e = self.edge[i] as usize;
-        let mut next_dirseg: u32 = NONE;
-        let mut done = false;
+        let kind = self.kind[i];
+        // faixa onde o traçado continua depois da parte atual
+        let mut cur: Option<usize> = None;
         if e < self.nl {
             let l = &self.lanes[e];
             pts.extend(lane_pts(l, self.s[i]));
-            let cc = self.choice[i];
-            if cc == SINK {
-                done = true;
-            } else if cc != NONE {
+            let mut cc = self.choice[i];
+            if cc == NONE {
+                // sem conversão escolhida: mostra a da melhor faixa vizinha
+                let (lo, hi) = self.lanes_of(e);
+                let mut best = (f32::INFINITY, NONE);
+                for cl in lo..hi {
+                    let r = self.stay_cost(dest, cl, kind);
+                    if r.0 < best.0 {
+                        best = r;
+                    }
+                }
+                cc = best.1;
+            }
+            if cc != NONE && cc != SINK {
                 let c = &self.conns[cc as usize - self.nl];
                 pts.extend(curve_pts(c, 0.0));
-                let tl = &self.lanes[c.to as usize];
-                pts.extend(lane_pts(tl, 0.0));
-                next_dirseg = tl.dirseg;
-                if self.sink[dest][tl.to_node as usize] {
-                    done = true;
-                }
-            } else {
-                next_dirseg = self.hops[dest][l.dirseg as usize];
+                cur = Some(c.to as usize);
             }
         } else {
             let c = &self.conns[e - self.nl];
             pts.extend(curve_pts(c, (self.s[i] / c.len).clamp(0.0, 1.0)));
-            let tl = &self.lanes[c.to as usize];
-            pts.extend(lane_pts(tl, 0.0));
-            next_dirseg = tl.dirseg;
-            if self.sink[dest][tl.to_node as usize] {
-                done = true;
-            }
+            cur = Some(c.to as usize);
         }
         let mut guard = 0;
-        if !done && next_dirseg != NONE {
-            // `next_dirseg` já foi desenhado quando veio de uma conversão; senão é o próximo trecho a percorrer
-            let mut cur = if e < self.nl && self.choice[i] == NONE { next_dirseg } else { self.hops[dest][next_dirseg as usize] };
-            while cur != NONE && guard < 4000 {
-                guard += 1;
-                let seg = &net.segs[(cur >> 1) as usize];
-                let mut v = seg.poly.pts.clone();
-                if cur & 1 == 1 {
-                    v.reverse();
-                }
-                if v.len() >= 2 {
-                    let m = miter(&v);
-                    for (p, d) in v.iter_mut().zip(m) {
-                        *p = add(*p, mul(d, 1.75));
-                    }
-                }
-                pts.extend(v);
-                let end = route::dirseg_end_node(net, cur);
-                if self.sink[dest][end as usize] {
-                    break;
-                }
-                cur = self.hops[dest][cur as usize];
+        while let Some(l) = cur {
+            guard += 1;
+            if guard > 600 {
+                break;
             }
+            pts.extend(lane_pts(&self.lanes[l], 0.0));
+            if self.lanes[l].to_node == self.tree_node[dest] {
+                break;
+            }
+            // na faixa de menor custo (considerando o custo de trocar) segue-se a melhor conversão
+            let (lo, hi) = self.lanes_of(l);
+            let w = self.lane_w[l];
+            let mut best = (f32::INFINITY, NONE);
+            for cl in lo..hi {
+                let r = self.stay_cost(dest, cl, kind);
+                let tot = r.0 + w * (cl as i32 - l as i32).unsigned_abs() as f32;
+                if tot < best.0 {
+                    best = (tot, r.1);
+                }
+            }
+            if best.1 == NONE || best.1 == SINK {
+                break;
+            }
+            let c = &self.conns[best.1 as usize - self.nl];
+            pts.extend(curve_pts(c, 0.0));
+            cur = Some(c.to as usize);
         }
         let flat: Vec<f32> = pts.iter().flat_map(|p| [p[0] as f32, p[1] as f32]).collect();
-        Some((flat, self.zone_ids[dest], self.kind[i], self.v[i], self.wait[i]))
+        Some((flat, self.zone_ids[zone_dest], self.kind[i], self.v[i], self.wait[i]))
     }
 
     /// Relatório consolidado (JSON) da execução até agora.
@@ -1380,8 +1673,8 @@ impl Sim {
                 continue;
             }
             let e = self.edge[i] as usize;
-            let dirseg = if e < self.nl { self.lanes[e].dirseg } else { self.lanes[self.conns[e - self.nl].from as usize].dirseg };
-            let remaining = self.dists[self.dest[i] as usize][dirseg as usize];
+            let lane_ref = if e < self.nl { e } else { self.conns[e - self.nl].from as usize };
+            let remaining = self.tree_dist[self.tgt[i] as usize][lane_ref];
             let remaining = if remaining.is_finite() { remaining } else { 0.0 };
             let free_so_far = (self.t_free[i] - remaining).max(0.0) as f64;
             alive_delay += ((self.time - self.t_spawn[i] as f64) - free_so_far).max(0.0);
@@ -1431,6 +1724,168 @@ impl Sim {
             ));
         }
         out
+    }
+
+    /// Texto curto do motivo do último bloqueio em `may_enter` (para depuração).
+    pub fn reason_text(code: u32) -> &'static str {
+        match code {
+            1 => "sem conversão para a rota",
+            2 => "semáforo vermelho",
+            3 => "semáforo amarelo (consegue parar)",
+            4 => "saída ocupada (sem 6–7 m livres no começo da faixa de destino)",
+            5 => "conversão ocupada (veículo ainda na curva)",
+            6 => "convergência: outro veículo chega antes à mesma faixa",
+            7 => "veículo dentro do cruzamento cruza o caminho",
+            8 => "cede a quem tem preferência (brecha insuficiente)",
+            9 => "fila justa: outro veículo espera há mais tempo pela mesma saída",
+            10 => "placa Pare: ainda não parou na linha",
+            _ => "",
+        }
+    }
+
+    /// Estado detalhado de um veículo (JSON) para depuração.
+    pub fn explain(&mut self, net: &Net, i: usize) -> serde_json::Value {
+        use serde_json::json;
+        if i >= self.alive.len() || !self.alive[i] {
+            return serde_json::Value::Null;
+        }
+        let e = self.edge[i] as usize;
+        let on_lane = e < self.nl;
+        let kind_name = |k: u8| match k {
+            K_LEFT => "esquerda",
+            K_STRAIGHT => "em frente",
+            K_RIGHT => "direita",
+            _ => "retorno",
+        };
+        let (seg_way, seg_name, lane_idx, lane_len, lane_to, end_state, red_age, lane_rank) = if on_lane {
+            let l = &self.lanes[e];
+            let sg = &net.segs[l.seg as usize];
+            let nm = net.names.get(sg.name as usize).cloned().unwrap_or_default();
+            (sg.way_id, nm, l.idx as i64, l.len, l.to_node, self.end_state[l.end_id as usize], self.red_age[l.end_id as usize], l.rank)
+        } else {
+            let c = &self.conns[e - self.nl];
+            let l = &self.lanes[c.from as usize];
+            let sg = &net.segs[l.seg as usize];
+            let nm = net.names.get(sg.name as usize).cloned().unwrap_or_default();
+            (sg.way_id, nm, -1, c.len, c.node, 0, 0.0, c.rank)
+        };
+        // líder
+        let list = self.edge_veh[e].clone();
+        let k = list.iter().position(|&x| x as usize == i).unwrap_or(0);
+        let front = k + 1 == list.len();
+        let leader = if !front {
+            let j = list[k + 1] as usize;
+            Some(json!({ "id": j, "gap": self.s[j] - self.vlen[j] - self.s[i], "v": self.v[j], "wait": self.wait[j] }))
+        } else {
+            None
+        };
+        let rest = self.edge_len[e] - self.s[i];
+        // decisão de entrada no cruzamento
+        let cc = self.choice[i];
+        let mut enter = serde_json::Value::Null;
+        if on_lane && front && cc != NONE && cc != SINK {
+            let ok = self.may_enter(net, i, cc);
+            let code = REASON.with(|r| r.get());
+            let blocker = BLOCKER.with(|b| b.get());
+            enter = json!({ "ok": ok, "code": code, "reason": Self::reason_text(code), "blocker": if ok { -1 } else { blocker } });
+        }
+        let choice = if cc == NONE {
+            json!("nenhuma")
+        } else if cc == SINK {
+            json!("destino (sai da rede)")
+        } else {
+            let c = &self.conns[cc as usize - self.nl];
+            json!({ "conn": cc, "kind": kind_name(c.kind), "len": c.len, "pen": c.pen, "toLane": c.to, "toIdx": self.lanes[c.to as usize].idx })
+        };
+        // custo até o destino da faixa atual e das vizinhas
+        let tgt = self.tgt[i] as usize;
+        let own = if on_lane { self.stay_cost(tgt, e, self.kind[i]).0 } else { f32::INFINITY };
+        let mut lanes_cost = Vec::new();
+        if on_lane {
+            let (lo, hi) = self.lanes_of(e);
+            for cl in lo..hi {
+                let (c, conn) = self.stay_cost(tgt, cl, self.kind[i]);
+                lanes_cost.push(json!({ "idx": self.lanes[cl].idx, "here": cl == e, "cost": if c.is_finite() { json!(c) } else { json!(null) }, "conn": if conn == NONE || conn == SINK { json!(null) } else { json!(kind_name(self.conns[conn as usize - self.nl].kind)) } }));
+            }
+        }
+        let elapsed = self.time as f32 - self.t_spawn[i];
+        let remaining = {
+            let lane_ref = if on_lane { e } else { self.conns[e - self.nl].from as usize };
+            self.tree_dist[tgt][lane_ref]
+        };
+        json!({
+            "id": i,
+            "kind": if self.kind[i] == 1 { "ônibus" } else { "carro" },
+            "origin": self.zone_ids[self.origin[i] as usize],
+            "dest": self.zone_ids[self.dest[i] as usize],
+            "targetNode": net.nodes[self.tree_node[tgt] as usize].osm_id,
+            "where": if on_lane { "faixa" } else { "dentro do cruzamento" },
+            "way": seg_way,
+            "street": seg_name,
+            "laneIdx": lane_idx,
+            "s": self.s[i],
+            "len": lane_len,
+            "rest": rest,
+            "front": front,
+            "v": self.v[i],
+            "vDesired": self.desired_speed(i),
+            "acc": self.acc[i],
+            "wait": self.wait[i],
+            "len_m": self.vlen[i],
+            "leader": leader,
+            "choice": choice,
+            "enter": enter,
+            "signal": match end_state { 0 => "sem semáforo", 1 => "vermelho", 2 => "amarelo", _ => "verde" },
+            "redAge": red_age,
+            "rank": lane_rank,
+            "toNode": net.nodes[lane_to as usize].osm_id,
+            "laneChangeCooldown": self.cool[i].max(0.0),
+            "costOwn": if own.is_finite() { json!(own) } else { json!(null) },
+            "lanes": lanes_cost,
+            "ruleBreaker": self.rule_breaker[i],
+            "elapsed": elapsed,
+            "freeTime": self.t_free[i],
+            "remainingFree": if remaining.is_finite() { json!(remaining) } else { json!(null) },
+            "delay": (elapsed - (self.t_free[i] - if remaining.is_finite() { remaining } else { 0.0 })).max(0.0),
+        })
+    }
+
+    /// Veículos na frente de faixa parados há mais tempo (para achar gargalos): [{id, wait, reason, blocker, street}].
+    pub fn stuck_list(&mut self, net: &Net, n: usize) -> Vec<serde_json::Value> {
+        use serde_json::json;
+        let mut cand: Vec<(f32, usize, usize)> = Vec::new();
+        for e in 0..self.nl {
+            if let Some(&j) = self.edge_veh[e].last() {
+                let j = j as usize;
+                if self.wait[j] >= 5.0 {
+                    cand.push((self.wait[j], j, e));
+                }
+            }
+        }
+        cand.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        cand.truncate(n);
+        let mut out = Vec::new();
+        for (w, j, e) in cand {
+            let cc = self.choice[j];
+            let (ok, code, blocker) = if cc == NONE || cc == SINK {
+                (false, if cc == NONE { 1 } else { 0 }, -1)
+            } else {
+                let ok = self.may_enter(net, j, cc);
+                (ok, REASON.with(|r| r.get()), BLOCKER.with(|b| b.get()))
+            };
+            let sg = &net.segs[self.lanes[e].seg as usize];
+            out.push(json!({
+                "id": j, "wait": w, "ok": ok, "reason": Self::reason_text(code), "code": code, "blocker": blocker,
+                "street": net.names.get(sg.name as usize).cloned().unwrap_or_default(),
+                "signal": self.end_state[self.lanes[e].end_id as usize],
+            }));
+        }
+        out
+    }
+
+    pub fn lane_info(&self, e: usize) -> String {
+        let l = &self.lanes[e];
+        format!("lane {} seg {} dir {} idx {} len {:.1} to_node {} end_id {} end_state {} conns {:?}", e, l.seg, l.dir, l.idx, l.len, l.to_node, l.end_id, self.end_state[l.end_id as usize], l.conns)
     }
 
     pub fn od_of(&self, i: usize) -> Option<(u16, u16, u32, f32)> {

@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { PHASE_COLORS } from '../engine/SignalLayer'
 import { SEG_STRIDE, type NetworkData, type SignalDef } from '../model/types'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`
 const phaseColor = (i: number) => hex(PHASE_COLORS[i % PHASE_COLORS.length])
@@ -30,7 +31,7 @@ function NumberField({ value, onChange, label, max = 600 }: { value: number; onC
 }
 
 function Editor({ index, def }: { index: number; def: SignalDef }) {
-  const { data, setPhase, setOffset, moveApproach, addPhase, removePhase, removeSignal, resetSignal } = useStore()
+  const { data, setPhase, setOffset, moveApproach, addPhase, removePhase, removeSignal, resetSignal } = useStore(useShallow((s) => ({ data: s.data, setPhase: s.setPhase, setOffset: s.setOffset, moveApproach: s.moveApproach, addPhase: s.addPhase, removePhase: s.removePhase, removeSignal: s.removeSignal, resetSignal: s.resetSignal })))
   if (!data) return null
   const cycle = def.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
   const owner = new Map<number, number>()
@@ -118,8 +119,46 @@ function Editor({ index, def }: { index: number; def: SignalDef }) {
   )
 }
 
+type SigRowProps = {
+  index: number
+  def: SignalDef
+  data: NetworkData
+  isOpen: boolean
+  mode: string
+  setOpen: (i: number | null) => void
+  setMode: (m: 'nodes') => void
+  select: (n: number | null, focus?: boolean) => void
+}
+
+/** Uma linha da lista; memorizada para que a lista de ~1.000 semáforos não seja refeita a cada atualização do store. */
+const SigRow = memo(function SigRow({ index: i, def: s, data, isOpen, mode, setOpen, setMode, select }: SigRowProps) {
+  const label = useMemo(() => signalLabel(data, s), [data, s])
+  const total = s.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
+  return (
+    <li className={isOpen ? 'open' : ''}>
+      <button
+        className="sig-head"
+        aria-expanded={isOpen}
+        onClick={() => {
+          setOpen(isOpen ? null : i)
+          if (!isOpen) {
+            if (mode !== 'nodes') setMode('nodes')
+            select(s.node, true)
+          }
+        }}
+      >
+        <span className="sig-name">{label}</span>
+        <span>
+          {s.phases.length} fases · {total.toFixed(0)} s
+        </span>
+      </button>
+      {isOpen && <Editor index={i} def={s} />}
+    </li>
+  )
+})
+
 export function SignalPanel() {
-  const { data, signals, selected, playing, speed, setPlaying, setSpeed, select, setMode, mode, resetSignals, sigEdits } = useStore()
+  const { data, signals, selected, select, setMode, mode, resetSignals, sigEdits } = useStore(useShallow((s) => ({ data: s.data, signals: s.signals, selected: s.selected, select: s.select, setMode: s.setMode, mode: s.mode, resetSignals: s.resetSignals, sigEdits: s.sigEdits })))
   const [open, setOpen] = useState<number | null>(null)
 
   const current = useMemo(() => {
@@ -134,54 +173,22 @@ export function SignalPanel() {
         Semáforos <small>{signals.length}</small>
         {sigEdits > 0 && <small className="edited">{sigEdits} editado{sigEdits > 1 ? 's' : ''}</small>}
       </h2>
-      <div className="row tight">
-        <button className="btn sm" onClick={() => setPlaying(!playing)}>
-          {playing ? 'Pausar' : 'Rodar'}
-        </button>
-        <select className="sel" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} aria-label="Velocidade do relógio">
-          {[1, 2, 5, 10].map((v) => (
-            <option key={v} value={v}>
-              {v}×
-            </option>
-          ))}
-        </select>
-        {sigEdits > 0 && (
+      {sigEdits > 0 && (
+        <div className="row tight">
           <button className="btn sm" onClick={resetSignals} title="Descarta todas as edições de semáforo">
             Restaurar todos
           </button>
-        )}
-      </div>
+        </div>
+      )}
       {signals.length === 0 && (
         <p className="hint">
           Nenhum semáforo neste mapa. Selecione um cruzamento (modo <b>Conversões</b>) e use <b>Adicionar semáforo</b>.
         </p>
       )}
       <ul className="sigs">
-        {signals.map((s, i) => {
-          const total = s.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
-          const isOpen = current === i
-          return (
-            <li key={s.node} className={isOpen ? 'open' : ''}>
-              <button
-                className="sig-head"
-                aria-expanded={isOpen}
-                onClick={() => {
-                  setOpen(isOpen ? null : i)
-                  if (!isOpen) {
-                    if (mode !== 'nodes') setMode('nodes')
-                    select(s.node, true)
-                  }
-                }}
-              >
-                <span className="sig-name">{signalLabel(data, s)}</span>
-                <span>
-                  {s.phases.length} fases · {total.toFixed(0)} s
-                </span>
-              </button>
-              {isOpen && <Editor index={i} def={s} />}
-            </li>
-          )
-        })}
+        {signals.map((s, i) => (
+          <SigRow key={s.node} index={i} def={s} data={data} isOpen={current === i} mode={mode} setOpen={setOpen} setMode={setMode} select={select} />
+        ))}
       </ul>
     </section>
   )

@@ -2,14 +2,17 @@ import { create } from 'zustand'
 import type { LayerKey, LayerState } from '../engine/MapView'
 import { viewRef } from '../engine/instance'
 import { DEFAULT_PARAMS, demandPayload, PROFILES, ZONE_COLORS, type DemandParams, type Zone } from './demand'
+import { applyOdImport, buildOdImport, OD2018_URL, type OdImport, type OdSource } from './odImport'
 import { DIFF_PALETTE, diffLevels, HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
-import { simTrack, editNetwork, fetchHist, fetchNodeConns, importMap, onSim, resolveDemand, runBench, sendConnEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
+import type { VehicleInfo } from './types'
+import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, importMap, onSim, resolveDemand, runBench, sendConnEdits, sendPrioEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
 import {
   clearAll,
   configFromDef,
   connKey,
   exportScenario,
   loadConnEdits,
+  loadPrioEdits,
   loadDemand,
   loadRemoved,
   loadRoads,
@@ -18,6 +21,7 @@ import {
   loadMap,
   loadSegEdits,
   saveConnEdits,
+  savePrioEdits,
   saveDemand,
   saveRoads,
   saveScenarios,
@@ -26,6 +30,7 @@ import {
   saveSegEdits,
   segEditKey,
   type ConnEdits,
+  type PrioEdits,
   type NewPt,
   type NewRoad,
   type ScenarioFile,
@@ -58,8 +63,6 @@ interface State {
   selectedSeg: number | null
   scope: EditScope
   signals: SignalDef[]
-  playing: boolean
-  speed: number
   zoom: number
   toast: string | null
   /** Incrementa a cada edição (força os painéis a reler os dados). */
@@ -76,6 +79,9 @@ interface State {
   zones: Zone[]
   demandParams: DemandParams
   odManual: Record<string, number>
+  /** matriz da Pesquisa OD importada (resumo para a interface) */
+  odImport: { name: string; scale: number; merged: number } | null
+  odImporting: boolean
   selectedZone: number | null
   demand: DemandResult | null
   /** simulação de tráfego: ocioso, pausada ou rodando */
@@ -91,8 +97,10 @@ interface State {
     /** balde (minuto) em reprodução; null = ao vivo */
     replay: number | null
     /** veículo selecionado: rota restante até o destino */
-    track: { id: number; alive: boolean; zone: number; kind: number; v: number; wait: number } | null
+    track: { id: number; alive: boolean; zone: number; kind: number; v: number; wait: number; info: VehicleInfo | null } | null
+    follow: boolean
   }
+  setFollow: (on: boolean) => void
   pickVehicle: (id: number | null) => void
   /** cenários salvos para comparar (A/B) e a execução em andamento */
   scenarios: ScenarioRec[]
@@ -118,6 +126,11 @@ interface State {
   setDemandParams: (patch: Partial<DemandParams>) => void
   /** Fixa (ou libera, com null) uma célula da matriz OD em veículos/h. */
   setOdCell: (fromId: number, toId: number, value: number | null) => void
+  /** substitui as zonas pelas da Pesquisa OD 2018 que cobrem o mapa e fixa a matriz de carro */
+  importOd2018: () => Promise<void>
+  setOdScale: (scale: number) => void
+  /** desliga a matriz importada (mantém as zonas, volta ao modelo gravitacional) */
+  clearOdImport: () => void
   setLayer: (k: LayerKey, on: boolean) => void
   setMode: (m: EditMode) => void
   setScope: (s: EditScope) => void
@@ -127,6 +140,11 @@ interface State {
   addRoad: (pts: NewPt[], newChain: boolean) => void
   eraseSegment: (seg: number) => void
   undo: () => void
+  /** Número de ramos com placa de preferência escolhida. */
+  prioCount: number
+  /** Define a placa de um ramo do cruzamento selecionado (0 = automático). */
+  setPriority: (key: string, level: number) => void
+  resetPriorities: (node?: number) => void
   select: (n: number | null, focus?: boolean) => void
   /** Seleção feita no próprio mapa (a vista já está atualizada). */
   onViewSelect: (n: number | null) => void
@@ -156,8 +174,6 @@ interface State {
   /** Volta o semáforo ao padrão do OSM (ou o remove, se foi adicionado pelo usuário). */
   resetSignal: (node: number) => void
   resetSignals: () => void
-  setPlaying: (p: boolean) => void
-  setSpeed: (s: number) => void
   exportScenario: () => void
   notify: (msg: string) => void
 }
@@ -172,6 +188,9 @@ let rebuildPending = false
 
 /** Conversões editadas (autoridade): sobrevivem à reconstrução da rede. */
 let connRecord: ConnEdits = {}
+/** Placas de preferência escolhidas (chave `nóOsm|ramo` -> nível 1..3). */
+let prioRecord: PrioEdits = {}
+let prioTimer = 0
 /** Configurações de trecho editadas (enviadas ao núcleo). */
 let segRecord: SegEdits = {}
 /** Semáforos adicionados/removidos/reconfigurados. */
@@ -186,11 +205,14 @@ let chainName = ''
 let zoneRecord: Zone[] = []
 let paramsRecord: DemandParams = { ...DEFAULT_PARAMS }
 let odRecord: Record<string, number> = {}
+let odImportRecord: OdImport | null = null
+/** matriz fixada por hora enviada à simulação (só com importação ativa) */
+let odHourly: Record<string, number>[] | undefined
 let demandTimer = 0
 let demandSave = 0
 let cancelBenchFn: (() => void) | null = null
 const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
-const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord })
+const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord, priorities: prioRecord })
 export const getSegRecord = () => segRecord
 
 /** Registra (ou apaga, se voltou ao padrão) a edição da conversão `c` do nó carregado. */
@@ -211,14 +233,39 @@ const afterConnEdit = () => {
   }, 300)
 }
 
+const afterPrioEdit = (node: number | null) => {
+  useStore.setState({ prioCount: Object.keys(prioRecord).length })
+  const snapshot = { ...prioRecord }
+  sendPrioEdits(snapshot)
+  clearTimeout(prioTimer)
+  prioTimer = window.setTimeout(() => savePrioEdits(snapshot), 300)
+  if (node != null) void refreshApproaches(node)
+}
+
+/** Reconsulta as placas do nó e redesenha. */
+const refreshApproaches = async (node: number) => {
+  const list = await fetchApproaches(node)
+  if (useStore.getState().selected === node) viewRef.current?.setApproaches(list, node)
+}
+
 export const useStore = create<State>((set, get) => {
   const persistDemand = () => {
     clearTimeout(demandSave)
-    demandSave = window.setTimeout(() => saveDemand({ zones: zoneRecord, params: paramsRecord, odManual: odRecord }), 300)
+    demandSave = window.setTimeout(() => saveDemand({ zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord }), 300)
+  }
+  /** Reaplica a matriz importada para a hora, a escala e a opção intrazona atuais. */
+  const syncOdImport = () => {
+    odHourly = undefined
+    if (!odImportRecord) return
+    const r = applyOdImport(odImportRecord, zoneRecord, paramsRecord.hour, paramsRecord.intrazone)
+    zoneRecord = r.zones
+    odRecord = r.odManual
+    odHourly = r.odHourly
   }
   /** Recalcula a matriz OD no núcleo (debounce) e sincroniza zonas com o mapa. */
   const refreshDemand = () => {
-    set({ zones: [...zoneRecord], demandParams: { ...paramsRecord }, odManual: { ...odRecord } })
+    const imp = odImportRecord ? { name: odImportRecord.name, scale: odImportRecord.scale, merged: odImportRecord.merged } : null
+    set({ zones: [...zoneRecord], demandParams: { ...paramsRecord }, odManual: { ...odRecord }, odImport: imp })
     viewRef.current?.setZones(zoneRecord, get().selectedZone)
     persistDemand()
     clearTimeout(demandTimer)
@@ -247,6 +294,7 @@ export const useStore = create<State>((set, get) => {
       historyLen: history.length,
       editRev: s.editRev + 1,
       connEdits: Object.keys(connRecord).length,
+      prioCount: Object.keys(prioRecord).length,
       segEdits: Object.keys(segRecord).length,
     }))
     refreshDemand()
@@ -289,6 +337,12 @@ export const useStore = create<State>((set, get) => {
       if (get().selected !== node) return
       set({ nodeConns: nc })
       viewRef.current?.setNodeConns(nc, node)
+      const { data } = get()
+      // sem placas onde já há semáforo (o sinal manda) ou em nós de passagem
+      if (data && !(data.nodeInfo[node * 2 + 1] & 1) && data.nodeInfo[node * 2] >= 3) {
+        const list = await fetchApproaches(node)
+        if (get().selected === node) viewRef.current?.setApproaches(list, node)
+      }
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }
@@ -301,6 +355,7 @@ export const useStore = create<State>((set, get) => {
         await clearAll()
         set({ scenarios: [] })
         connRecord = {}
+        prioRecord = {}
         segRecord = {}
         sigRecord = {}
         roadRecord = []
@@ -309,9 +364,12 @@ export const useStore = create<State>((set, get) => {
         zoneRecord = []
         paramsRecord = { ...DEFAULT_PARAMS }
         odRecord = {}
+        odImportRecord = null
+        odHourly = undefined
         set({ selectedZone: null, demand: null })
       } else {
         connRecord = await loadConnEdits()
+        prioRecord = await loadPrioEdits()
         segRecord = await loadSegEdits()
         sigRecord = await loadSigConfigs()
         set({ scenarios: await loadScenarios() })
@@ -321,6 +379,8 @@ export const useStore = create<State>((set, get) => {
         zoneRecord = dm?.zones ?? []
         paramsRecord = { ...DEFAULT_PARAMS, ...(dm?.params ?? {}) }
         odRecord = dm?.odManual ?? {}
+        odImportRecord = dm?.odImport ?? null
+        syncOdImport()
         history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
       }
       const { data, ms } = await importMap(buffer, name, editPayload())
@@ -390,11 +450,10 @@ export const useStore = create<State>((set, get) => {
     mode: 'nodes',
     selected: null,
     nodeConns: null,
+    prioCount: 0,
     selectedSeg: null,
     scope: 'seg',
     signals: [],
-    playing: true,
-    speed: 1,
     zoom: 1,
     toast: null,
     editRev: 0,
@@ -407,9 +466,11 @@ export const useStore = create<State>((set, get) => {
     zones: [],
     demandParams: { ...DEFAULT_PARAMS },
     odManual: {},
+    odImport: null,
+    odImporting: false,
     selectedZone: null,
     demand: null,
-    sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null },
+    sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false },
     scenarios: [],
     bench: { id: null, progress: 0, error: null },
     compare: { a: null, b: null, diff: false },
@@ -419,10 +480,14 @@ export const useStore = create<State>((set, get) => {
       simHeatKind(h === 'off' ? -1 : h === 'speed' ? 0 : 1)
       if (h === 'off') viewRef.current?.setHeat(null)
     },
+    setFollow: (on) => {
+      viewRef.current?.setFollow(on)
+      set((s) => ({ sim: { ...s.sim, follow: on } }))
+    },
     pickVehicle: (id) => {
       simTrack(id)
       if (id == null) viewRef.current?.setTrack(null, null)
-      set((s) => ({ sim: { ...s.sim, track: id == null ? null : { id, alive: true, zone: -1, kind: 0, v: 0, wait: 0 } } }))
+      set((s) => ({ sim: { ...s.sim, track: id == null ? null : { id, alive: true, zone: -1, kind: 0, v: 0, wait: 0, info: null } } }))
     },
     setReplay: async (bucket) => {
       set((s) => ({ sim: { ...s.sim, replay: bucket } }))
@@ -435,7 +500,7 @@ export const useStore = create<State>((set, get) => {
       const { data } = get()
       if (!data) return
       const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
-      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord } })
+      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
       const id = get().scenarios.reduce((m, x) => Math.max(m, x.id), 0) + 1
       const next = [...get().scenarios, { id, name: name || `Cenário ${id}`, edits: editPayload(), sim, minutes }]
       set({ scenarios: next })
@@ -480,7 +545,7 @@ export const useStore = create<State>((set, get) => {
         const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
         await simStart({
           zones: dp.zones,
-          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord },
+          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
         })
         simHeatKind(get().sim.heat === 'off' ? -1 : get().sim.heat === 'speed' ? 0 : 1)
         simRun(true, get().sim.speed)
@@ -531,12 +596,46 @@ export const useStore = create<State>((set, get) => {
     },
     setDemandParams: (patch) => {
       paramsRecord = { ...paramsRecord, ...patch }
+      if (patch.hour != null || patch.intrazone != null) syncOdImport()
       refreshDemand()
     },
     setOdCell: (fromId, toId, value) => {
       const k = `${fromId}>${toId}`
       if (value == null || !Number.isFinite(value)) delete odRecord[k]
       else odRecord[k] = Math.max(0, value)
+      refreshDemand()
+    },
+
+    importOd2018: async () => {
+      const { data } = get()
+      if (!data || get().odImporting) return
+      set({ odImporting: true })
+      try {
+        const res = await fetch(OD2018_URL)
+        if (!res.ok) throw new Error(`não foi possível ler ${OD2018_URL} (${res.status})`)
+        const { zones, imp } = buildOdImport((await res.json()) as OdSource, data.meta, data.nodeXY)
+        zoneRecord = zones
+        odImportRecord = imp
+        syncOdImport()
+        set({ selectedZone: null })
+        refreshDemand()
+        get().notify(`${zones.length} zonas importadas; ${imp.merged} zonas fora do mapa incorporadas à borda.`)
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : String(e) })
+      } finally {
+        set({ odImporting: false })
+      }
+    },
+    setOdScale: (scale) => {
+      if (!odImportRecord) return
+      odImportRecord = { ...odImportRecord, scale: Math.max(0, scale) }
+      syncOdImport()
+      refreshDemand()
+    },
+    clearOdImport: () => {
+      odImportRecord = null
+      odRecord = {}
+      syncOdImport()
       refreshDemand()
     },
 
@@ -610,6 +709,8 @@ export const useStore = create<State>((set, get) => {
           if (sc.app !== 'simulador-transito') throw new Error('arquivo não é um cenário do simulador')
           segRecord = Object.fromEntries((sc.segments ?? []).map((e) => [segEditKey(e), e]))
           connRecord = sc.connFormat === 2 ? { ...(sc.connections ?? {}) } : {}
+          prioRecord = { ...(sc.priorities ?? {}) }
+          savePrioEdits({ ...prioRecord })
           sigRecord = Object.fromEntries((sc.signalConfigs ?? []).map((c) => [String(c.node), c]))
           roadRecord = sc.roads ?? []
           removedRecord = sc.removed ?? []
@@ -618,6 +719,8 @@ export const useStore = create<State>((set, get) => {
           zoneRecord = sc.demand?.zones ?? []
           paramsRecord = { ...DEFAULT_PARAMS, ...(sc.demand?.params ?? {}) }
           odRecord = sc.demand?.odManual ?? {}
+          odImportRecord = sc.demand?.odImport ?? null
+          syncOdImport()
           persistDemand()
           saveSegEdits({ ...segRecord })
           saveConnEdits({ ...connRecord })
@@ -673,6 +776,23 @@ export const useStore = create<State>((set, get) => {
           return
         }
       }
+    },
+
+    setPriority: (key, level) => {
+      const { data, selected } = get()
+      if (!data || selected == null) return
+      const k = `${data.nodeOsm[selected]}|${key}`
+      if (level > 0) prioRecord[k] = level
+      else delete prioRecord[k]
+      afterPrioEdit(selected)
+    },
+
+    resetPriorities: (node) => {
+      const { data, selected } = get()
+      if (!data) return
+      if (node == null) prioRecord = {}
+      else for (const k of Object.keys(prioRecord)) if (k.startsWith(`${data.nodeOsm[node]}|`)) delete prioRecord[k]
+      afterPrioEdit(selected)
     },
 
     resetConns: (node) => {
@@ -800,17 +920,9 @@ export const useStore = create<State>((set, get) => {
       scheduleRebuild()
     },
 
-    setPlaying: (p) => {
-      viewRef.current?.setPlaying(p)
-      set({ playing: p })
-    },
-    setSpeed: (s) => {
-      viewRef.current?.setSpeed(s)
-      set({ speed: s })
-    },
     exportScenario: () => {
       const { data, fileName } = get()
-      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord })
+      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...prioRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord })
     },
     notify: (msg) => {
       set({ toast: msg })
@@ -828,12 +940,13 @@ onSim((m) => {
     viewRef.current?.setVehicles(m.buf)
     viewRef.current?.setSimClock(m.time)
     const cur = st.getState().sim
-    st.setState((s) => ({ sim: { ...s.sim, stats: m.stats, series: m.series ?? s.sim.series, histLen: m.histLen ?? s.sim.histLen } }))
+    // estatísticas e séries só mudam a ~1 Hz (o worker as manda junto com `series`): não re-renderiza a UI a cada quadro
+    if (m.series || !cur.stats) st.setState((s) => ({ sim: { ...s.sim, stats: m.stats, series: m.series ?? s.sim.series, histLen: m.histLen ?? s.sim.histLen } }))
     if (m.track != null && cur.track) {
-      const t = JSON.parse(m.track) as { id?: number; alive: boolean; zone: number; kind: number; v: number; wait: number; pts: number[] }
+      const t = JSON.parse(m.track) as { id?: number; alive: boolean; zone: number; kind: number; v: number; wait: number; pts: number[]; info?: VehicleInfo }
       if (t.id == null || t.id === cur.track.id) {
-        viewRef.current?.setTrack(t.alive ? cur.track.id : null, t.alive ? t.pts : null)
-        st.setState((s) => (s.sim.track ? { sim: { ...s.sim, track: { ...s.sim.track, alive: t.alive, zone: t.zone ?? s.sim.track.zone, kind: t.kind ?? 0, v: t.v ?? 0, wait: t.wait ?? 0 } } } : {}))
+        viewRef.current?.setTrack(t.alive ? cur.track.id : null, t.alive ? t.pts : null, t.info?.enter && t.info.enter.blocker >= 0 ? t.info.enter.blocker : null)
+        st.setState((s) => (s.sim.track ? { sim: { ...s.sim, track: { ...s.sim.track, alive: t.alive, zone: t.zone ?? s.sim.track.zone, kind: t.kind ?? 0, v: t.v ?? 0, wait: t.wait ?? 0, info: t.info ?? null } } } : {}))
       }
     }
     if (m.heat && cur.heat !== 'off' && cur.replay == null) {

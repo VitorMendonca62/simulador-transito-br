@@ -1,5 +1,6 @@
 import { ROAD_PRESETS, type RoadPreset } from '../model/presets'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 /** Corte transversal esquemático da via (faixas, eixo amarelo), como o seletor de vias do Cities: Skylines. */
 function CrossSection({ p }: { p: RoadPreset }) {
@@ -14,7 +15,7 @@ function CrossSection({ p }: { p: RoadPreset }) {
 }
 
 export function BuildPanel() {
-  const { buildPreset, buildCurve, setBuildPreset, setBuildCurve, historyLen, undo, rebuilding } = useStore()
+  const { buildPreset, buildCurve, setBuildPreset, setBuildCurve, historyLen, undo, rebuilding } = useStore(useShallow((s) => ({ buildPreset: s.buildPreset, buildCurve: s.buildCurve, setBuildPreset: s.setBuildPreset, setBuildCurve: s.setBuildCurve, historyLen: s.historyLen, undo: s.undo, rebuilding: s.rebuilding })))
   return (
     <section className="panel">
       <h2>
@@ -66,7 +67,7 @@ export function BuildPanel() {
 }
 
 export function ErasePanel() {
-  const { historyLen, undo, rebuilding } = useStore()
+  const { historyLen, undo, rebuilding } = useStore(useShallow((s) => ({ historyLen: s.historyLen, undo: s.undo, rebuilding: s.rebuilding })))
   return (
     <section className="panel">
       <h2>

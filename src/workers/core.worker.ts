@@ -95,17 +95,34 @@ let simSpeed = 1
 let simLast = 0
 let simTimer = 0
 let simPost = 0
+/** instante do último quadro enviado e ainda não confirmado pela UI (0 = nenhum pendente) */
+let simInFlight = 0
+/** sem confirmação por tanto tempo (aba em segundo plano, UI travada) o worker volta a enviar */
+const SIM_ACK_TIMEOUT = 1000
 let simCarry = 0
 let simStatsAt = 0
 let simHeatKind = 0 // -1 desligado
 let simTrackId: number | null = null
 let simTrackAt = 0
 const SIM_DT = 0.2
+/** intervalo entre quadros enviados à UI (15 Hz); a UI interpola entre eles */
+const SIM_FRAME_MS = 66
 
 const postSim = (msg: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, t)
 
+// ocupação do worker (tempo calculando a simulação) e memória do WASM, informadas à UI uma vez por segundo
+let busyMs = 0
+let wasmMem: WebAssembly.Memory | null = null
+self.setInterval(() => postSim({ type: 'perf', busyMs, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }), 1000)
+
 /** Avança a simulação por fatias de tempo real: passos fixos de 0,2 s, no máximo ~10 ms por fatia. */
 function simLoop() {
+  const t0 = performance.now()
+  simSlice()
+  busyMs += performance.now() - t0
+}
+
+function simSlice() {
   simTimer = 0
   if (!current || !simRunning) return
   if (!current.sim_active()) {
@@ -125,8 +142,10 @@ function simLoop() {
     ticks++
   }
   if (simCarry > 2) simCarry = 2 // não acumula atraso indefinido
-  if (ticks > 0 && now - simPost > 33) {
+  // controle de vazão: a UI define o ritmo dos quadros; o worker continua simulando enquanto espera
+  if (ticks > 0 && now - simPost > SIM_FRAME_MS && (simInFlight === 0 || now - simInFlight > SIM_ACK_TIMEOUT)) {
     simPost = now
+    simInFlight = now
     const buf = current.sim_snapshot()
     let stats = lastStats
     let heat: Uint8Array | undefined
@@ -176,6 +195,7 @@ async function runBench(msg: Extract<WorkerIn, { type: 'bench' }>) {
         net.sim_step(25)
         done += 25
       }
+      busyMs += performance.now() - t0
       if (performance.now() - lastPost > 200) {
         lastPost = performance.now()
         send({ type: 'benchProgress', id: msg.id, done: Math.min(1, done / total) })
@@ -202,7 +222,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const post = (m: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(m, t)
   try {
     ready ??= init()
-    await ready
+    wasmMem ??= ((await ready) as { memory: WebAssembly.Memory }).memory
     if (msg.type === 'demand') {
       try {
         if (!current) throw new Error('Nenhum mapa carregado')
@@ -223,6 +243,15 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       }
       return
     }
+    if (msg.type === 'approaches') {
+      try {
+        if (!current) throw new Error('Nenhum mapa carregado')
+        post({ type: 'result', id: msg.id, json: current.node_approaches_json(msg.node) })
+      } catch (e) {
+        post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
     if (msg.type === 'simInit') {
       try {
         if (!current) throw new Error('Nenhum mapa carregado')
@@ -238,10 +267,28 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       simSpeed = msg.speed
       if (msg.running && !simRunning && current?.sim_active()) {
         simRunning = true
+        simInFlight = 0
         simLast = performance.now()
         simCarry = 0
         if (!simTimer) simTimer = self.setTimeout(simLoop, 0)
       } else if (!msg.running) simRunning = false
+      return
+    }
+    if (msg.type === 'simStepBy') {
+      if (current && current.sim_active() && !simRunning) {
+        const ticks = Math.max(1, Math.round(msg.seconds / SIM_DT))
+        current.sim_step(ticks)
+        simTrackAt = 0
+        const buf = current.sim_snapshot()
+        const track = simTrackId != null ? current.sim_track(simTrackId) : undefined
+        lastStats = JSON.parse(current.sim_stats())
+        const series = current.sim_series()
+        postSim({ type: 'sim', time: current.sim_time(), stats: lastStats, buf, series, histLen: current.sim_hist_len(), track }, [buf.buffer as ArrayBuffer, series.buffer as ArrayBuffer])
+      }
+      return
+    }
+    if (msg.type === 'simStuck') {
+      post({ type: 'result', id: msg.id, json: current && current.sim_active() ? current.sim_stuck(msg.n) : '[]' })
       return
     }
     if (msg.type === 'simTrack') {
@@ -271,13 +318,22 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       benchCancel = true
       return
     }
+    if (msg.type === 'simAck') {
+      simInFlight = 0
+      return
+    }
     if (msg.type === 'simStop') {
       simRunning = false
+      simInFlight = 0
       current?.sim_stop()
       return
     }
     if (msg.type === 'connEdits') {
       current?.set_conn_edits(msg.json)
+      return
+    }
+    if (msg.type === 'prioEdits') {
+      current?.set_prio_edits(msg.json)
       return
     }
     const t0 = performance.now()

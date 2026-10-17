@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { hexColor, PROFILES, profileById, ZONE_COLORS, type Zone } from '../model/demand'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 const hhmm = (h: number) => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`
 
@@ -16,9 +17,9 @@ function ProfileChart({ values, hour, color }: { values: number[]; hour: number;
 }
 
 function ZoneEditor({ z }: { z: Zone }) {
-  const { updateZone, removeZone, demandParams, demand } = useStore()
+  const { updateZone, removeZone, demandParams, demand } = useStore(useShallow((s) => ({ updateZone: s.updateZone, removeZone: s.removeZone, demandParams: s.demandParams, demand: s.demand })))
   const info = demand?.zones.find((q) => q.id === z.id)
-  const prof = profileById(z.profile)
+  const prof = z.profileValues ? { values: z.profileValues } : profileById(z.profile)
   return (
     <div className="zone-editor">
       <label className="field">
@@ -35,7 +36,8 @@ function ZoneEditor({ z }: { z: Zone }) {
       </label>
       <label className="field col">
         <span>Perfil horário</span>
-        <select className="sel wide" value={z.profile} onChange={(e) => updateZone(z.id, { profile: e.target.value })}>
+        <select className="sel wide" value={z.profileValues ? 'od2018' : z.profile} onChange={(e) => updateZone(z.id, { profile: e.target.value, profileValues: undefined })}>
+          {z.profileValues && <option value="od2018">Pesquisa OD 2018 (desta zona)</option>}
           {PROFILES.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
@@ -64,10 +66,65 @@ function ZoneEditor({ z }: { z: Zone }) {
   )
 }
 
+const MAX_MATRIX = 20
+
+/** Importação das zonas e da matriz de carro da Pesquisa OD 2018 (Recife). */
+function OdImportBox() {
+  const { odImport, odImporting, importOd2018, setOdScale, clearOdImport, zones, data } = useStore(
+    useShallow((s) => ({ odImport: s.odImport, odImporting: s.odImporting, importOd2018: s.importOd2018, setOdScale: s.setOdScale, clearOdImport: s.clearOdImport, zones: s.zones, data: s.data })),
+  )
+  const start = () => {
+    if (zones.length > 0 && !odImport && !window.confirm(`Substituir as ${zones.length} zonas atuais pelas da Pesquisa OD 2018?`)) return
+    void importOd2018()
+  }
+  if (!odImport) {
+    return (
+      <div className="od-import">
+        <button className="btn sm" disabled={!data || odImporting} onClick={start}>
+          {odImporting ? 'Importando…' : 'Importar zonas da Pesquisa OD 2018'}
+        </button>
+        <p className="hint">Zonas de tráfego do Recife/RMR com a matriz de carro dirigindo (trabalho + educação) por hora.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="od-import">
+      <p className="hint">
+        <b>{odImport.name}</b>: {zones.length} zonas no mapa, {odImport.merged} de fora entram pela borda mais próxima. A matriz da hora escolhida fica fixada e acompanha o relógio da simulação.
+      </p>
+      <label className="field col">
+        <span>
+          Escala da demanda <b>{Math.round(odImport.scale * 100)}%</b>
+        </span>
+        <input type="range" min={0} max={1.5} step={0.05} value={odImport.scale} onChange={(e) => setOdScale(Number(e.target.value))} aria-label="Escala da demanda importada" />
+      </label>
+      <div className="row tight">
+        <button className="btn sm" disabled={odImporting} onClick={start}>
+          Reimportar
+        </button>
+        <button className="btn sm danger" onClick={clearOdImport} title="Mantém as zonas e volta ao modelo gravitacional">
+          Desligar matriz
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function OdMatrix() {
-  const { zones, demand, odManual, setOdCell } = useStore()
+  const { zones, demand, odManual, setOdCell } = useStore(useShallow((s) => ({ zones: s.zones, demand: s.demand, odManual: s.odManual, setOdCell: s.setOdCell })))
   const [edit, setEdit] = useState<string | null>(null)
   if (!demand || zones.length < 2) return null
+  if (zones.length > MAX_MATRIX) {
+    const n = Object.keys(odManual).length
+    return (
+      <div className="od">
+        <h3>Matriz OD (veíc./h)</h3>
+        <p className="hint">
+          {zones.length} zonas: a tabela só aparece até {MAX_MATRIX}. {n > 0 && <>{n} pares fixados nesta hora.</>}
+        </p>
+      </div>
+    )
+  }
   const rowSum = demand.matrix.map((r) => r.reduce((a, b) => a + b, 0))
   const colSum = zones.map((_, j) => demand.matrix.reduce((a, r) => a + r[j], 0))
   return (
@@ -146,7 +203,7 @@ function OdMatrix() {
 }
 
 export function ZonePanel() {
-  const { zones, selectedZone, selectZone, demandParams, setDemandParams, demand } = useStore()
+  const { zones, selectedZone, selectZone, demandParams, setDemandParams, demand } = useStore(useShallow((s) => ({ zones: s.zones, selectedZone: s.selectedZone, selectZone: s.selectZone, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand })))
   const sel = zones.find((z) => z.id === selectedZone) ?? null
   const total = demand ? demand.zones.reduce((a, z) => a + z.genNow, 0) : 0
   return (
@@ -154,6 +211,7 @@ export function ZonePanel() {
       <h2>
         Zonas de demanda <small>{zones.length}</small>
       </h2>
+      <OdImportBox />
       {zones.length === 0 && (
         <p className="hint">
           Clique no mapa para marcar os vértices; <kbd>Enter</kbd>, duplo clique ou clique no primeiro ponto fecha a zona. <kbd>Esc</kbd> cancela. Botão direito num vértice o remove.
@@ -199,6 +257,10 @@ export function ZonePanel() {
         <label className="field">
           <span>Ônibus no fluxo (%)</span>
           <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
+        </label>
+        <label className="field" title="Motoristas na faixa errada que, em vez de dar a volta, usam a conversão proibida de outra faixa. 0 = ninguém.">
+          <span>Ignoram a sinalização (%)</span>
+          <input className="num" type="number" min={0} max={100} step={5} value={demandParams.illegalPct ?? 0} onChange={(e) => setDemandParams({ illegalPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
         </label>
         <label className="field">
           <span>Semente aleatória</span>

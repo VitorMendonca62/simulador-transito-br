@@ -189,3 +189,15 @@ Carro dirigindo, trabalho + educação, um bloco por `periodo`.
   - o bairro (sobreposição ou divisão por área);
   - os veículos (um condutor = um veículo);
   - o ajuste por frequência.
+
+## 11. Arquivo para o simulador
+
+`public/data/od2018_zonas.json` (gerado pelo mesmo script) contém:
+
+- **`zonas`:** id, município, bairro estimado e anel do polígono em lon/lat, simplificado a 15 m.
+- **`horas`:** 24 listas planas `[origem, destino, veíc./h, …]` de **carro dirigindo**, trabalho + educação.
+  - O balde da hora h reúne as partidas em [h−0,5; h+0,5).
+  - Os valores usam `fluxo_pessoas_ajustado_frequencia`, ou seja, a média de um dia útil.
+  - Pernas sem horário (0,6%) ficam de fora.
+
+O simulador importa esse arquivo pelo painel de zonas (ver `docs/CONTEXT.md`).

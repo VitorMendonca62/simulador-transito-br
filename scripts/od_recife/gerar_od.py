@@ -11,6 +11,7 @@ Uso:
 Dependências: pandas, geopandas, libarchive-c (o "zip" das zonas é na verdade um RAR).
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -294,6 +295,41 @@ def top_destinos(f: pd.DataFrame, origem: str, destino: str, rotulo=None) -> pd.
     return out.sort_values(["periodo", "total_saidas_carro"], ascending=[True, False])
 
 
+def exportar_simulador(p: pd.DataFrame, zonas: gpd.GeoDataFrame, rotulo, destino: Path):
+    """JSON lido pelo simulador: polígonos (lon/lat) e matrizes de carro dirigindo por hora de partida.
+
+    Valores em veíc./h = pessoas que dirigem e partem até 30 min antes ou depois da hora, ponderadas pela frequência
+    semanal (média de um dia útil). Pernas sem horário (0,6%) ficam de fora.
+    """
+    pc = p[(p.modo == "carro_dirigindo") & p.partida_h.notna()].copy()
+    # Balde h = partidas em [h-0,5; h+0,5): o simulador interpola linearmente entre horas inteiras.
+    pc["hora"] = np.floor(pc.partida_h + 0.5).astype(int) % 24
+    g = pc.groupby(["hora", "origem_zona", "destino_zona"]).peso_freq.sum().round(2)
+    g = g[g >= 0.01]
+    horas = [[] for _ in range(24)]
+    for (h, o, d), v in g.items():
+        horas[h] += [int(o), int(d), float(v)]
+    z = zonas.copy()
+    z["geometry"] = z.geometry.simplify(15)
+    z = z.to_crs("EPSG:4326")
+    lista = []
+    for r in z.itertuples():
+        geom = max(r.geometry.geoms, key=lambda q: q.area) if r.geometry.geom_type == "MultiPolygon" else r.geometry
+        lista.append({
+            "id": int(r.zona), "municipio": r.municipio, "bairro": rotulo.get(r.zona),
+            "ring": [[round(x, 6), round(y, 6)] for x, y in geom.exterior.coords],
+        })
+    out = {
+        "fonte": FONTE_TXT, "ano": ANO, "modo": "carro_dirigindo",
+        "motivos": "trabalho + educacao (respondentes)",
+        "unidade": "veiculos/h por hora de partida, media de dia util (ajuste por frequencia)",
+        "zonas": sorted(lista, key=lambda q: q["id"]),
+        "horas": horas,
+    }
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
+
+
 def validar(df: pd.DataFrame, brutos: Path, saida: Path) -> pd.DataFrame:
     """Compara com as matrizes oficiais de 2020 (Carro = dirigindo + passageiro, residência -> destino)."""
     zres = pd.to_numeric(df.ZONA_RES, errors="coerce")
@@ -339,6 +375,8 @@ def main():
     raiz = Path(__file__).resolve().parents[2]
     ap.add_argument("--saida", type=Path, default=raiz / "data/od_recife")
     ap.add_argument("--brutos", type=Path, default=raiz / "data/od_recife/_brutos")
+    ap.add_argument("--simulador", type=Path, default=raiz / "public/data/od2018_zonas.json",
+                    help="JSON de zonas e matrizes horárias lido pelo simulador")
     ap.add_argument("--sem-validacao", action="store_true",
                     help="não baixa as matrizes oficiais de 2020 (Google Drive) para comparar")
     a = ap.parse_args()
@@ -364,6 +402,8 @@ def main():
     df = df[~sem_peso].copy()
 
     p, stats = montar_pernas(df, set(zonas.zona))
+
+    exportar_simulador(p, zonas, rotulo, a.simulador)
 
     g = agregar(p)
     g["origem_bairro_estimado"] = g.origem_zona.map(rotulo)

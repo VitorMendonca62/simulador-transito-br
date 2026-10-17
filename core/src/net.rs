@@ -102,6 +102,8 @@ pub struct Edits {
     pub removed: std::collections::HashSet<SegKey>,
     /// conversões editadas, agrupadas pelo id OSM do nó: (chave de `conn_key`, estado)
     pub conns: HashMap<i64, Vec<(String, u8)>>,
+    /// sinalização de preferência por aproximação: `nóOsm|approach_key` -> nível (1 preferencial, 2 dê a preferência, 3 pare)
+    pub prios: HashMap<String, u8>,
 }
 
 impl Edits {
@@ -149,6 +151,8 @@ pub struct BaseCache {
     pub ways: Vec<BaseWay>,
     /// nós de quebra só pelo OSM (usados 2+ vezes, pontas, semáforos, travessias), ordenados
     pub split: Vec<i64>,
+    /// Origem da projeção: [lat_centro, lon_centro, metros por grau de longitude].
+    pub geo: [f64; 3],
 }
 
 impl BaseCache {
@@ -201,7 +205,7 @@ impl BaseCache {
             let last = w.pts.len() - 1;
             w.split_flags = w.pts.iter().enumerate().map(|(k, p)| k == 0 || k == last || split.binary_search(&p.0).is_ok()).collect();
         }
-        Ok(BaseCache { ways, split })
+        Ok(BaseCache { ways, split, geo: [lat_c, lon_c, kx] })
     }
 }
 
@@ -435,6 +439,8 @@ pub struct Net {
     pub signals: Vec<Signal>,
     pub names: Vec<String>,
     pub bounds: [f64; 4],
+    /// Origem da projeção (ver `BaseCache::geo`): x = (lon − lon_c)·kx, y = −(lat − lat_c)·M_PER_DEG.
+    pub geo: [f64; 3],
 }
 
 struct Tags<'a>(&'a [(String, String)]);
@@ -730,7 +736,7 @@ impl Net {
         // 3. nós de quebra: sem vias novas, o conjunto do OSM é reaproveitado
         let split: Vec<i64> = if edits.roads.is_empty() { base.split.clone() } else { split_nodes(ways.iter().map(|w| &w.pts[..]), raw, &marks) };
         stage!(_t, "3 nós de quebra (ordenação)");
-        let mut net = Net::default();
+        let mut net = Net { geo: base.geo, ..Net::default() };
         let mut node_pos: Vec<Option<V2>> = vec![None; split.len()];
         let mut names: HashMap<String, u32> = HashMap::new();
 

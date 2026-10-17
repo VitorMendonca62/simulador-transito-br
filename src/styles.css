@@ -181,7 +181,7 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
 
 .zone-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .zone-labels span { position: absolute; left: 0; top: 0; white-space: nowrap; font: 600 12px/1 var(--font); color: var(--zc); background: rgba(8, 13, 12, .72); border: 1px solid var(--zc); border-radius: 6px; padding: 2px 7px; }
-.zone-list { list-style: none; margin: 4px 0 8px; padding: 0; display: grid; gap: 3px; }
+.zone-list { list-style: none; margin: 4px 0 8px; padding: 0; display: grid; gap: 3px; max-height: 340px; overflow-y: auto; scrollbar-width: thin; }
 .zone-list button { width: 100%; display: flex; align-items: center; gap: 8px; background: #0e1514; border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; cursor: pointer; text-align: left; }
 .zone-list button.on { border-color: var(--accent); background: #12201c; }
 .zone-list .zn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -200,6 +200,7 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
 .swatches button.on { border-color: #fff; }
 .field b { color: var(--accent); font-weight: 600; }
 .field em { font-style: normal; color: var(--dim); }
+.od-import { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 8px; display: grid; gap: 6px; }
 .od { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 2px; }
 .od-scroll { overflow-x: auto; scrollbar-width: thin; }
 .od table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; width: 100%; }
@@ -271,3 +272,38 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
   cursor: pointer;
   text-decoration: underline;
 }
+
+.veh-actions { display: inline-flex; gap: 10px; align-items: center; }
+.veh-card .check.inline { display: inline-flex; gap: 4px; align-items: center; font-size: 11px; }
+.veh-grid { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 11px; }
+.veh-grid dt { opacity: 0.6; }
+.veh-grid dd { margin: 0; }
+.veh-grid dd.ok { color: #34d399; }
+.veh-grid dd.bad { color: #fb923c; }
+.lane-chip { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); }
+.lane-chip.here { outline: 1px solid #22d3ee; }
+.step-row { margin: 6px 0; align-items: center; }
+.step-row .muted, .stuck .muted { opacity: 0.6; font-size: 11px; }
+.stuck { margin: 6px 0; font-size: 12px; }
+.stuck ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; }
+
+/* placas de preferência do cruzamento selecionado */
+.sign-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.sign-layer .sign {
+  position: absolute; left: 0; top: 0; width: 38px; height: 38px; padding: 0; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer; pointer-events: auto; will-change: transform;
+  background: rgba(14, 21, 20, .92); border: 2px solid #e8efec; box-shadow: 0 2px 8px rgba(0, 0, 0, .55);
+}
+.sign-layer .sign.lv0 { border-color: #5d706a; opacity: .88; }
+.sign-layer .sign.lv1 { border-color: #facc15; }
+.sign-layer .sign.lv2 { border-color: #f4566e; }
+.sign-layer .sign.lv3 { border-color: #f4566e; }
+.sign-layer .sign:hover { border-color: var(--accent); opacity: 1; }
+.sign-layer .sign svg { display: block; }
+.sign-menu {
+  position: absolute; left: 0; top: 0; display: grid; gap: 2px; padding: 5px; pointer-events: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, .5);
+}
+.sign-menu button { display: flex; align-items: center; gap: 8px; padding: 3px 10px 3px 4px; border-radius: 7px; border: 1px solid transparent; background: none; cursor: pointer; text-align: left; white-space: nowrap; }
+.sign-menu button:hover { background: #172321; }
+.sign-menu button.on { border-color: var(--accent); background: #12201c; }

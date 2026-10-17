@@ -1,5 +1,6 @@
 import type { LayerKey } from '../engine/MapView'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 const ITEMS: [LayerKey, string, string][] = [
   ['roads', 'Vias', 'Asfalto e faixas de ônibus'],
@@ -15,7 +16,7 @@ const ITEMS: [LayerKey, string, string][] = [
 ]
 
 export function LayerPanel() {
-  const { layers, setLayer } = useStore()
+  const { layers, setLayer } = useStore(useShallow((s) => ({ layers: s.layers, setLayer: s.setLayer })))
   return (
     <section className="panel">
       <h2>Camadas</h2>

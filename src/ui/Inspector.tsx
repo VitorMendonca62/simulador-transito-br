@@ -1,9 +1,10 @@
 import { useMemo } from 'react'
 import { describeNode, KIND_ARROW, KIND_LABEL } from '../model/inspect'
 import { useStore } from '../model/store'
+import { useShallow } from 'zustand/react/shallow'
 
 export function Inspector() {
-  const { data, selected, nodeConns, select, editRev, toggleConns, resetConns, addSignal, removeSignal, rebuilding } = useStore()
+  const { data, selected, nodeConns, select, editRev, toggleConns, resetConns, addSignal, removeSignal, rebuilding, prioCount, resetPriorities } = useStore(useShallow((s) => ({ data: s.data, selected: s.selected, nodeConns: s.nodeConns, select: s.select, editRev: s.editRev, toggleConns: s.toggleConns, resetConns: s.resetConns, addSignal: s.addSignal, removeSignal: s.removeSignal, rebuilding: s.rebuilding, prioCount: s.prioCount, resetPriorities: s.resetPriorities })))
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const info = useMemo(() => (data && selected != null ? describeNode(data, selected, nodeConns) : null), [data, selected, nodeConns, editRev])
 
@@ -41,6 +42,23 @@ export function Inspector() {
           </button>
         )}
       </div>
+      {!info.signal && info.degree >= 3 && (
+        <p className="hint">
+          Placas ao lado de cada ramo: clique para escolher <b>preferencial</b>, <b>dê a preferência</b> ou <b>pare</b>. Em “A” vale a hierarquia da via (vale na próxima simulação).
+          {prioCount > 0 && (
+            <>
+              {' '}
+              <button className="link" onClick={() => resetPriorities(info.id)}>
+                Limpar placas do nó
+              </button>
+              {' · '}
+              <button className="link" onClick={() => resetPriorities()}>
+                todas ({prioCount})
+              </button>
+            </>
+          )}
+        </p>
+      )}
       <p className="hint">
         OSM node {info.osmId} · clique nas setas ou nas curvas do mapa para permitir/proibir.
         {' '}

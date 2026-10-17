@@ -62,7 +62,7 @@ pub struct Router {
     radj: Vec<(u32, f32)>,
 }
 
-fn turn_penalty(net: &Net, kind: u8, node: u32) -> f32 {
+pub fn turn_penalty(net: &Net, kind: u8, node: u32) -> f32 {
     let n = &net.nodes[node as usize];
     let base = match kind {
         K_LEFT => 5.0,
@@ -140,6 +140,104 @@ impl Router {
                     dist[a as usize] = nd2;
                     hop[a as usize] = b;
                     heap.push(Item(nd2, a));
+                }
+            }
+        }
+    }
+}
+
+/// Roteamento por **faixa**: o grafo tem um nó por faixa; as arestas são as conversões ligadas e as trocas de faixa
+/// entre faixas vizinhas do mesmo trecho (custo maior em trechos curtos, onde não há espaço para trocar).
+/// `dist[faixa]` = tempo estimado desde o início da faixa até a zona de destino.
+pub struct LaneRouter {
+    /// tempo de percurso livre de cada faixa (s)
+    pub time: Vec<f32>,
+    /// custo (s) de trocar para uma faixa vizinha neste trecho
+    pub change: Vec<f32>,
+    radj_off: Vec<u32>,
+    /// (faixa de origem, penalidade da conversão)
+    radj: Vec<(u32, f32)>,
+    /// vizinhas (esquerda, direita) no mesmo trecho e sentido; NONE se não há
+    pub nb: Vec<[u32; 2]>,
+}
+
+/// Custo (s) de uma troca de faixa em um trecho de `len` metros.
+pub fn lane_change_cost(len: f32) -> f32 {
+    // trocar de faixa só é realista com espaço e folga no trânsito: trechos curtos pesam muito, para o plano
+    // preferir chegar à faixa certa (pela conversão anterior) em vez de contar com uma troca que não cabe
+    if len >= 150.0 {
+        4.0
+    } else if len >= 80.0 {
+        10.0
+    } else if len >= 40.0 {
+        35.0
+    } else if len >= 20.0 {
+        90.0
+    } else {
+        200.0
+    }
+}
+
+impl LaneRouter {
+    /// `lane_len`/`lane_speed` por faixa e `conns` = (de, para, penalidade) das conversões ligadas.
+    pub fn new(net: &Net, lane_len: &[f32], lane_speed: &[f32], conns: &[(u32, u32, f32)]) -> LaneRouter {
+        let nl = net.lanes.len();
+        let time: Vec<f32> = (0..nl).map(|l| lane_len[l].max(1.0) / (lane_speed[l] * 0.85)).collect();
+        let change: Vec<f32> = (0..nl).map(|l| lane_change_cost(lane_len[l])).collect();
+        let mut nb = vec![[NONE; 2]; nl];
+        for l in 0..nl {
+            let (a, b) = (&net.lanes[l], if l + 1 < nl { Some(&net.lanes[l + 1]) } else { None });
+            if let Some(b) = b {
+                if a.seg == b.seg && a.dir == b.dir {
+                    nb[l][1] = (l + 1) as u32;
+                    nb[l + 1][0] = l as u32;
+                }
+            }
+        }
+        let mut edges: Vec<(u32, u32, f32)> = conns.iter().map(|&(f, t, p)| (t, f, p)).collect();
+        edges.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)).then(x.2.partial_cmp(&y.2).unwrap()));
+        edges.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+        let mut radj_off = vec![0u32; nl + 1];
+        for e in &edges {
+            radj_off[e.0 as usize + 1] += 1;
+        }
+        for i in 0..nl {
+            radj_off[i + 1] += radj_off[i];
+        }
+        let radj = edges.iter().map(|e| (e.1, e.2)).collect();
+        LaneRouter { time, change, radj_off, radj, nb }
+    }
+
+    /// Dijkstra reverso a partir das faixas que terminam na zona de destino.
+    pub fn tree(&self, targets: &[u32], dist: &mut Vec<f32>) {
+        let nl = self.time.len();
+        dist.clear();
+        dist.resize(nl, f32::INFINITY);
+        let mut heap = BinaryHeap::new();
+        for &t in targets {
+            dist[t as usize] = self.time[t as usize];
+            heap.push(Item(dist[t as usize], t));
+        }
+        while let Some(Item(d, b)) = heap.pop() {
+            if d > dist[b as usize] {
+                continue;
+            }
+            let (lo, hi) = (self.radj_off[b as usize] as usize, self.radj_off[b as usize + 1] as usize);
+            for &(a, pen) in &self.radj[lo..hi] {
+                let nd = d + pen + self.time[a as usize];
+                if nd < dist[a as usize] {
+                    dist[a as usize] = nd;
+                    heap.push(Item(nd, a));
+                }
+            }
+            for &a in &self.nb[b as usize] {
+                if a == NONE {
+                    continue;
+                }
+                let nd = d + self.change[a as usize];
+                if nd < dist[a as usize] {
+                    dist[a as usize] = nd;
+                    heap.push(Item(nd, a));
                 }
             }
         }

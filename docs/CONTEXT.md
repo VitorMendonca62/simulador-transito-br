@@ -189,7 +189,7 @@ No navegador, editar faixas: 350–1000 ms → **~210 ms incluindo debounce** (~
 - UI: `SimPanel` (iniciar/pausar/parar, 1×–30×, relógio, na rede/gerados/concluídos/fila/viagem média, legenda) e `VehicleLayer` (5 malhas por faixa de velocidade: parado/lento/médio/livre/ônibus; retângulos orientados ampliados em zoom baixo).
 - Testes: geração e conclusão de viagens, **nenhum veículo sobrepõe outro** (15 min), **nenhum avanço de sinal vermelho**, conservação (gerados = concluídos + perdidos + vivos), **determinismo** por semente, estresse (8 mil veíc./h na rede de exemplo: folga mínima 0,3 m, 0 perdidos).
 - **Desempenho** (mapa sintético de 22,8 mil nós): nativo 4,8 ms/passo com 16 mil veículos (≈0,29 µs/veículo/passo); **no navegador (WASM) a 10× a simulação acompanhou com 11 mil veículos e chegou a 9,2× com 28 mil**; desenho ~43 fps com 30 mil veículos na tela. Extrapolação para 50 mil: ~35 ms/passo em WASM ⇒ ~5× em tempo real. O portão de multi-thread (SharedArrayBuffer) **não** foi acionado.
-- Pendências do M3: linhas de ônibus com paradas (hoje ônibus = % do fluxo, sem paradas); re-roteamento por congestionamento (rotas seguem o tempo livre); interpolação visual entre quadros; geometria instanciada (hoje 5 malhas recriadas por quadro).
+- Pendências do M3: linhas de ônibus com paradas (hoje ônibus = % do fluxo, sem paradas); re-roteamento por congestionamento (rotas seguem o tempo livre); ~~interpolação visual entre quadros; geometria instanciada~~ (feito, ver abaixo).
 
 ### M4 — análise (feito, v1)
 - **Métricas no núcleo** (`sim/metrics.rs`): por trecho direcionado e balde de 60 s (ocupação, velocidade média, fração parada, entradas), janela de 5 s com média exponencial para o calor em tempo real, histórico de razão de velocidade por minuto (replay), atraso e fila máxima por cruzamento, matriz OD de tempo/atraso, série global por minuto e `report()` (JSON).
@@ -211,3 +211,61 @@ fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada 
 
 ## Semáforo fora de cruzamento
 - Modo **Semáforo** (Toolbar): clique no corpo de uma via grava uma "via" especial `hw:"mark"` com 1 ponto `{x,y,way}` em `roadRecord` (persiste, entra em cenários e no desfazer como qualquer via). No núcleo (`net.rs`, após as vias novas) o ponto vira nó via `insert_on`, o trecho é dividido e o nó nasce com semáforo; padrão de 2 fases (trânsito 30/3/2 s + fase vazia de 12 s para pedestres, em `build_signals`). Remover o semáforo apaga o ponto. Teste: `signal_can_be_placed_mid_block`.
+
+## Faixa errada / infração (Recife)
+- Veículo sem conversão legal para a rota na sua faixa e que não consegue trocar de faixa (fila, trecho curto) espera 8 s e então usa a conversão de uma faixa vizinha do mesmo trecho (`take_illegal_conn`; conta em `illegalMoves`, mostrado no painel como "Manobras irregulares"). Sem caminho nenhum por 90 s: desiste (`lost`).
+- Entradas de zona só nascem em faixas ≥ 15 m com caminho até o destino (antes nasciam em tocos de 4 m e furavam o vermelho).
+- Faixa de destino curta (< 30 m) que termina em semáforo fechado vira retenção virtual também para quem ainda está na faixa anterior (`leader`).
+- Teste de diagnóstico no mapa real: `PERF_OSM=~/Downloads/map(2).osm cargo test --release recife_stuck -- --ignored --nocapture` (parados > 120 s: 27 → 0; furos de vermelho: 195 → 0; concluídos em 15 min: 332 → 406).
+
+## Roteamento por faixa (substitui o por trecho no veículo)
+- `route.rs::LaneRouter`: grafo com um nó por faixa; arestas = conversões ligadas (custo = penalidade de manobra + tempo da faixa) e trocas entre faixas vizinhas (custo 4/8/20/45 s conforme o comprimento do trecho: em trecho curto não há espaço, então o planejamento escolhe a faixa antes). Dijkstra reverso por zona → `lane_dist[zona][faixa]`. O roteamento por trecho (`dists`) continua para matriz OD, tempo livre e atraso.
+- Veículo: `choose_conn` escolhe a conversão da faixa atual de menor custo (se a faixa só dobra à direita, ele dá a volta); `consider_lane_change` troca de faixa quando outra faixa (custo + troca) é ≥ 2 s melhor; carros ignoram faixas de ônibus.
+- Infração opcional: parâmetro `illegalPct` (% de motoristas "infratores", padrão 0; campo "Ignoram a sinalização" no painel de zonas). Infrator (ou qualquer um após 45 s parado) usa a conversão de faixa vizinha se economiza > 20 s ou se não há caminho legal. Conta em `illegalMoves`.
+- Mitigações: tempo de viagem > max(3×livre, 15 min) vira infrator; > max(6×livre, 30 min) ou 90 s sem saída desiste (`lost`); entradas só em faixas com caminho até o destino.
+- Medido no Recife (3 zonas, 15 min): parados > 120 s: 0; manobras irregulares: 0 (sem infração configurada); concluídos 406 → 425; passo ~0,25 ms com 4 mil veículos.
+
+## Destino aleatório dentro da zona
+- Cada zona tem até 16 nós de destino (`zone_trees`, sorteados de forma determinística pela semente entre os nós da zona com faixa de entrada; menos em mapas grandes: orçamento de ~8 M floats de `tree_dist`). Cada destino tem a sua árvore por faixa (`tree_dist`). O veículo sorteia o destino ao nascer (`pick_tree`, só entre os alcançáveis), nasce na faixa do trecho que melhor leva a ele e sai da rede ao chegar nesse nó, não mais no primeiro nó que toca a zona. Tempo livre/atraso agora usam a árvore do destino escolhido.
+- Medido no Recife (3 zonas, 15 min): concluídos 314 (antes 425, as viagens ficaram mais longas por entrarem na zona), parados > 120 s: 0, infrações de segurança 49 (espera > 45 s sem saída legal).
+- Custo de troca de faixa reajustado (`lane_change_cost`: 4/10/35/90/200 s para ≥150/≥80/≥40/≥20/<20 m): o plano passa a entrar na faixa certa pela conversão anterior em vez de contar com trocas que não cabem em fila. Manobras irregulares com infração desligada no Recife (15 min): 517 → 49 → 6.
+
+## Cruzamento sem semáforo: menos espera + ferramentas de depuração
+- `may_enter`: saída ocupada considera quem já anda na faixa de saída (posição projetada); carro parado há > 3 s na linha da via transversal não segura mais quem espera > 6 s (era 8/25 s); brecha reduzida após 10 s (era 25). Amostras de "parado > 3 s na frente" no Recife (10 min): 5433 → 2025; concluídos em 15 min 314 → 388.
+- Nascimento: faixa de origem sorteada proporcionalmente ao comprimento (`gate_cum`) e, em faixas ≥ 45 m, em ponto qualquer ao longo da faixa (com folga para líder/seguidor), não só logo após o cruzamento.
+- Depuração: clicar num veículo mostra o estado completo (`Sim::explain` → `VehicleInfo`): viagem, rua/faixa, velocidades, aceleração, tempo parado, líder, próxima manobra, sinal, "pode entrar?" com o motivo e o veículo que bloqueia (`BLOCKER`, linha laranja no mapa), custo por faixa até o destino, atraso. Ferramentas: seguir (câmera), copiar JSON, avançar +0,2/1/5/30 s com a simulação pausada, lista "Parados há mais tempo (gargalos)" (`sim_stuck`), clique em #id para saltar ao líder/bloqueador. Testes de diagnóstico no mapa real: `recife_wait_reasons`, `recife_blockers` (`--ignored`).
+
+## Placas de preferência por ramo (estilo TM:PE)
+- Com um cruzamento sem semáforo (3+ ramos) selecionado no modo Conversões, cada ramo com faixa de entrada ganha uma placa redonda (DOM, `engine/SignLayer.ts`); clicar abre: **Automático (A)**, **Via preferencial** (losango), **Dê a preferência** (triângulo), **Pare** (octógono). Em "A" vale a hierarquia da via (classe/rotatória).
+- Chave estável: `nóOsm|approach_key` -> nível 1..3 (`Edits.prios`, `priorities` no payload de reconstrução, `set_prio_edits` sem reconstruir, IDB `prio-edits`, `priorities` no JSON de cenário e nos cenários A/B). `node_approaches_json(node)` lista os ramos (posição, direção, nome, nível, `auto`).
+- Simulação (`Sim::new`, via `SimInit.prios`): preferencial → `rank -1` (vence tudo); dê a preferência/pare → `rank 100` (cede a qualquer outro). **Pare** exige parada total (≥1,5 s, a ≤5 m da linha) antes de avaliar a brecha (`stop_ok`, motivo 10). Ignorado onde há semáforo.
+- Limites: vale a partir da próxima simulação (editar com a sim rodando não a reinicia nem altera); as placas só aparecem com o nó selecionado; o roteamento ainda não penaliza o tempo de parada.
+- Testes: `priority_signs_list_approaches_and_apply_to_the_sim`, `priority_signs_survive_rebuild_payload`.
+
+### Veículos: quadros a 15 Hz com instancing e interpolação na GPU (2026-10-17)
+- `Sim::snapshot` devolve um quadro **indexado pelo slot** (id do veículo = posição): 6 floats por slot, `[x, y, dx, dy, velocidade, comprimento]` da frente do veículo (comprimento negativo = ônibus; slot livre = zeros). Direção em vetor (sem `atan2`). 50 mil veículos: 5,9 ms nativo (antes 9 ms), 1,2 MB.
+- O worker envia no máximo 15 quadros/s (`SIM_FRAME_MS`) e só o próximo depois do `simAck` da UI (controle de vazão; sem ack em 1 s volta a enviar).
+- `VehicleLayer`: um `Mesh` instanciado (shader próprio, `GlProgram`), dois buffers da GPU com os dois últimos quadros; o vertex shader interpola posição e direção (uniform `uT`), calcula o tamanho mínimo na tela (`uZoom`) e a cor por faixa de velocidade. Sem quadro anterior, ou com salto > 100 m (slot reaproveitado), o veículo não interpola. `MapView.frame()` avança `uT` a cada quadro de tela; "seguir" e o realce da rota usam a posição interpolada (`find`), e o clique (`pick`) também.
+- Medido (Chromium, 50 mil veículos sintéticos): `set` 0,2–0,3 ms de CPU (antes 5,7–8,4 ms com 20 mil); render total 4–8 ms.
+
+
+## Zonas da Pesquisa OD 2018 (Recife) — 2026-10-17
+- Dados: `scripts/od_recife/gerar_od.py` gera, além dos CSVs em `data/od_recife/`, o `public/data/od2018_zonas.json`. Ele traz as 253 zonas de tráfego (lon/lat, simplificadas a 15 m) e 24 matrizes de **carro dirigindo** (trabalho + educação), em veíc./h por hora de partida. O balde h cobre as partidas em [h−0,5; h+0,5), com média de dia útil ajustada pela frequência semanal. Premissas e limitações estão em `data/od_recife/metadados_e_limitacoes.md`.
+- Projeção: o núcleo expõe a origem da projeção em `meta.geo = [lat_c, lon_c, kx]` (`Net::geo`, vinda de `BaseCache`). As coordenadas locais são x = (lon − lon_c)·kx e y = −(lat − lat_c)·111319,49.
+- Importação (`model/odImport.ts`, botão "Importar zonas da Pesquisa OD 2018" no painel de zonas):
+  - ficam as zonas com ≥ 3 nós da rede dentro do polígono, recortadas à caixa da rede;
+  - as demais são incorporadas à zona mantida de centróide mais próximo (o tráfego de fora entra pela borda);
+  - substitui as zonas atuais.
+  - `applyOdImport` calcula, para a escala e a opção intrazona:
+    - o perfil horário próprio de cada zona (`Zone.profileValues`);
+    - a geração (pico × escala);
+    - a atração;
+    - as células fixadas da hora atual (interpoladas entre horas, igual a `profile_at`).
+  - Sem "intrazona", as células i>i saem da matriz e do perfil.
+- Simulação: `SimParams.odHourly` (24 mapas) substitui `odManual` e acompanha o relógio (`Sim::od_at`, interpolado; a matriz é recalculada a cada 10 min simulados).
+- Estado: `odImport` (nome, escala, horas, zonas incorporadas) é persistido na demanda (IDB e JSON de cenário). "Desligar matriz" mantém as zonas e volta ao gravitacional. Editar uma célula à mão vale até a próxima mudança de hora, escala ou intrazona.
+- Medido no `mapa-recife-novo.osm`:
+  - 128 zonas no mapa, 125 incorporadas;
+  - 7h: 50,6 mil veíc./h com escala 100%;
+  - com 15% às 7h: ~1,3 mil veículos ativos estáveis, 30× o tempo real, 16 desistências em 1.060 concluídos;
+  - a tabela OD só aparece com ≤ 20 zonas.
