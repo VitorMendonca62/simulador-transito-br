@@ -242,4 +242,50 @@ impl LaneRouter {
             }
         }
     }
+    /// Como `tree`, mas só percorre as faixas para as quais `local_of` dá um índice (as de uma zona);
+    /// `dist[i]` é a do i-ésimo membro. Barato: custa o tamanho da zona, não o da rede.
+    pub fn tree_local(&self, targets: &[u32], local_of: &dyn Fn(u32) -> u32, size: usize) -> Vec<f32> {
+        let mut dist = vec![f32::INFINITY; size];
+        let mut heap = BinaryHeap::new();
+        for &t in targets {
+            let li = local_of(t);
+            if li != NONE {
+                dist[li as usize] = self.time[t as usize];
+                heap.push(Item(dist[li as usize], t));
+            }
+        }
+        while let Some(Item(d, b)) = heap.pop() {
+            let lb = local_of(b);
+            if d > dist[lb as usize] {
+                continue;
+            }
+            let (lo, hi) = (self.radj_off[b as usize] as usize, self.radj_off[b as usize + 1] as usize);
+            for &(a, pen) in &self.radj[lo..hi] {
+                let la = local_of(a);
+                if la == NONE {
+                    continue;
+                }
+                let nd = d + pen + self.time[a as usize];
+                if nd < dist[la as usize] {
+                    dist[la as usize] = nd;
+                    heap.push(Item(nd, a));
+                }
+            }
+            for &a in &self.nb[b as usize] {
+                if a == NONE {
+                    continue;
+                }
+                let la = local_of(a);
+                if la == NONE {
+                    continue;
+                }
+                let nd = d + self.change[a as usize];
+                if nd < dist[la as usize] {
+                    dist[la as usize] = nd;
+                    heap.push(Item(nd, a));
+                }
+            }
+        }
+        dist
+    }
 }

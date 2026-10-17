@@ -11,8 +11,12 @@ const RIGHT: u8 = 1 << K_RIGHT;
 const UTURN: u8 = 1 << K_UTURN;
 
 /// Classifica a manobra entre a direção de chegada e a de saída (coordenadas Y para baixo).
+fn angle(in_dir: V2, out_dir: V2) -> f64 {
+    cross(in_dir, out_dir).atan2(dot(in_dir, out_dir)).to_degrees()
+}
+
 fn classify(in_dir: V2, out_dir: V2) -> u8 {
-    let ang = cross(in_dir, out_dir).atan2(dot(in_dir, out_dir)).to_degrees();
+    let ang = angle(in_dir, out_dir);
     if ang.abs() < 30.0 {
         K_STRAIGHT
     } else if ang > 0.0 {
@@ -20,6 +24,17 @@ fn classify(in_dir: V2, out_dir: V2) -> u8 {
     } else {
         K_LEFT
     }
+}
+
+/// Quando várias saídas têm a mesma manobra (bifurcação em Y: dois ramos "em frente"), cada uma recebe um grupo
+/// contíguo de faixas, da esquerda para a direita na mesma ordem dos ramos; a faixa do meio é compartilhada
+/// quando a divisão não é exata. Com menos faixas que ramos, cada faixa leva a todos os ramos que lhe cabem.
+/// Retorna o intervalo `lo..hi` das `m` faixas que vão para o ramo `j` de `k` (ordenados da esquerda para a direita).
+fn lane_group(m: usize, k: usize, j: usize) -> (usize, usize) {
+    if k <= 1 || m == 0 {
+        return (0, m);
+    }
+    (j * m / k, ((j + 1) * m + k - 1) / k)
 }
 
 fn lane_masks(tags: &[u8], n: usize, present: u8) -> Vec<u8> {
@@ -156,10 +171,15 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
         for kind in 0..4u8 {
             let bit = 1u8 << kind;
             let who: Vec<usize> = (0..ins.len()).filter(|&i| masks[i] & bit != 0).collect();
-            for (t, &li) in who.iter().enumerate() {
-                for &(b, _) in targets.iter().filter(|x| x.1 == kind) {
+            // ramos desta manobra, da esquerda para a direita
+            let mut tg: Vec<(usize, f64)> = targets.iter().filter(|x| x.1 == kind).map(|&(b, _)| (b, if b == a { 0.0 } else { angle(mul(outw[a], -1.0), outw[b]) })).collect();
+            tg.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (j, &(b, _)) in tg.iter().enumerate() {
+                let (lo, hi) = lane_group(who.len(), tg.len(), j);
+                let sub = &who[lo..hi];
+                for (t, &li) in sub.iter().enumerate() {
                     let outs = &ap[b].1;
-                    let oi = target_index(kind, t, who.len(), li, ins.len(), outs.len());
+                    let oi = target_index(kind, t, sub.len(), li, ins.len(), outs.len());
                     let (fl, tl) = (ins[li], outs[oi]);
                     let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
                     conns.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ALLOWED, base: CONN_ALLOWED, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
@@ -311,4 +331,22 @@ pub fn build_signals(net: &mut Net, edits: &Edits) {
         signals.push(Signal { node: ni as u32, offset: edit.map_or(0.0, |e| e.offset) as f32, phases, ends });
     }
     net.signals = signals;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lane_group;
+
+    #[test]
+    fn fork_splits_lanes_left_to_right() {
+        // 4 faixas, 2 ramos: 2 + 2
+        assert_eq!((lane_group(4, 2, 0), lane_group(4, 2, 1)), ((0, 2), (2, 4)));
+        // 3 faixas, 2 ramos: a do meio é compartilhada, as das pontas não cruzam
+        assert_eq!((lane_group(3, 2, 0), lane_group(3, 2, 1)), ((0, 2), (1, 3)));
+        // 1 faixa: leva a todos os ramos; 2 faixas, 3 ramos: ninguém fica sem faixa
+        assert_eq!((lane_group(1, 2, 0), lane_group(1, 2, 1)), ((0, 1), (0, 1)));
+        assert_eq!((lane_group(2, 3, 0), lane_group(2, 3, 1), lane_group(2, 3, 2)), ((0, 1), (0, 2), (1, 2)));
+        // um só ramo: todas as faixas
+        assert_eq!(lane_group(5, 1, 0), (0, 5));
+    }
 }

@@ -90,6 +90,20 @@ impl Rng {
     }
 }
 
+/// Ponto de destino: um nó dentro da zona `zone`. `local[i]` é o tempo (s) da i-ésima faixa interna da zona até ele
+/// (infinito se não chega por dentro da zona); `mean` é a média dos finitos (estimativa do trecho interno).
+struct Target {
+    node: u32,
+    zone: u16,
+    local: Vec<f32>,
+    mean: f32,
+    /// fração das faixas internas que chegam ao ponto
+    reach: f32,
+}
+
+/// Teto de floats nas árvores locais; passado dele, só se reaproveitam pontos já criados na zona.
+const LOCAL_BUDGET: usize = 16_000_000;
+
 struct LaneRt {
     seg: u32,
     dir: u8,
@@ -170,11 +184,21 @@ pub struct Sim {
     node_conns: Vec<Vec<u32>>,
     conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
     router: Router,
-    /// tempo até a zona de destino por faixa (roteamento por faixa)
-    tree_dist: Vec<Vec<f32>>,
-    /// nó de destino de cada árvore e as árvores de cada zona (destinos sorteados dentro da zona)
-    tree_node: Vec<u32>,
-    zone_trees: Vec<Vec<u32>>,
+    /// tempo até a zona de destino por faixa (até o primeiro nó dela): vale enquanto o veículo está fora da zona
+    zone_dist: Vec<Vec<f32>>,
+    /// pontos de destino sorteados (nó dentro de uma zona + roteamento local até ele), criados quando alguém os sorteia
+    targets: Vec<Target>,
+    target_of: std::collections::HashMap<(u16, u32), u32>,
+    zone_targets: Vec<Vec<u32>>,
+    /// nós candidatos a destino de cada zona
+    zone_cand: Vec<Vec<u32>>,
+    /// faixas internas de cada zona (as duas pontas dentro) e, por faixa, a zona e o índice nela
+    zone_lanes: Vec<Vec<u32>>,
+    lane_zone: Vec<u16>,
+    lane_local: Vec<u32>,
+    lrouter: LaneRouter,
+    local_used: usize,
+    /// destino de cada veículo (índice em `targets`), fixo da origem ao fim da viagem
     tgt: Vec<u32>,
     /// custo de trocar de faixa em cada faixa (s)
     lane_w: Vec<f32>,
@@ -353,32 +377,38 @@ impl Sim {
         let lane_speed: Vec<f32> = lanes.iter().map(|l| l.vfree).collect();
         let conn_list: Vec<(u32, u32, f32)> = conns.iter().map(|c| (c.from, c.to, c.pen)).collect();
         let lrouter = LaneRouter::new(net, &lane_len, &lane_speed, &conn_list);
-        // destinos: vários nós sorteados (de forma determinística) dentro de cada zona, cada um com a sua árvore
-        let per_zone = (8_000_000 / (nl.max(1) * nz.max(1))).clamp(1, 16);
-        let mut tree_dist: Vec<Vec<f32>> = Vec::new();
-        let mut tree_node: Vec<u32> = Vec::new();
-        let mut zone_trees: Vec<Vec<u32>> = Vec::with_capacity(nz);
+        // faixas internas de cada zona (as duas pontas dentro dela) e árvore até a zona inteira
+        let mut lane_zone = vec![u16::MAX; nl];
+        let mut lane_local = vec![u32::MAX; nl];
+        let mut zone_lanes: Vec<Vec<u32>> = vec![Vec::new(); nz];
+        for (li, l) in net.lanes.iter().enumerate() {
+            if let Some(z) = sink.iter().position(|sk| sk[l.from as usize] && sk[l.to as usize]) {
+                lane_zone[li] = z as u16;
+                lane_local[li] = zone_lanes[z].len() as u32;
+                zone_lanes[z].push(li as u32);
+            }
+        }
         let mut incoming = vec![false; net.nodes.len()];
         for l in &lanes {
             if !l.bus {
                 incoming[l.to_node as usize] = true;
             }
         }
-        for sk in &sink {
-            let mut cand: Vec<u32> = (0..net.nodes.len() as u32).filter(|&n| sk[n as usize] && incoming[n as usize]).collect();
-            let key = |n: u32| (net.nodes[n as usize].osm_id as u64 ^ init.params.seed.wrapping_mul(0x517C_C1B7_2722_0A95)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            cand.sort_by_key(|&n| key(n));
-            cand.truncate(per_zone);
-            let mut ids = Vec::new();
-            for n in cand {
-                let targets: Vec<u32> = (0..nl as u32).filter(|&l| lanes[l as usize].to_node == n && !lanes[l as usize].bus).collect();
-                let mut dd = Vec::new();
-                lrouter.tree(&targets, &mut dd);
-                ids.push(tree_dist.len() as u32);
-                tree_dist.push(dd);
-                tree_node.push(n);
+        let mut zone_dist: Vec<Vec<f32>> = Vec::with_capacity(nz);
+        let mut zone_cand: Vec<Vec<u32>> = Vec::with_capacity(nz);
+        for (z, sk) in sink.iter().enumerate() {
+            let targets: Vec<u32> = (0..nl as u32).filter(|&l| sk[lanes[l as usize].to_node as usize] && !lanes[l as usize].bus).collect();
+            let mut dd = Vec::new();
+            lrouter.tree(&targets, &mut dd);
+            zone_dist.push(dd);
+            // candidatos: nós onde chega alguma faixa interna da zona (dá para alcançá-los por dentro); senão, qualquer nó dela com entrada
+            let mut cand: Vec<u32> = zone_lanes[z].iter().filter(|&&l| !lanes[l as usize].bus).map(|&l| lanes[l as usize].to_node).collect();
+            cand.sort_unstable();
+            cand.dedup();
+            if cand.is_empty() {
+                cand = (0..net.nodes.len() as u32).filter(|&n| sk[n as usize] && incoming[n as usize]).collect();
             }
-            zone_trees.push(ids);
+            zone_cand.push(cand);
         }
         let lane_w = lrouter.change.clone();
         let gate_cum: Vec<Vec<f32>> = gates
@@ -409,9 +439,16 @@ impl Sim {
             node_conns,
             conflicts: vec![None; ne],
             router,
-            tree_dist,
-            tree_node,
-            zone_trees,
+            zone_dist,
+            targets: Vec::new(),
+            target_of: Default::default(),
+            zone_targets: vec![Vec::new(); nz],
+            zone_cand,
+            zone_lanes,
+            lane_zone,
+            lane_local,
+            lrouter,
+            local_used: 0,
             tgt: Vec::new(),
             lane_w,
             rule_breaker: Vec::new(),
@@ -595,7 +632,7 @@ impl Sim {
     // ------------------------------------------------------------------ veículos
 
     fn spawn_vehicle(&mut self, lane: u32, origin: u16, dest: u16, kind: u8) -> bool {
-        let Some(tree) = self.pick_tree(dest as usize, lane as usize) else { return false };
+        let Some(tree) = self.pick_target(dest as usize, lane as usize) else { return false };
         // nasce na faixa do mesmo trecho que melhor leva ao destino escolhido
         let lane = {
             let (lo, hi) = self.lanes_of(lane as usize);
@@ -694,7 +731,7 @@ impl Sim {
         self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
         self.tgt[id] = tree;
         self.t_free[id] = {
-            let d = self.tree_dist[tree as usize][lane as usize];
+            let d = self.dist(tree as usize, lane as usize);
             if d.is_finite() { d } else { 0.0 }
         };
         self.t_spawn[id] = self.time as f32;
@@ -719,17 +756,72 @@ impl Sim {
     }
 
     fn zone_reaches(&self, zone: usize, lane: usize) -> bool {
-        self.zone_trees[zone].iter().any(|&t| self.tree_dist[t as usize][lane].is_finite())
+        self.zone_dist[zone][lane].is_finite()
     }
 
-    /// Sorteia um destino dentro da zona `dest` que seja alcançável a partir da faixa `lane`.
-    fn pick_tree(&mut self, dest: usize, lane: usize) -> Option<u32> {
-        let n = self.zone_trees[dest].len();
-        if n == 0 {
+    /// Cria o ponto de destino `node` da zona `z` (árvore local só com as faixas internas dela).
+    fn make_target(&mut self, z: usize, node: u32) -> u32 {
+        let members = &self.zone_lanes[z];
+        let zid = z as u16;
+        let ends: Vec<u32> = members.iter().copied().filter(|&l| self.lanes[l as usize].to_node == node && !self.lanes[l as usize].bus).collect();
+        let local_of = |l: u32| if self.lane_zone[l as usize] == zid { self.lane_local[l as usize] } else { NONE };
+        let local = self.lrouter.tree_local(&ends, &local_of, members.len());
+        let (sum, cnt) = local.iter().filter(|d| d.is_finite()).fold((0.0f64, 0usize), |a, &d| (a.0 + d as f64, a.1 + 1));
+        let t = Target { node, zone: zid, mean: if cnt > 0 { (sum / cnt as f64) as f32 } else { 0.0 }, reach: cnt as f32 / local.len().max(1) as f32, local };
+        self.local_used += t.local.len();
+        let id = self.targets.len() as u32;
+        self.targets.push(t);
+        self.target_of.insert((zid, node), id);
+        self.zone_targets[z].push(id);
+        id
+    }
+
+    /// Sorteia o ponto de destino do veículo que vai nascer na faixa `lane` rumo à zona `dest`: um nó qualquer da
+    /// zona, que fica o mesmo até o fim da viagem.
+    fn pick_target(&mut self, dest: usize, lane: usize) -> Option<u32> {
+        if !self.zone_dist[dest][lane].is_finite() {
             return None;
         }
-        let start = self.rng.below(n);
-        (0..n).map(|k| self.zone_trees[dest][(start + k) % n]).find(|&t| self.tree_dist[t as usize][lane].is_finite())
+        let nc = self.zone_cand[dest].len();
+        if nc == 0 {
+            return None;
+        }
+        if self.local_used > LOCAL_BUDGET && !self.zone_targets[dest].is_empty() {
+            let k = self.rng.below(self.zone_targets[dest].len());
+            return Some(self.zone_targets[dest][k]);
+        }
+        let mut last = None;
+        for _ in 0..6 {
+            let node = self.zone_cand[dest][self.rng.below(nc)];
+            let id = match self.target_of.get(&(dest as u16, node)) {
+                Some(&t) => t,
+                None => self.make_target(dest, node),
+            };
+            last = Some(id);
+            // evita pontos isolados do resto da zona
+            if self.targets[id as usize].reach >= 0.3 {
+                break;
+            }
+        }
+        last
+    }
+
+    /// Tempo livre (s) da faixa `l` até o destino `tg`: pelo roteamento local dentro da zona; fora dela, até a zona mais o trecho interno típico.
+    fn dist(&self, tg: usize, l: usize) -> f32 {
+        let t = &self.targets[tg];
+        if self.lane_zone[l] == t.zone {
+            let d = t.local[self.lane_local[l] as usize];
+            if d.is_finite() {
+                return d;
+            }
+        }
+        let d = self.zone_dist[t.zone as usize][l];
+        if d.is_finite() { d + t.mean } else { d }
+    }
+
+    /// (id, instante de nascimento, nó de destino) dos veículos em circulação.
+    pub fn vehicle_targets(&self) -> Vec<(usize, u32, u32)> {
+        (0..self.alive.len()).filter(|&i| self.alive[i]).map(|i| (i, self.t_spawn[i].to_bits(), self.targets[self.tgt[i] as usize].node)).collect()
     }
 
     fn remove_vehicle(&mut self, id: usize) {
@@ -751,25 +843,45 @@ impl Sim {
 
     /// Melhor conversão da faixa `l` para o destino: (custo até a zona, conversão). Carros ignoram faixas de ônibus.
     fn stay_cost(&self, tree: usize, l: usize, kind: u8) -> (f32, u32) {
+        let t = &self.targets[tree];
         let lane = &self.lanes[l];
-        if lane.to_node == self.tree_node[tree] {
+        if lane.to_node == t.node {
             return (0.0, SINK);
         }
         if kind == 0 && lane.bus {
             return (f32::INFINITY, NONE);
         }
-        let mut best = (f32::INFINITY, NONE);
+        let zd = &self.zone_dist[t.zone as usize];
+        // quem pode seguir por dentro da zona até o ponto sempre prefere isso; senão vai rumo à zona
+        let (mut local, mut other) = ((f32::INFINITY, NONE), (f32::INFINITY, NONE));
         for &c in &lane.conns {
             let cn = &self.conns[c as usize - self.nl];
             if kind == 0 && self.lanes[cn.to as usize].bus {
                 continue;
             }
-            let d = cn.pen + self.tree_dist[tree][cn.to as usize];
-            if d < best.0 {
-                best = (d, c);
+            let nx = cn.to as usize;
+            if self.lane_zone[nx] == t.zone {
+                let d = t.local[self.lane_local[nx] as usize];
+                if d.is_finite() {
+                    if cn.pen + d < local.0 {
+                        local = (cn.pen + d, c);
+                    }
+                    continue;
+                }
+            }
+            let d = cn.pen + zd[nx] + t.mean;
+            if d < other.0 {
+                other = (d, c);
             }
         }
-        best
+        if local.1 != NONE {
+            return local;
+        }
+        // dentro da zona e sem caminho por dentro até o ponto: sai no próximo nó dela
+        if self.lane_zone[l] == t.zone && self.sink[t.zone as usize][lane.to_node as usize] {
+            return (0.0, SINK);
+        }
+        other
     }
 
     /// Escolhe a conversão da faixa atual com menor custo até o destino (se a faixa não leva ao destino por
@@ -1636,7 +1748,7 @@ impl Sim {
                 break;
             }
             pts.extend(lane_pts(&self.lanes[l], 0.0));
-            if self.lanes[l].to_node == self.tree_node[dest] {
+            if self.lanes[l].to_node == self.targets[dest].node {
                 break;
             }
             // na faixa de menor custo (considerando o custo de trocar) segue-se a melhor conversão
@@ -1674,7 +1786,7 @@ impl Sim {
             }
             let e = self.edge[i] as usize;
             let lane_ref = if e < self.nl { e } else { self.conns[e - self.nl].from as usize };
-            let remaining = self.tree_dist[self.tgt[i] as usize][lane_ref];
+            let remaining = self.dist(self.tgt[i] as usize, lane_ref);
             let remaining = if remaining.is_finite() { remaining } else { 0.0 };
             let free_so_far = (self.t_free[i] - remaining).max(0.0) as f64;
             alive_delay += ((self.time - self.t_spawn[i] as f64) - free_so_far).max(0.0);
@@ -1811,14 +1923,14 @@ impl Sim {
         let elapsed = self.time as f32 - self.t_spawn[i];
         let remaining = {
             let lane_ref = if on_lane { e } else { self.conns[e - self.nl].from as usize };
-            self.tree_dist[tgt][lane_ref]
+            self.dist(tgt, lane_ref)
         };
         json!({
             "id": i,
             "kind": if self.kind[i] == 1 { "ônibus" } else { "carro" },
             "origin": self.zone_ids[self.origin[i] as usize],
             "dest": self.zone_ids[self.dest[i] as usize],
-            "targetNode": net.nodes[self.tree_node[tgt] as usize].osm_id,
+            "targetNode": net.nodes[self.targets[tgt].node as usize].osm_id,
             "where": if on_lane { "faixa" } else { "dentro do cruzamento" },
             "way": seg_way,
             "street": seg_name,

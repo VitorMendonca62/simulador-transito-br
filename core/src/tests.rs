@@ -1004,3 +1004,21 @@ fn priority_signs_survive_rebuild_payload() {
     n.set_edits(r#"{"priorities":{"1|1:2:3:0":2,"9|x":0,"9|y":7}}"#).unwrap();
     assert_eq!(n.edits.prios.len(), 1, "níveis fora de 1..3 são descartados");
 }
+
+#[test]
+fn vehicle_destination_is_random_and_fixed_for_the_whole_trip() {
+    let mut n = sim_net();
+    let mut first: std::collections::HashMap<(usize, u32), u32> = std::collections::HashMap::new();
+    let mut nodes = std::collections::HashSet::new();
+    for _ in 0..60 {
+        run(&mut n, 10.0);
+        for (id, t0, node) in n.sim.as_ref().unwrap().vehicle_targets() {
+            let prev = *first.entry((id, t0)).or_insert(node);
+            assert_eq!(prev, node, "veículo {id} trocou de destino no meio da viagem");
+            nodes.insert(node);
+        }
+    }
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.finished > 10, "viagens concluídas: {st:?}");
+    assert!(nodes.len() > 2, "destinos distintos sorteados: {}", nodes.len());
+}
