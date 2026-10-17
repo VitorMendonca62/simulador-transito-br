@@ -3,3 +3,4 @@ dist
 core/target
 core/pkg
 *.log
+data/od_recife/_brutos/
