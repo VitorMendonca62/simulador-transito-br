@@ -13,9 +13,18 @@ As imagens abaixo usam um recorte real do **Recife** (centro, região da Av. Aga
 - **Editor de conversões estilo TM:PE**: clique num cruzamento e arraste de uma faixa de origem para uma de destino para permitir ou proibir manobras.
 - **Editor de vias**: número e largura de faixas, mão única, faixa de ônibus; construir vias novas e demolir trechos.
 - **Semáforos**: adicionar, remover e configurar fases, tempos e defasagem, em cruzamentos ou em qualquer ponto de uma via (com fase de pedestres).
-- **Demanda por zonas**: desenhe zonas de geração e atração de viagens; a matriz origem-destino sai de um modelo gravitacional, com perfis horários.
-- **Simulação microscópica** de carros e ônibus, com semáforo (amarelo, esquerda permissiva), preferência por brecha, rotatória e a regra da direita do CTB. Determinística por semente: o mesmo cenário dá o mesmo resultado.
+- **Placas de preferência**: em cruzamentos sem semáforo, defina para cada ramo se é via preferencial, "dê a preferência" ou "pare" (ou deixe automático pela hierarquia da via).
+- **Demanda por zonas**: desenhe zonas de geração e atração de viagens. A matriz origem-destino sai de um modelo gravitacional, com perfis horários, e qualquer célula pode ser fixada à mão.
+- **Dados reais do Recife**: importe as zonas de tráfego e a matriz de carro da **Pesquisa Origem-Destino Metropolitana 2018** (ver [Dados reais do Recife](#dados-reais-do-recife-pesquisa-od-2018)).
+- **Simulação microscópica** de carros e ônibus:
+  - roteamento por faixa, com troca de faixa planejada;
+  - semáforo com amarelo e esquerda permissiva;
+  - preferência por brecha, rotatória e a regra da direita do CTB;
+  - motoristas que desrespeitam a sinalização (opcional).
+
+  É determinística por semente: o mesmo cenário dá o mesmo resultado.
 - **Análise**: mapa de calor (velocidade ou filas), gráficos no tempo com replay e comparação A/B de cenários.
+- **Depuração**: clique num veículo para ver o estado completo. Aparecem a rota, a faixa, o líder, a próxima manobra, se ele pode entrar no cruzamento e quem está bloqueando. Dá para avançar a simulação passo a passo e listar os veículos parados há mais tempo. A barra de status mostra quadros por segundo, CPU, GPU e memória.
 
 ### Simulação e mapa de calor
 
@@ -71,9 +80,43 @@ npm run sample  # regenera o mapa de exemplo em samples/
 2. **Faixas**: selecione uma via e altere faixas, largura, sentido e faixa de ônibus.
 3. **Construir** e **Demolir**: crie vias novas (presets de via) ou remova trechos.
 4. **Semáforo**: clique em qualquer ponto de uma via para colocar um semáforo.
-5. **Zonas**: desenhe ao menos duas zonas e ajuste geração, atração e perfil. A matriz OD aparece no painel.
+5. **Zonas**: desenhe ao menos duas zonas e ajuste geração, atração e perfil. A matriz OD aparece no painel. Com um mapa do Recife, use **Importar zonas da Pesquisa OD 2018**.
 6. **Simulação**: **Iniciar**, escolha a velocidade (1× a 30×), ligue o mapa de calor e clique nos veículos.
 7. **Cenários**: salve, altere e compare. Tudo é guardado no navegador (IndexedDB) e pode ser exportado em JSON.
+
+## Dados reais do Recife (Pesquisa OD 2018)
+
+O projeto traz um pipeline reproduzível que transforma os microdados oficiais da Pesquisa Origem-Destino Metropolitana 2018 (ICPS / Grande Recife Consórcio, publicados no [Portal de Dados Abertos do Recife](https://dados.recife.pe.gov.br/dataset/pesquisa-origemdestino-metropolitana-2018)) em demanda para o simulador.
+
+```bash
+pip install -r scripts/od_recife/requirements.txt
+python scripts/od_recife/gerar_od.py
+```
+
+O script baixa os arquivos oficiais para `data/od_recife/_brutos/` e gera:
+
+- **Em `data/od_recife/`:**
+  - fluxos origem-destino de carro por zona de tráfego e por bairro (pico da manhã, pico da tarde e dia útil);
+  - os 10 principais destinos de cada origem;
+  - matrizes OD e o perfil horário;
+  - a correspondência zona × bairro;
+  - uma validação contra as matrizes oficiais de 2020.
+- **`public/data/od2018_zonas.json`:** as 253 zonas de tráfego e 24 matrizes horárias de carro dirigindo, lidas pelo simulador.
+
+No painel **Zonas**, **Importar zonas da Pesquisa OD 2018** faz o seguinte:
+
+- mantém as zonas que têm vias no mapa carregado, recortadas à área da rede;
+- incorpora as demais à zona de borda mais próxima;
+- fixa a matriz da hora escolhida, que acompanha o relógio da simulação;
+- oferece uma **escala de demanda** (0–150%) para calibrar o volume.
+
+Premissas importantes:
+
+- **Unidades e veículos:** os números são pessoas expandidas da amostra. Para "carro dirigindo", um condutor equivale a um veículo.
+- **O que a matriz cobre:** só viagens de **trabalho e educação**. Compras, saúde, serviços, motos, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do tráfego real.
+- **Ano:** os dados são de 2018. A pesquisa OD do Recife de 2021 não publicou matriz nem microdados.
+
+Fontes, definições de colunas, filtros e limitações estão em [`data/od_recife/metadados_e_limitacoes.md`](data/od_recife/metadados_e_limitacoes.md).
 
 ## Arquitetura
 
@@ -94,6 +137,9 @@ src/engine/  desenho (MapView, camadas de semáforo, veículos, calor, conversõ
 src/model/   estado, ponte com o worker, persistência
 src/ui/      painéis
 docs/        CONTEXT.md (decisões e roadmap) e imagens
+scripts/     mapa de exemplo e pipeline da Pesquisa OD 2018 (od_recife/)
+data/        saídas da Pesquisa OD 2018 (CSVs e metadados)
+public/data/ zonas e matrizes horárias lidas pelo simulador
 ```
 
 Contexto completo, decisões, medições de desempenho e limitações conhecidas em [`docs/CONTEXT.md`](docs/CONTEXT.md).
@@ -101,6 +147,8 @@ Contexto completo, decisões, medições de desempenho e limitações conhecidas
 ## Limitações atuais
 
 - Só carros e ônibus; sem motos, caminhões nem pedestres (a fase de pedestres do semáforo só interrompe os carros).
+- Dentro de cada zona, o veículo nasce numa faixa sorteada pelo comprimento e termina num nó sorteado, sem dados de onde as pessoas moram ou trabalham. Em mapas grandes com muitas zonas, cada zona fica com um único nó de destino.
+- Com a Pesquisa OD, o tráfego que vem de fora do mapa nasce espalhado pela zona de borda, e não nas vias por onde de fato entraria.
 - Ainda não há linhas de ônibus com paradas.
 - Cada edição reconstrói a rede inteira (cerca de 200 ms no mapa de teste de 22 mil nós; a meta é 100 ms).
 - Um cenário só vale para o arquivo OSM com que foi criado.
@@ -108,3 +156,5 @@ Contexto completo, decisões, medições de desempenho e limitações conhecidas
 ## Dados
 
 O recorte do Recife vem do OpenStreetMap © contribuidores do OpenStreetMap, licença [ODbL](https://www.openstreetmap.org/copyright).
+
+A Pesquisa Origem-Destino Metropolitana 2018 é do Instituto da Cidade Pelópidas Silveira (ICPS) e do Grande Recife Consórcio de Transporte, publicada pela Prefeitura do Recife no Portal de Dados Abertos. Os limites de bairros vêm do mesmo portal.
