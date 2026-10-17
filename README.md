@@ -6,6 +6,24 @@ As imagens abaixo usam um recorte real do **Recife** (centro, região da Av. Aga
 
 ![Mapa do Recife importado](docs/img/recife-mapa.jpg)
 
+### Recife inteiro com dados da Pesquisa OD 2018
+
+O mesmo simulador com o arquivo `mapa-recife-novo.osm`, que cobre quase toda a cidade: 31.924 nós, 42.106 trechos, 84.122 faixas e 1.071 semáforos.
+
+**Malha viária, sem zonas.**
+
+![Malha viária do Recife](docs/img/recife-novo-mapa.jpg)
+
+**Zonas de tráfego da Pesquisa OD 2018.** São 128 zonas com vias no mapa, importadas com a matriz de carro dirigindo. As 125 zonas da Região Metropolitana que ficam fora do mapa entram pela borda mais próxima.
+
+![Zonas da Pesquisa OD 2018](docs/img/recife-novo-zonas.jpg)
+
+**Trânsito com 50 mil carros na rede.** O pico da manhã foi simulado às 07:22, com a demanda da pesquisa multiplicada por 3: a pesquisa só cobre trabalho e educação. Nesse momento havia 50.040 veículos circulando e 15 mil viagens concluídas, a uma velocidade média de 9,7 km/h. As cores mostram a velocidade de cada veículo: vermelho é parado, laranja até 20 km/h, amarelo até 40 km/h, verde é livre e azul é ônibus.
+
+![Simulação com 50 mil veículos no Recife](docs/img/recife-novo-simulacao.jpg)
+
+![Centro do Recife congestionado](docs/img/recife-novo-simulacao-zoom.jpg)
+
 ## O que faz
 
 - **Importa mapas do OpenStreetMap** (`.osm` ou `.pbf`) e monta o grafo viário: trechos, faixas por sentido, semáforos, rotatórias, faixas de ônibus, mão única, restrições de conversão.
