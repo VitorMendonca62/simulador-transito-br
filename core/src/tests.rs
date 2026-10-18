@@ -347,7 +347,7 @@ fn perf_stages() {
     crate::conn::build_connections(&mut net, &raw, &edits);
     eprintln!("conexões         {:>7.1} ms  ({} conexões)", t.elapsed().as_secs_f64() * 1e3, net.conns.len());
     let t = Instant::now();
-    crate::conn::build_signals(&mut net, &edits);
+    crate::conn::build_signals(&mut net, &edits, None);
     eprintln!("semáforos        {:>7.1} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let (ts, _) = crate::render::update_tiles(&net, None);
@@ -1481,6 +1481,62 @@ fn external_signals_replace_osm_ones() {
     assert!(novos.iter().all(|x| m.get(&x.osm_id) == Some(&8)));
     let meta: serde_json::Value = serde_json::from_str(&n.meta_json()).unwrap();
     assert_eq!(meta["signalSource"], "ext");
+}
+
+/// Pontas em verde de um semáforo no instante `t`, com a mesma conta da simulação.
+fn green_ends(s: &crate::net::Signal, t: f64) -> Vec<u32> {
+    let cycle: f64 = s.phases.iter().map(|p| (p.green + p.yellow + p.all_red) as f64).sum();
+    let mut r = (t + s.offset as f64).rem_euclid(cycle);
+    for p in &s.phases {
+        if r < p.green as f64 {
+            return p.ends.clone();
+        }
+        r -= (p.green + p.yellow + p.all_red) as f64;
+    }
+    Vec::new()
+}
+
+#[test]
+fn external_signal_nodes_share_one_controller() {
+    let pts = [ext(7, -8.0600700, -34.9050600, true), ext(8, -8.0600675, -34.9080000, false)];
+    let mut n = build_network_ext(DUAL.as_bytes(), &pts).unwrap();
+    let check = |n: &crate::Network, offset: f32| {
+        let by_osm = |id: i64| n.net.signals.iter().find(|s| n.net.nodes[s.node as usize].osm_id == id).unwrap();
+        let (a, b) = (by_osm(2), by_osm(12));
+        let cycle = |s: &crate::net::Signal| s.phases.iter().map(|p| p.green + p.yellow + p.all_red).sum::<f32>();
+        assert_eq!(cycle(a), cycle(b), "mesmo ciclo");
+        assert_eq!((a.offset, b.offset), (offset, offset), "mesma defasagem");
+        // eixo (direção módulo 180°, em graus) de uma aproximação
+        let axis = |e: u32| {
+            let u = n.net.outward(e);
+            (u[1].atan2(u[0]).to_degrees().rem_euclid(180.0) / 90.0).round() as i32 % 2
+        };
+        let mut seen = std::collections::HashSet::new();
+        for t in 0..cycle(a) as i32 {
+            let (ga, gb) = (green_ends(a, t as f64), green_ends(b, t as f64));
+            assert_eq!(ga.is_empty(), gb.is_empty(), "t={t}: os dois nós abrem e fecham juntos");
+            let axes: std::collections::HashSet<i32> = ga.iter().chain(&gb).map(|&e| axis(e)).collect();
+            assert!(axes.len() <= 1, "t={t}: verde em eixos conflitantes {axes:?}");
+            seen.extend(axes);
+        }
+        assert_eq!(seen.len(), 2, "avenida e rua têm verde em algum momento");
+    };
+    check(&n, 0.0);
+
+    // travessia nas duas mãos: um controlador só, com a fase de pedestres
+    let mid: Vec<&crate::net::Signal> = n.net.signals.iter().filter(|s| n.net.nodes[s.node as usize].osm_id >= 200 << 40).collect();
+    assert!(mid.iter().all(|s| s.phases.len() == 2 && s.phases[1].ends.is_empty()));
+
+    // edição de defasagem num nó vale para o controlador; fases editadas continuam respeitadas
+    n.set_edits(r#"{"signals":[{"node":12,"enabled":true,"offset":10}]}"#).unwrap();
+    check(&n, 10.0);
+    let key = n.net.signals.iter().find(|s| n.net.nodes[s.node as usize].osm_id == 2).unwrap().ends[0].key.clone();
+    n.set_edits(&format!(
+        r#"{{"signals":[{{"node":12,"enabled":true,"offset":10}},{{"node":2,"enabled":true,"offset":10,"phases":[{{"green":20,"yellow":3,"allRed":2,"approaches":["{key}"]}}]}}]}}"#
+    ))
+    .unwrap();
+    let a = n.net.signals.iter().find(|s| n.net.nodes[s.node as usize].osm_id == 2).unwrap();
+    assert_eq!((a.phases[0].green, a.offset), (20.0, 10.0));
 }
 
 #[test]

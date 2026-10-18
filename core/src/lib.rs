@@ -34,12 +34,12 @@ pub struct Network {
     ext_signals: Option<std::collections::HashMap<i64, u32>>,
 }
 
-fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool) -> Result<Net, String> {
+fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, ext: Option<&std::collections::HashMap<i64, u32>>) -> Result<Net, String> {
     let mut net = Net::build(raw, edits, base)?;
     if !lazy {
         conn::build_connections(&mut net, raw, edits);
     }
-    conn::build_signals(&mut net, edits);
+    conn::build_signals(&mut net, edits, ext);
     Ok(net)
 }
 
@@ -48,7 +48,7 @@ fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal]) -> Res
     let ext_signals = if ext.is_empty() { None } else { extsig::replace_signals(&mut raw, ext) };
     let edits = Edits::default();
     let base = BaseCache::new(&raw)?;
-    let net = build_parts(&raw, &base, &edits, lazy)?;
+    let net = build_parts(&raw, &base, &edits, lazy, ext_signals.as_ref())?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
     Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals })
@@ -99,7 +99,7 @@ impl Network {
             prios: payload.priorities.into_iter().filter(|(_, v)| (1..=3).contains(v)).collect(),
         };
         edits.set_conns(payload.connections);
-        let net = build_parts(&self.raw, &self.base, &edits, self.lazy)?;
+        let net = build_parts(&self.raw, &self.base, &edits, self.lazy, self.ext_signals.as_ref())?;
         let prev = std::mem::take(&mut self.tiles);
         let (tiles, delta) = render::update_tiles(&net, Some(prev));
         self.edits = edits;

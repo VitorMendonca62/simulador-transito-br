@@ -894,7 +894,14 @@ export const useStore = create<State>((set, get) => {
         phases: def.phases.map((p, j) => (j !== pi ? p : { ...p, [key]: Math.min(600, Math.max(0, Number.isFinite(value) ? value : 0)) })),
       }))
     },
-    setOffset: (si, value) => editSignalLocal(si, (def) => ({ ...def, offset: Math.min(600, Math.max(0, Number.isFinite(value) ? value : 0)) })),
+    setOffset: (si, value) => {
+      const offset = Math.min(600, Math.max(0, Number.isFinite(value) ? value : 0))
+      // nós de um mesmo controlador CTTU têm uma defasagem só
+      const ext = get().signals[si]?.ext
+      get().signals.forEach((d, i) => {
+        if (i === si || (ext != null && d.ext === ext)) editSignalLocal(i, (def) => ({ ...def, offset }))
+      })
+    },
     moveApproach: (si, end, toPhase) =>
       editSignalLocal(si, (def) => ({
         ...def,

@@ -15,8 +15,32 @@ function streetOf(d: NetworkData, end: number): string {
 /** Nome curto do cruzamento: até duas ruas que chegam nele. */
 function signalLabel(d: NetworkData, def: SignalDef): string {
   const names = [...new Set(def.ends.map((e) => streetOf(d, e.end)))]
-  const base = names.length === 0 ? `Nó ${def.node}` : names.slice(0, 2).join(' × ')
-  return def.ext != null ? `${base} · CTTU ${String(def.ext).padStart(3, '0')}` : base
+  return names.length === 0 ? `Nó ${def.node}` : names.slice(0, 2).join(' × ')
+}
+
+const cttu = (ext: number) => `CTTU ${String(ext).padStart(3, '0')}`
+
+/** Posição do nó no seu controlador CTTU (os nós de mesmo código compartilham ciclo e defasagem). */
+type Ctrl = { ext: number; pos: number; count: number; nodes: number[] }
+
+/** Ordem da lista com os nós de um mesmo controlador CTTU lado a lado, e o controlador de cada índice. */
+function controllers(signals: SignalDef[]): { order: number[]; ctrl: Map<number, Ctrl> } {
+  const byExt = new Map<number, number[]>()
+  signals.forEach((s, i) => {
+    if (s.ext != null) byExt.set(s.ext, [...(byExt.get(s.ext) ?? []), i])
+  })
+  const order: number[] = []
+  const ctrl = new Map<number, Ctrl>()
+  signals.forEach((s, i) => {
+    if (s.ext == null) return order.push(i)
+    const ms = byExt.get(s.ext)!
+    if (ms[0] !== i) return
+    ms.forEach((m, pos) => {
+      order.push(m)
+      ctrl.set(m, { ext: s.ext!, pos, count: ms.length, nodes: ms.map((x) => signals[x].node) })
+    })
+  })
+  return { order, ctrl }
 }
 
 /** Rótulo de direção: de onde o veículo vem (a = ângulo de deslocamento, Y para baixo). */
@@ -31,8 +55,8 @@ function NumberField({ value, onChange, label, max = 600 }: { value: number; onC
   return <input type="number" min={0} max={max} step={1} value={value} aria-label={label} onChange={(e) => onChange(Number(e.target.value))} />
 }
 
-function Editor({ index, def }: { index: number; def: SignalDef }) {
-  const { data, setPhase, setOffset, moveApproach, addPhase, removePhase, removeSignal, resetSignal } = useStore(useShallow((s) => ({ data: s.data, setPhase: s.setPhase, setOffset: s.setOffset, moveApproach: s.moveApproach, addPhase: s.addPhase, removePhase: s.removePhase, removeSignal: s.removeSignal, resetSignal: s.resetSignal })))
+function Editor({ index, def, ctrl }: { index: number; def: SignalDef; ctrl?: Ctrl }) {
+  const { data, select, setPhase, setOffset, moveApproach, addPhase, removePhase, removeSignal, resetSignal } = useStore(useShallow((s) => ({ data: s.data, select: s.select, setPhase: s.setPhase, setOffset: s.setOffset, moveApproach: s.moveApproach, addPhase: s.addPhase, removePhase: s.removePhase, removeSignal: s.removeSignal, resetSignal: s.resetSignal })))
   if (!data) return null
   const cycle = def.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
   const owner = new Map<number, number>()
@@ -40,6 +64,28 @@ function Editor({ index, def }: { index: number; def: SignalDef }) {
 
   return (
     <div className="sig-editor">
+      {ctrl && (
+        <p className="hint" style={{ margin: 0 }}>
+          {ctrl.count > 1 ? (
+            <>
+              Controlador <b>{cttu(ctrl.ext)}</b>: {ctrl.count} nós com o mesmo ciclo e defasagem, fases alinhadas por eixo.{' '}
+              {ctrl.nodes.map((n, k) =>
+                k === ctrl.pos ? (
+                  <b key={n}>nó {k + 1} </b>
+                ) : (
+                  <button key={n} className="btn sm" onClick={() => select(n, true)} title="Selecionar este nó do controlador">
+                    nó {k + 1}
+                  </button>
+                ),
+              )}
+            </>
+          ) : (
+            <>
+              Controlador <b>{cttu(ctrl.ext)}</b> (base oficial; tempos sintéticos).
+            </>
+          )}
+        </p>
+      )}
       <div className="row tight">
         <span className="hint" style={{ margin: 0 }}>
           Ciclo <b>{cycle.toFixed(0)} s</b>
@@ -123,6 +169,7 @@ function Editor({ index, def }: { index: number; def: SignalDef }) {
 type SigRowProps = {
   index: number
   def: SignalDef
+  ctrl?: Ctrl
   data: NetworkData
   isOpen: boolean
   mode: string
@@ -132,11 +179,11 @@ type SigRowProps = {
 }
 
 /** Uma linha da lista; memorizada para que a lista de ~1.000 semáforos não seja refeita a cada atualização do store. */
-const SigRow = memo(function SigRow({ index: i, def: s, data, isOpen, mode, setOpen, setMode, select }: SigRowProps) {
+const SigRow = memo(function SigRow({ index: i, def: s, ctrl, data, isOpen, mode, setOpen, setMode, select }: SigRowProps) {
   const label = useMemo(() => signalLabel(data, s), [data, s])
   const total = s.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
   return (
-    <li className={isOpen ? 'open' : ''}>
+    <li className={[isOpen ? 'open' : '', ctrl && ctrl.pos > 0 ? 'sig-sub' : ''].join(' ').trim() || undefined}>
       <button
         className="sig-head"
         aria-expanded={isOpen}
@@ -149,11 +196,17 @@ const SigRow = memo(function SigRow({ index: i, def: s, data, isOpen, mode, setO
         }}
       >
         <span className="sig-name">{label}</span>
+        {ctrl && (
+          <span className="sig-ctrl" title={ctrl.count > 1 ? `Controlador ${cttu(ctrl.ext)}: ${ctrl.count} nós com ciclo e defasagem comuns` : `Controlador ${cttu(ctrl.ext)}`}>
+            {cttu(ctrl.ext)}
+            {ctrl.count > 1 && ` · ${ctrl.pos + 1}/${ctrl.count}`}
+          </span>
+        )}
         <span>
           {s.phases.length} fases · {total.toFixed(0)} s
         </span>
       </button>
-      {isOpen && <Editor index={i} def={s} />}
+      {isOpen && <Editor index={i} def={s} ctrl={ctrl} />}
     </li>
   )
 })
@@ -161,6 +214,7 @@ const SigRow = memo(function SigRow({ index: i, def: s, data, isOpen, mode, setO
 export function SignalPanel() {
   const { data, signals, selected, select, setMode, mode, resetSignals, sigEdits } = useStore(useShallow((s) => ({ data: s.data, signals: s.signals, selected: s.selected, select: s.select, setMode: s.setMode, mode: s.mode, resetSignals: s.resetSignals, sigEdits: s.sigEdits })))
   const [open, setOpen] = useState<number | null>(null)
+  const { order, ctrl } = useMemo(() => controllers(signals), [signals])
 
   const current = useMemo(() => {
     const i = signals.findIndex((s) => s.node === selected)
@@ -187,8 +241,8 @@ export function SignalPanel() {
         </p>
       )}
       <ul className="sigs">
-        {signals.map((s, i) => (
-          <SigRow key={s.node} index={i} def={s} data={data} isOpen={current === i} mode={mode} setOpen={setOpen} setMode={setMode} select={select} />
+        {order.map((i) => (
+          <SigRow key={signals[i].node} index={i} def={signals[i]} ctrl={ctrl.get(i)} data={data} isOpen={current === i} mode={mode} setOpen={setOpen} setMode={setMode} select={select} />
         ))}
       </ul>
     </section>

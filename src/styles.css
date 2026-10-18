@@ -142,6 +142,9 @@ code { background: #172321; padding: 1px 5px; border-radius: 4px; font-size: 12p
 .sig-head { gap: 8px; }
 .sig-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; flex: 1; min-width: 0; }
 .sig-head span:last-child { white-space: nowrap; }
+.sig-ctrl { flex: none; font-size: 11px; font-weight: 600; color: var(--orange); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; line-height: 16px; align-self: center; }
+.sigs li.sig-sub { border-top: 0; }
+.sigs li.sig-sub .sig-head { padding-left: 14px; }
 .sig-editor { padding: 2px 0 12px; display: grid; gap: 8px; }
 .sig-editor h3 { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--dim); }
 .inline { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--dim); font-size: 12px; }

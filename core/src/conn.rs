@@ -439,8 +439,32 @@ pub fn build_connections(net: &mut Net, raw: &RawOsm, edits: &Edits) {
 }
 
 /// Semáforos: fases padrão (uma por eixo de aproximação), substituídas pela configuração do usuário quando houver.
-pub fn build_signals(net: &mut Net, edits: &Edits) {
+/// Índice do eixo (direção módulo 180°) em que cai o ângulo de uma aproximação.
+fn axis_of(axes: &[f64], ang: f64) -> Option<usize> {
+    axes.iter().position(|a| {
+        let d = (a - ang).rem_euclid(std::f64::consts::PI);
+        d.min(std::f64::consts::PI - d) < 0.6
+    })
+}
+
+/// Eixos de um controlador, um ângulo por eixo, na ordem em que aparecem.
+fn axes_of<'a>(angles: impl Iterator<Item = &'a f64>) -> Vec<f64> {
+    let mut axes = Vec::new();
+    for &ang in angles {
+        if axis_of(&axes, ang).is_none() {
+            axes.push(ang);
+        }
+    }
+    axes
+}
+
+/// Monta os semáforos. `ext` (nó OSM -> código externo) junta num só controlador os nós de mesmo código
+/// (cruzamento de pista dupla, travessia nas duas mãos): mesmo ciclo, mesma defasagem e fases alinhadas
+/// por eixo de aproximação, para que as mãos de um mesmo cruzamento não abram verde conflitante.
+pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32>>) {
     let mut signals = Vec::new();
+    // aproximações (ponta, ângulo) de cada nó semaforizado
+    let mut appr: Vec<(usize, Vec<(u32, f64)>)> = Vec::new();
     for (ni, node) in net.nodes.iter().enumerate() {
         if !node.signal {
             continue;
@@ -454,20 +478,34 @@ pub fn build_signals(net: &mut Net, edits: &Edits) {
             let u = net.outward(e);
             approaches.push((e, u[1].atan2(u[0])));
         }
-        if approaches.is_empty() {
-            continue;
+        if !approaches.is_empty() {
+            appr.push((ni, approaches));
         }
-        let mut groups: Vec<(f64, Vec<u32>)> = Vec::new();
-        for (e, ang) in &approaches {
-            let found = groups.iter_mut().find(|g| {
-                let d = (g.0 - ang).rem_euclid(std::f64::consts::PI);
-                d.min(std::f64::consts::PI - d) < 0.6
-            });
-            match found {
-                Some(g) => g.1.push(*e),
-                None => groups.push((*ang, vec![*e])),
-            }
-        }
+    }
+    // controlador de cada nó: o código externo, ou o próprio nó (chave negativa)
+    let ctrl_key = |ni: usize| match ext.and_then(|m| m.get(&net.nodes[ni].osm_id)) {
+        Some(&c) => c as i64,
+        None => -(ni as i64) - 1,
+    };
+    let mut members: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (k, (ni, _)) in appr.iter().enumerate() {
+        members.entry(ctrl_key(*ni)).or_default().push(k);
+    }
+    // por controlador: eixos, se é travessia em trecho e a defasagem
+    let mut ctrls: HashMap<i64, (Vec<f64>, bool, f64)> = HashMap::new();
+    for (key, mut ms) in members {
+        ms.sort_by_key(|&k| net.nodes[appr[k].0].osm_id);
+        let axes = axes_of(ms.iter().flat_map(|&k| appr[k].1.iter().map(|a| &a.1)));
+        // travessia em trecho: um eixo só e os dois sentidos (mão dupla, ou as duas mãos de um mesmo controlador)
+        let midblock = axes.len() == 1 && ms.iter().map(|&k| appr[k].1.len()).sum::<usize>() >= 2;
+        // defasagem do controlador: a do primeiro nó editado (a interface grava a mesma em todos)
+        let offset = ms.iter().find_map(|&k| edits.sigs.get(&net.nodes[appr[k].0].osm_id)).map_or(0.0, |e| e.offset);
+        ctrls.insert(key, (axes, midblock, offset));
+    }
+    for (ni, approaches) in &appr {
+        let ni = *ni;
+        let node = &net.nodes[ni];
+        let (axes, midblock, offset) = &ctrls[&ctrl_key(ni)];
         let edit = edits.sigs.get(&node.osm_id);
         let mut phases: Vec<Phase> = match edit.and_then(|e| e.phases.as_ref()) {
             Some(list) => {
@@ -489,17 +527,20 @@ pub fn build_signals(net: &mut Net, edits: &Edits) {
                 }
                 ps
             }
-            None => groups.into_iter().map(|g| Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: g.1 }).collect(),
+            // uma fase por eixo do controlador; um nó sem aproximação naquele eixo fica todo vermelho nela
+            None => (0..axes.len())
+                .map(|k| Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().filter(|a| axis_of(axes, a.1) == Some(k)).map(|a| a.0).collect() })
+                .collect(),
         };
         if phases.is_empty() {
             phases.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).collect() });
         }
         // semáforo em trecho (sem cruzamento): fase própria para a travessia de pedestres, que para os dois sentidos
-        if edit.map_or(true, |e| e.phases.is_none()) && approaches.len() == 2 && phases.len() == 1 {
+        if edit.map_or(true, |e| e.phases.is_none()) && *midblock {
             phases.push(Phase { green: 12.0, yellow: 0.0, all_red: 0.0, ends: Vec::new() });
         }
         let mut ends = Vec::new();
-        for (e, _) in &approaches {
+        for (e, _) in approaches {
             let s = &net.segs[(*e >> 1) as usize];
             let l = s.poly.length();
             let (sv, lat, sign) = if e & 1 == 1 {
@@ -512,7 +553,7 @@ pub fn build_signals(net: &mut Net, edits: &Edits) {
             let d = mul(t, sign);
             ends.push(SignalEnd { end: *e, key: approach_key(net, ni as u32, *e), pos: [q[0] as f32, q[1] as f32], angle: d[1].atan2(d[0]) as f32 });
         }
-        signals.push(Signal { node: ni as u32, offset: edit.map_or(0.0, |e| e.offset) as f32, phases, ends });
+        signals.push(Signal { node: ni as u32, offset: *offset as f32, phases, ends });
     }
     net.signals = signals;
 }
