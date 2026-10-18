@@ -91,6 +91,7 @@ npm run build          # produção (build:core + tsc + vite)
 
 ### Entregue (itens do pedido)
 1. Grafo a partir do OSM: `core/src/net.rs` (ways quebradas em nós de cruzamento/semáforo/travessia, faixas por `lanes`, `lanes:forward/backward`, `oneway`, rotatória).
+   - Níveis (`layer`, `bridge`, `tunnel`): nó que o OSM compartilha por erro entre vias de níveis diferentes que *passam* por ele (miolo das duas — ex.: viaduto da BR-101 sobre o Girador da UFPE) é duplicado por nível em `osm.rs::separate_levels`; cópias ganham id `id + ((nível+64) << 40)`. Transição na ponta de uma via (rampa → ponte) segue conectada. Vias com nível > 0 vão para a malha `hi` do ladrilho e são desenhadas acima do térreo.
 2. Botão **Importar mapa** (`.osm`, `.pbf`; também arrastar-e-soltar; `.json` aplica cenário). Detecção do formato pelo conteúdo. PBF com zlib validado.
 3. Camada de semáforos: toggle, relógio animado (pausar/velocidade), edição de verde/amarelo/vermelho-geral por fase (`SignalPanel`), restaurar padrão.
 4. Sinalização de solo (`core/src/render.rs`): amarelo duplo/tracejado no eixo, branco tracejado entre faixas, linhas de borda em vias principais, faixa de pedestre (zebra) em nós com semáforo/travessia, linha de retenção, faixa de ônibus em vermelho.

@@ -332,6 +332,8 @@ pub struct Seg {
     pub cut_from: f64,
     pub cut_to: f64,
     pub lane_base: u32,
+    /// nível vertical (`layer` do OSM; > 0 é desenhado acima do térreo)
+    pub level: i8,
 }
 
 impl Seg {
@@ -858,6 +860,7 @@ impl Net {
                     cut_from: 0.0,
                     cut_to: 0.0,
                     lane_base: 0,
+                    level: crate::osm::way_level(w.tags).clamp(-8, 8) as i8,
                 });
             }
         }

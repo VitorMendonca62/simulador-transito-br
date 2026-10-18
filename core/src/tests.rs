@@ -1356,3 +1356,26 @@ fn conn_dump() {
         }
     }
 }
+
+/// Viaduto (layer=1) que no OSM compartilha nós com a rotatória do térreo: os níveis não se conectam,
+/// mas a rampa que termina no viaduto continua ligada a ele.
+#[test]
+fn bridge_sharing_nodes_with_ground_road_is_separated() {
+    let xml = r#"<osm>
+      <node id="1" lat="0.0000" lon="0.0000"/><node id="2" lat="0.0000" lon="0.0010"/>
+      <node id="3" lat="0.0000" lon="0.0020"/><node id="4" lat="0.0000" lon="0.0030"/>
+      <node id="5" lat="-0.0010" lon="0.0010"/><node id="6" lat="0.0010" lon="0.0010"/>
+      <node id="7" lat="0.0010" lon="0.0030"/>
+      <way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/>
+        <tag k="highway" v="trunk"/><tag k="bridge" v="viaduct"/><tag k="layer" v="1"/></way>
+      <way id="11"><nd ref="5"/><nd ref="2"/><nd ref="6"/><tag k="highway" v="secondary"/></way>
+      <way id="12"><nd ref="7"/><nd ref="3"/><tag k="highway" v="trunk_link"/><tag k="layer" v="1"/></way>
+    </osm>"#;
+    let n = build_network(xml.as_bytes()).expect("importa");
+    let ends = |osm: i64| n.net.nodes.iter().filter(|x| x.osm_id == osm).map(|x| x.ends.len()).collect::<Vec<_>>();
+    // sem o nó compartilhado, cada via só passa por ali: não há cruzamento algum
+    assert!(ends(2).is_empty() && ends(2 + (65 << 40)).is_empty(), "viaduto e térreo não se cruzam");
+    assert!(n.net.nodes.iter().all(|x| x.ends.len() < 4));
+    assert_eq!(ends(3), vec![3], "rampa no mesmo nível segue conectada ao viaduto");
+    assert!(n.net.meshes_ok());
+}

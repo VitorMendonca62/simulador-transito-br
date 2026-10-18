@@ -57,6 +57,8 @@ pub struct TileMesh {
     /// nós de grau < 3 e cruzamentos (grau >= 3)
     pub minor: Vec<f32>,
     pub major: Vec<f32>,
+    /// asfalto e marcações de vias elevadas (pontes/viadutos), desenhados acima do térreo
+    pub hi: Option<Box<TileMesh>>,
 }
 
 struct Fnv(u64);
@@ -80,7 +82,7 @@ fn seg_hash(net: &Net, s: &Seg) -> u64 {
     for k in s.key {
         h.u(k as u64);
     }
-    h.u(s.hw as u64 | (s.oneway as u64) << 8 | (s.roundabout as u64) << 9 | (s.link as u64) << 10 | (s.lf as u64) << 16 | (s.lb as u64) << 24);
+    h.u(s.hw as u64 | (s.oneway as u64) << 8 | (s.roundabout as u64) << 9 | (s.link as u64) << 10 | (s.lf as u64) << 16 | (s.lb as u64) << 24 | (s.level as u8 as u64) << 32);
     h.f(s.w);
     h.f(s.cut_from);
     h.f(s.cut_to);
@@ -259,7 +261,7 @@ impl TileDelta {
 
 impl TileSet {
     pub fn asphalt_tris(&self) -> usize {
-        self.tiles.values().map(|t| t.asphalt.idx.len() / 3).sum()
+        self.tiles.values().map(|t| (t.asphalt.idx.len() + t.hi.as_ref().map_or(0, |h| h.asphalt.idx.len())) / 3).sum()
     }
     pub fn vertex_count(&self, pick: impl Fn(&TileMesh) -> usize) -> usize {
         self.tiles.values().map(pick).sum()
@@ -329,11 +331,22 @@ pub fn update_tiles(net: &Net, prev: Option<TileSet>) -> (TileSet, TileDelta) {
         match buckets.remove(t) {
             Some((segs, nodes)) => {
                 let mut m = TileMesh::default();
+                let mut hi = TileMesh::default();
+                let elevated = |si: usize| net.segs[si].level > 0;
                 for si in segs {
-                    emit_seg(net, &net.segs[si], &mut m);
+                    emit_seg(net, &net.segs[si], if elevated(si) { &mut hi } else { &mut m });
                 }
                 for ni in nodes {
-                    emit_node(net, ni, &mut m);
+                    // nó só de vias elevadas sobe junto; o de transição (rampa) fica no térreo
+                    let up = net.nodes[ni].ends.iter().all(|&e| elevated((e >> 1) as usize));
+                    emit_node(net, ni, if up { &mut hi } else { &mut m });
+                }
+                // pontos de nós/forma não têm ordem de desenho: ficam todos na camada base
+                m.shape.append(&mut hi.shape);
+                m.minor.append(&mut hi.minor);
+                m.major.append(&mut hi.major);
+                if !hi.asphalt.idx.is_empty() {
+                    m.hi = Some(Box::new(hi));
                 }
                 set.tiles.insert(*t, m);
                 delta.dirty.push(*t);

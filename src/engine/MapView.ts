@@ -93,6 +93,9 @@ export class MapView {
   private gridG = new Graphics()
   private roads = new Container()
   private markings = new Container()
+  /** pontes/viadutos: asfalto e marcações por cima de tudo que está no térreo */
+  private roadsHi = new Container()
+  private markingsHi = new Container()
   private nodes = new Container()
   private shapes = new Container()
   private turnsG = new Graphics()
@@ -200,7 +203,7 @@ export class MapView {
     app.canvas.style.touchAction = 'none'
 
     app.stage.addChild(this.gridG, this.world)
-    this.world.addChild(this.zonesG, this.roads, this.markings, this.heat.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
+    this.world.addChild(this.zonesG, this.roads, this.markings, this.roadsHi, this.markingsHi, this.heat.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
     this.bindEvents()
 
     this.ro = new ResizeObserver(() => {
@@ -258,11 +261,15 @@ export class MapView {
       add(this.roads, mesh(t.bus, C.bus))
       add(this.markings, mesh(t.white, C.white))
       add(this.markings, mesh(t.yellow, C.yellow))
+      add(this.roadsHi, mesh(t.hi.asphalt, C.asphalt))
+      add(this.roadsHi, mesh(t.hi.bus, C.bus))
+      add(this.markingsHi, mesh(t.hi.white, C.white))
+      add(this.markingsHi, mesh(t.hi.yellow, C.yellow))
       // círculos dos nós/pontos de forma são caros de gerar: criados sob demanda (ver cullTiles)
       this.tileDots.set(t.id, { shape: t.shape.slice(), minor: t.minor.slice(), major: t.major.slice(), shapeDone: false, nodesDone: false })
       this.tileObjs.set(t.id, meshes)
       const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity]
-      for (const pos of [t.asphalt.pos, t.bus.pos, t.white.pos, t.yellow.pos, t.shape, t.minor, t.major]) {
+      for (const pos of [t.asphalt.pos, t.bus.pos, t.white.pos, t.yellow.pos, t.shape, t.minor, t.major, t.hi.asphalt.pos]) {
         for (let i = 0; i < pos.length; i += 2) {
           const x = pos[i]
           const y = pos[i + 1]
@@ -1258,8 +1265,8 @@ export class MapView {
     this.cullTiles()
     const z = this.cam.z
     const on = (k: LayerKey) => this.user[k] && z >= (LOD[k] ?? 0)
-    this.roads.visible = this.user.roads
-    this.markings.visible = on('markings')
+    this.roads.visible = this.roadsHi.visible = this.user.roads
+    this.markings.visible = this.markingsHi.visible = on('markings')
     this.nodes.visible = on('nodes')
     this.shapes.visible = on('shapes')
     this.labels?.setVisible(on('labels'))

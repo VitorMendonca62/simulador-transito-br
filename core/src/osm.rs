@@ -34,6 +34,62 @@ impl RawOsm {
             self.nodes.dedup_by_key(|n| n.0);
         }
         self.drop_far_ways();
+        self.separate_levels();
+    }
+
+    /// Desfaz nós que o OSM compartilha (por erro de mapeamento) entre vias de níveis diferentes que
+    /// passam por ele — ex.: viaduto atravessando uma rotatória no térreo. Transição legítima de nível
+    /// acontece na ponta de uma via (rampa chegando à ponte); quando o nó é miolo de vias em 2+ níveis
+    /// distintos, cada nível ganha a sua cópia do nó. O nível 0 (ou o mais próximo dele) mantém o id
+    /// original, com semáforos e travessias; as cópias recebem ids sintéticos acima do espaço do OSM.
+    fn separate_levels(&mut self) {
+        let levels: Vec<i32> = self.ways.iter().map(|w| way_level(&w.tags)).collect();
+        if levels.iter().all(|&l| l == 0) {
+            return;
+        }
+        // nó -> [(via, nível, é miolo)]
+        let mut uses: std::collections::HashMap<i64, Vec<(usize, i32, bool)>> = Default::default();
+        for (wi, w) in self.ways.iter().enumerate() {
+            let last = w.refs.len().saturating_sub(1);
+            for (k, &r) in w.refs.iter().enumerate() {
+                uses.entry(r).or_default().push((wi, levels[wi], k != 0 && k != last));
+            }
+        }
+        let mut remap: Vec<(usize, i64, i64)> = Vec::new(); // (via, id antigo, id novo)
+        let mut new_nodes: Vec<(i64, i32, i32)> = Vec::new();
+        let mut sorted: Vec<(&i64, &Vec<(usize, i32, bool)>)> = uses.iter().collect();
+        sorted.sort_unstable_by_key(|e| *e.0);
+        for (&id, us) in sorted {
+            let mut inner: Vec<i32> = us.iter().filter(|u| u.2).map(|u| u.1).collect();
+            inner.sort_unstable();
+            inner.dedup();
+            if inner.len() < 2 {
+                continue;
+            }
+            let Some((la, lo)) = self.coord(id) else { continue };
+            let keep = *inner.iter().min_by_key(|&&l| (l.abs(), l)).unwrap();
+            for &(wi, lv, _) in us {
+                // ponta de via vai para o nível de miolo mais próximo do seu
+                let g = *inner.iter().min_by_key(|&&l| ((l - lv).abs(), l)).unwrap();
+                if g == keep {
+                    continue;
+                }
+                let nid = id + (((g + 64) as i64) << 40);
+                remap.push((wi, id, nid));
+                new_nodes.push((nid, la, lo));
+            }
+        }
+        if remap.is_empty() {
+            return;
+        }
+        for (wi, old, new) in remap {
+            for r in self.ways[wi].refs.iter_mut().filter(|r| **r == old) {
+                *r = new;
+            }
+        }
+        self.nodes.extend(new_nodes);
+        self.nodes.sort_unstable_by_key(|n| n.0);
+        self.nodes.dedup_by_key(|n| n.0);
     }
 
     /// Remove vias a mais de ~110 km da mediana das vias (sobras de conversões/consultas mal filtradas,
@@ -100,8 +156,21 @@ impl RawOsm {
     }
 }
 
+/// Nível vertical da via: `layer`, ou ±1 implícito para ponte/túnel sem `layer`.
+pub fn way_level(tags: &[(String, String)]) -> i32 {
+    let get = |k: &str| tags.iter().find(|t| t.0 == k).map(|t| t.1.as_str());
+    if let Some(l) = get("layer").and_then(|v| v.trim().parse::<f64>().ok()) {
+        return l.round() as i32;
+    }
+    match (get("bridge"), get("tunnel")) {
+        (Some(b), _) if b != "no" => 1,
+        (_, Some(t)) if t != "no" => -1,
+        _ => 0,
+    }
+}
+
 fn keep_key(k: &str) -> bool {
-    matches!(k, "highway" | "name" | "oneway" | "junction" | "maxspeed" | "area" | "lanes" | "busway" | "psv" | "bus" | "motorcar" | "motor_vehicle" | "access")
+    matches!(k, "highway" | "name" | "oneway" | "junction" | "layer" | "bridge" | "tunnel" | "maxspeed" | "area" | "lanes" | "busway" | "psv" | "bus" | "motorcar" | "motor_vehicle" | "access")
         || matches!(k, "motorcar:conditional" | "motor_vehicle:conditional" | "access:conditional")
         || k.starts_with("lanes:")
         || k.starts_with("turn:lanes")

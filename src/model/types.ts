@@ -16,6 +16,8 @@ export interface TileData {
   shape: Float32Array
   minor: Float32Array
   major: Float32Array
+  /** asfalto e marcações de vias elevadas (pontes/viadutos), desenhados acima do térreo */
+  hi: { asphalt: MeshData; bus: MeshData; white: MeshData; yellow: MeshData }
 }
 export interface TileUpdate {
   dirty: TileData[]

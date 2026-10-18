@@ -26,8 +26,8 @@ function extractTiles(net: Network): TileUpdate {
     io += n
     return v
   }
-  for (let i = 0; i < index.length; i += 12) {
-    const L = index.subarray(i + 1, i + 12)
+  for (let i = 0; i < index.length; i += 20) {
+    const L = index.subarray(i + 1, i + 20)
     const asphaltPos = takeF(L[0])
     const busPos = takeF(L[1])
     const whitePos = takeF(L[2])
@@ -35,15 +35,24 @@ function extractTiles(net: Network): TileUpdate {
     const shape = takeF(L[4])
     const minor = takeF(L[5])
     const major = takeF(L[6])
+    const base = { asphalt: takeU(L[7]), bus: takeU(L[8]), white: takeU(L[9]), yellow: takeU(L[10]) }
+    const hiPos = [takeF(L[11]), takeF(L[12]), takeF(L[13]), takeF(L[14])]
+    const hiIdx = [takeU(L[15]), takeU(L[16]), takeU(L[17]), takeU(L[18])]
     dirty.push({
       id: index[i],
-      asphalt: { pos: asphaltPos, idx: takeU(L[7]) },
-      bus: { pos: busPos, idx: takeU(L[8]) },
-      white: { pos: whitePos, idx: takeU(L[9]) },
-      yellow: { pos: yellowPos, idx: takeU(L[10]) },
+      asphalt: { pos: asphaltPos, idx: base.asphalt },
+      bus: { pos: busPos, idx: base.bus },
+      white: { pos: whitePos, idx: base.white },
+      yellow: { pos: yellowPos, idx: base.yellow },
       shape,
       minor,
       major,
+      hi: {
+        asphalt: { pos: hiPos[0], idx: hiIdx[0] },
+        bus: { pos: hiPos[1], idx: hiIdx[1] },
+        white: { pos: hiPos[2], idx: hiIdx[2] },
+        yellow: { pos: hiPos[3], idx: hiIdx[3] },
+      },
     })
   }
   return { dirty, removed: Array.from(net.tiles_removed()) }
@@ -78,7 +87,7 @@ function transferables(d: NetworkData): ArrayBuffer[] {
     if (ArrayBuffer.isView(v)) add(v.buffer)
   }
   for (const t of d.tiles.dirty) {
-    for (const m of [t.asphalt, t.bus, t.white, t.yellow]) {
+    for (const m of [t.asphalt, t.bus, t.white, t.yellow, t.hi.asphalt, t.hi.bus, t.hi.white, t.hi.yellow]) {
       add(m.pos.buffer)
       add(m.idx.buffer)
     }

@@ -448,7 +448,8 @@ impl Network {
     pub fn tiles_removed(&self) -> Vec<u32> {
         self.delta.removed.clone()
     }
-    /// Por ladrilho sujo: [id, tamanhos de pos×7 (asfalto, ônibus, branco, amarelo, forma, nós menores, cruzamentos), tamanhos de idx×4].
+    /// Por ladrilho sujo: [id, tamanhos de pos×7 (asfalto, ônibus, branco, amarelo, forma, nós menores, cruzamentos),
+    /// tamanhos de idx×4, e da camada elevada: tamanhos de pos×4 (asfalto, ônibus, branco, amarelo), de idx×4].
     pub fn tiles_index(&self) -> Vec<u32> {
         let mut out = Vec::new();
         for id in &self.delta.dirty {
@@ -456,6 +457,13 @@ impl Network {
             out.push(*id);
             out.extend([t.asphalt.pos.len(), t.bus.pos.len(), t.white.pos.len(), t.yellow.pos.len(), t.shape.len(), t.minor.len(), t.major.len()].map(|v| v as u32));
             out.extend([t.asphalt.idx.len(), t.bus.idx.len(), t.white.idx.len(), t.yellow.idx.len()].map(|v| v as u32));
+            match &t.hi {
+                Some(h) => {
+                    out.extend([h.asphalt.pos.len(), h.bus.pos.len(), h.white.pos.len(), h.yellow.pos.len()].map(|v| v as u32));
+                    out.extend([h.asphalt.idx.len(), h.bus.idx.len(), h.white.idx.len(), h.yellow.idx.len()].map(|v| v as u32));
+                }
+                None => out.extend([0; 8]),
+            }
         }
         out
     }
@@ -467,6 +475,11 @@ impl Network {
             for v in [&t.asphalt.pos, &t.bus.pos, &t.white.pos, &t.yellow.pos, &t.shape, &t.minor, &t.major] {
                 out.extend_from_slice(v);
             }
+            if let Some(h) = &t.hi {
+                for v in [&h.asphalt.pos, &h.bus.pos, &h.white.pos, &h.yellow.pos] {
+                    out.extend_from_slice(v);
+                }
+            }
         }
         out
     }
@@ -477,6 +490,11 @@ impl Network {
             let t = &self.tiles.tiles[id];
             for v in [&t.asphalt.idx, &t.bus.idx, &t.white.idx, &t.yellow.idx] {
                 out.extend_from_slice(v);
+            }
+            if let Some(h) = &t.hi {
+                for v in [&h.asphalt.idx, &h.bus.idx, &h.white.idx, &h.yellow.idx] {
+                    out.extend_from_slice(v);
+                }
             }
         }
         out
