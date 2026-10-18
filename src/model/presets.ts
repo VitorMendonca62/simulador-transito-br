@@ -20,7 +20,6 @@ export const ROAD_PRESETS: RoadPreset[] = [
   { id: 'oneway1', label: 'Mão única', hint: '1 faixa', hw: 'residential', oneway: true, lf: 1, lb: 0, laneW: 3.1 },
   { id: 'oneway2', label: 'Mão única larga', hint: '2 faixas', hw: 'secondary', oneway: true, lf: 2, lb: 0, laneW: 3.4 },
   { id: 'expressway', label: 'Via expressa', hint: '3+3, sem acesso direto', hw: 'trunk', oneway: false, lf: 3, lb: 3, laneW: 3.6 },
-  { id: 'service', label: 'Viela', hint: 'serviço, faixas estreitas', hw: 'service', oneway: false, lf: 1, lb: 1, laneW: 2.7 },
 ]
 
 export const presetWidth = (p: RoadPreset) => (p.lf + (p.oneway ? 0 : p.lb)) * p.laneW

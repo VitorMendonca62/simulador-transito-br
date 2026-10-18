@@ -5,5 +5,5 @@ export default defineConfig({
   plugins: [react()],
   worker: { format: 'es' },
   build: { target: 'es2022' },
-  server: { fs: { allow: ['.'] } },
+  server: { fs: { allow: ['.'] }, allowedHosts: ['.ngrok-free.dev'] },
 })

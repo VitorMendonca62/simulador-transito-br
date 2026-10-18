@@ -37,8 +37,66 @@ fn lane_group(m: usize, k: usize, j: usize) -> (usize, usize) {
     (j * m / k, ((j + 1) * m + k - 1) / k)
 }
 
-fn lane_masks(tags: &[u8], n: usize, present: u8) -> Vec<u8> {
+/// Divide as `m` faixas que seguem "em frente" entre `counts.len()` ramos (da esquerda para a direita, `counts[j]` =
+/// faixas de saída do ramo `j`, `main` = o ramo mais alinhado). Retorna o intervalo `lo..hi` de faixas de cada ramo.
+///
+/// - Se os ramos juntos têm até `m` faixas, cada um recebe um bloco exclusivo proporcional às suas faixas
+///   (ex.: 4 faixas → ramos de 2 e 2).
+/// - Senão, o principal fica com todas as faixas que couberem nele, cada uma na sua posição, e cada lado recebe as
+///   faixas da sua ponta, compartilhando no máximo uma com o principal (ex.: 4 faixas, avenida de 4 e saída de 1 à
+///   direita → as 4 seguem e só a da direita também sai; 2 faixas em Y de 2 e 2 → a da divisa vai aos dois).
+fn fork_alloc(m: usize, counts: &[usize], main: usize) -> Vec<(usize, usize)> {
+    let k = counts.len();
+    if k <= 1 || m == 0 {
+        return vec![(0, m); k];
+    }
+    let c: Vec<usize> = counts.iter().map(|&x| x.clamp(1, m)).collect();
+    let total: usize = c.iter().sum();
+    if total <= m {
+        let mut out = Vec::with_capacity(k);
+        let mut cum = 0;
+        for &cj in &c {
+            let lo = m * cum / total;
+            cum += cj;
+            let hi = ((m * cum + total - 1) / total).max(lo + 1).min(m);
+            out.push((lo, hi));
+        }
+        return out;
+    }
+    let left: usize = c[..main].iter().sum();
+    let right: usize = c[main + 1..].iter().sum();
+    let main_n = c[main].min(m);
+    let rem = m - main_n;
+    let left_ex = if left + right == 0 { 0 } else { ((rem * left) as f64 / (left + right) as f64).round() as usize };
+    let right_ex = rem - left_ex;
+    let wl = if left > 0 { left.min(left_ex + 1).max(left_ex) } else { 0 };
+    let wr = if right > 0 { right.min(right_ex + 1).max(right_ex) } else { 0 };
+    let (kl, kr) = (main, k - main - 1);
+    let mut out = Vec::with_capacity(k);
+    for j in 0..k {
+        out.push(if j == main {
+            (left_ex, left_ex + main_n)
+        } else if j < main {
+            let (lo, hi) = lane_group(wl, kl, j);
+            (lo, hi)
+        } else {
+            let (lo, hi) = lane_group(wr, kr, j - main - 1);
+            (m - wr + lo, m - wr + hi)
+        });
+    }
+    out
+}
+
+/// Manobras de cada faixa. `lanes_lr` = faixas de saída somadas das conversões à esquerda e à direita (para dividir a
+/// aproximação num T, onde não há "em frente").
+fn lane_masks(tags: &[u8], n: usize, present: u8, lanes_lr: (usize, usize)) -> Vec<u8> {
     let any_tag = tags.iter().any(|&t| t != 0);
+    // T sem "em frente" e sem setas: as faixas se dividem entre esquerda e direita na proporção das saídas
+    if !any_tag && n >= 3 && present & STRAIGHT == 0 && present & LEFT != 0 && present & RIGHT != 0 {
+        let (cl, cr) = (lanes_lr.0.clamp(1, n), lanes_lr.1.clamp(1, n));
+        let k = ((n * cl) as f64 / (cl + cr) as f64).round().clamp(1.0, (n - 1) as f64) as usize;
+        return (0..n).map(|i| if i < k { LEFT } else { RIGHT }).collect();
+    }
     let mut m = vec![0u8; n];
     for i in 0..n {
         let t = tags.get(i).copied().unwrap_or(0);
@@ -47,9 +105,10 @@ fn lane_masks(tags: &[u8], n: usize, present: u8) -> Vec<u8> {
         } else if n == 1 {
             15
         } else if i == 0 {
-            LEFT | if n == 2 { STRAIGHT } else { 0 }
+            // sem seta pintada (OSM sem `turn:lanes`), a faixa da ponta é compartilhada: esquerda e em frente
+            LEFT | STRAIGHT
         } else if i == n - 1 {
-            RIGHT | if n == 2 { STRAIGHT } else { 0 }
+            RIGHT | STRAIGHT
         } else {
             STRAIGHT
         };
@@ -83,19 +142,28 @@ fn lane_masks(tags: &[u8], n: usize, present: u8) -> Vec<u8> {
     m
 }
 
-fn target_index(kind: u8, t: usize, m: usize, lane_idx: usize, n_in: usize, n_out: usize) -> usize {
+/// Faixa de saída da `t`-ésima de `m` faixas que fazem a manobra. `li0` = índice (na aproximação) da primeira delas.
+/// `side` (só "em frente"): 0 = mantém a posição; -1 = entra pela direita (ramal que converge vindo da direita);
+/// +1 = entra pela esquerda.
+fn target_index(kind: u8, t: usize, m: usize, li0: usize, n_out: usize, side: i8) -> usize {
     let last = n_out - 1;
+    let from_left = t.min(last);
+    let from_right = last - (m - 1 - t).min(last);
     match kind {
-        K_LEFT => t.min(last),
-        K_RIGHT => last - (m - 1 - t).min(last),
+        K_LEFT => from_left,
+        K_RIGHT => from_right,
         K_UTURN => 0,
         _ => {
-            if m == n_out {
-                t
+            if side > 0 {
+                from_left
+            } else if side < 0 {
+                from_right
+            } else if m <= n_out {
+                // cada faixa segue na sua posição (com uma faixa de conversão à esquerda, as demais não "pulam" uma)
+                t + li0.min(n_out - m)
             } else if m > 1 {
+                // estreitamento: as faixas se juntam
                 ((t as f64) * last as f64 / (m - 1) as f64).round() as usize
-            } else if n_in > 1 {
-                ((lane_idx as f64) * last as f64 / (n_in - 1) as f64).round() as usize
             } else {
                 last / 2
             }
@@ -114,6 +182,25 @@ fn bezier(p0: [f32; 2], d0: [f32; 2], p3: [f32; 2], d3: [f32; 2], kind: u8) -> [
         _ => dist * 0.45,
     };
     [p0[0], p0[1], p0[0] + d0[0] * k, p0[1] + d0[1] * k, p3[0] - d3[0] * k, p3[1] - d3[1] * k, p3[0], p3[1]]
+}
+
+/// Qual das pontas `cands` (índices em `ends`) é a "via principal" em relação à ponta `refp`: a que continua a mesma via
+/// (mesmo nome, ou mesmo way), depois a de mais faixas (de saída se `out`, de entrada senão), depois a mais alinhada.
+/// Retorna o índice em `cands`.
+fn pick_main(net: &Net, ends: &[u32], refp: usize, cands: &[usize], abs_ang: &[f64], ap: &[(Vec<u32>, Vec<u32>)], out: bool) -> usize {
+    let seg = |p: usize| &net.segs[(ends[p] >> 1) as usize];
+    let r = seg(refp);
+    let same = |p: usize| {
+        let s = seg(p);
+        (s.name != NO_NAME && s.name == r.name) || s.way_id == r.way_id
+    };
+    let lanes = |p: usize| if out { ap[p].1.len() } else { ap[p].0.len() };
+    (0..cands.len())
+        .min_by(|&x, &y| {
+            let (px, py) = (cands[x], cands[y]);
+            same(py).cmp(&same(px)).then(lanes(py).cmp(&lanes(px))).then(abs_ang[x].partial_cmp(&abs_ang[y]).unwrap_or(std::cmp::Ordering::Equal))
+        })
+        .unwrap_or(0)
 }
 
 /// Restrições OSM indexadas pelo nó "via" (id OSM) -> índices em `raw.restrictions`.
@@ -144,48 +231,164 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
     let n = ends.len();
     let ap: Vec<(Vec<u32>, Vec<u32>)> = ends.iter().map(|&e| net.approach_lanes(e)).collect();
     let outw: Vec<V2> = ends.iter().map(|&e| net.outward(e)).collect();
-
-    for a in 0..n {
-        let ins = &ap[a].0;
-        if ins.is_empty() {
+    // convergência: para cada saída `b`, a aproximação que segue "em frente" para ela e continua a mesma via (ou a de
+    // mais faixas, ou a mais alinhada) é a principal. Quem mais entra em `b` (ramal "em frente" ou conversão) chega por um
+    // lado; o ramal "em frente" entra pela ponta desse lado e a principal encosta no lado oposto quando sobra faixa,
+    // para cada fluxo ter a sua faixa em vez de dois disputarem as mesmas.
+    let mut merge_side = vec![vec![0i8; n]; n];
+    for b in 0..n {
+        if ap[b].1.is_empty() {
             continue;
         }
-        // alvos: outras pontas com faixas de saída
-        let mut targets: Vec<(usize, u8)> = Vec::new();
-        for b in 0..n {
-            if b == a || ap[b].1.is_empty() {
+        let feeders: Vec<usize> = (0..n).filter(|&a| a != b && !ap[a].0.is_empty()).collect();
+        let straight: Vec<usize> = feeders.iter().copied().filter(|&a| classify(mul(outw[a], -1.0), outw[b]) == K_STRAIGHT).collect();
+        if feeders.len() < 2 || straight.is_empty() {
+            continue;
+        }
+        let ang: Vec<f64> = straight.iter().map(|&a| angle(mul(outw[a], -1.0), outw[b]).abs()).collect();
+        let main = straight[pick_main(net, &ends, b, &straight, &ang, &ap, false)];
+        // lado pela posição do braço em relação ao sentido de quem vem pela principal (não pelo sentido da curva:
+        // um ramal que desce de cima e entra pela direita faz curva à direita)
+        let h = mul(outw[main], -1.0);
+        let r = [-h[1], h[0]];
+        let mut sides = Vec::new();
+        for &a in &feeders {
+            if a == main {
                 continue;
             }
-            targets.push((b, classify(mul(outw[a], -1.0), outw[b])));
+            let sd: i8 = if dot(outw[a], r) > 0.0 { -1 } else { 1 };
+            sides.push(sd);
+            if straight.contains(&a) {
+                merge_side[a][b] = sd;
+            }
         }
-        // beco sem saída: retorno
-        if n == 1 && !ap[a].1.is_empty() {
-            targets.push((a, K_UTURN));
+        if !sides.is_empty() && sides.iter().all(|&x| x == sides[0]) {
+            merge_side[main][b] = -sides[0];
         }
+    }
+
+    // restrições do OSM por movimento (aproximação `a` → saída `b`, pelos ways): aplicadas **antes** de distribuir as
+    // faixas, para que as faixas se dividam entre as manobras permitidas (com a direita proibida, as duas faixas viram
+    // à esquerda) em vez de sobrar faixa sem saída.
+    let osm = net.nodes[ni].osm_id;
+    let way_of = |p: usize| net.segs[(ends[p] >> 1) as usize].way_id;
+    let banned = |a: usize, b: usize| -> bool {
+        let Some(list) = restr.get(&osm) else { return false };
+        // restrição é para carros: aproximação só de ônibus (corredor exclusivo) não é afetada
+        if ap[a].0.iter().all(|&l| net.lanes[l as usize].bus) {
+            return false;
+        }
+        list.iter().any(|&ri| {
+            let r = &raw.restrictions[ri];
+            // `to` que não chega a este nó (way partido em outro ponto, relação desatualizada): a restrição não se aplica aqui
+            if way_of(a) != r.from || !(0..n).any(|p| way_of(p) == r.to) {
+                return false;
+            }
+            if r.kind.starts_with("only_") {
+                way_of(b) != r.to
+            } else if r.kind.starts_with("no_") {
+                way_of(b) == r.to
+            } else {
+                false
+            }
+        })
+    };
+    // distribuição das faixas da aproximação `a` entre as saídas `targets`
+    let assign = |a: usize, targets: &[(usize, u8)]| -> Vec<Conn> {
+        let ins = &ap[a].0;
+        let mut out: Vec<Conn> = Vec::new();
         let present = targets.iter().fold(0u8, |m, t| m | (1 << t.1));
         if present == 0 {
-            continue;
+            return out;
         }
         let tags: Vec<u8> = ins.iter().map(|&l| net.lanes[l as usize].tmask).collect();
-        let masks = lane_masks(&tags, ins.len(), present);
+        let lr = targets.iter().fold((0usize, 0usize), |acc, &(b, k)| match k {
+            K_LEFT => (acc.0 + ap[b].1.len(), acc.1),
+            K_RIGHT => (acc.0, acc.1 + ap[b].1.len()),
+            _ => acc,
+        });
+        let masks = lane_masks(&tags, ins.len(), present, lr);
         for kind in 0..4u8 {
             let bit = 1u8 << kind;
             let who: Vec<usize> = (0..ins.len()).filter(|&i| masks[i] & bit != 0).collect();
             // ramos desta manobra, da esquerda para a direita
             let mut tg: Vec<(usize, f64)> = targets.iter().filter(|x| x.1 == kind).map(|&(b, _)| (b, if b == a { 0.0 } else { angle(mul(outw[a], -1.0), outw[b]) })).collect();
             tg.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
+            // "em frente" com vários ramos: divisão pela capacidade, com o ramo mais alinhado (empate: mais faixas) como principal
+            let fork = kind == K_STRAIGHT && tg.len() > 1;
+            let main_j = if fork {
+                let bs: Vec<usize> = tg.iter().map(|x| x.0).collect();
+                pick_main(net, &ends, a, &bs, &tg.iter().map(|x| x.1.abs()).collect::<Vec<_>>(), &ap, true)
+            } else {
+                0
+            };
+            let alloc: Vec<(usize, usize)> = if fork {
+                let counts: Vec<usize> = tg.iter().map(|&(b, _)| ap[b].1.len()).collect();
+                fork_alloc(who.len(), &counts, main_j)
+            } else {
+                (0..tg.len()).map(|j| lane_group(who.len(), tg.len(), j)).collect()
+            };
             for (j, &(b, _)) in tg.iter().enumerate() {
-                let (lo, hi) = lane_group(who.len(), tg.len(), j);
+                let (lo, hi) = alloc[j];
                 let sub = &who[lo..hi];
+                if sub.is_empty() {
+                    continue;
+                }
+                // lado de entrada: ramo à esquerda/direita do principal entra pela sua ponta; um só ramo que recebe
+                // também o fluxo "em frente" de outra aproximação mais alinhada (ramal que converge) entra pelo seu lado
+                let side: i8 = if kind != K_STRAIGHT {
+                    0
+                } else if tg.len() > 1 {
+                    if j < main_j { 1 } else if j > main_j { -1 } else { 0 }
+                } else {
+                    merge_side[a][b]
+                };
                 for (t, &li) in sub.iter().enumerate() {
                     let outs = &ap[b].1;
-                    let oi = target_index(kind, t, sub.len(), li, ins.len(), outs.len());
+                    let oi = target_index(kind, t, sub.len(), sub[0], outs.len(), side);
                     let (fl, tl) = (ins[li], outs[oi]);
                     let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
-                    conns.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ALLOWED, base: CONN_ALLOWED, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
+                    out.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ALLOWED, base: CONN_ALLOWED, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
                 }
             }
         }
+        out
+    };
+    for a in 0..n {
+        if ap[a].0.is_empty() {
+            continue;
+        }
+        // alvos: outras pontas com faixas de saída
+        let mut all: Vec<(usize, u8)> = Vec::new();
+        for b in 0..n {
+            if b == a || ap[b].1.is_empty() {
+                continue;
+            }
+            all.push((b, classify(mul(outw[a], -1.0), outw[b])));
+        }
+        // beco sem saída: retorno
+        if n == 1 && !ap[a].1.is_empty() {
+            all.push((a, K_UTURN));
+        }
+        let mut allowed: Vec<(usize, u8)> = all.iter().copied().filter(|&(b, _)| !banned(a, b)).collect();
+        // todas as saídas proibidas (ex.: rua de mão dupla cuja única saída é uma conversão proibida): retorno na própria via
+        if allowed.is_empty() && !ap[a].1.is_empty() && !banned(a, a) {
+            allowed.push((a, K_UTURN));
+        }
+        let real = assign(a, &allowed);
+        // o que seria o padrão sem a restrição aparece como "proibida por restrição" (tracejado vermelho)
+        if allowed.len() < all.len() {
+            let have: std::collections::HashSet<(u32, u32)> = real.iter().map(|c| (c.from_lane, c.to_lane)).collect();
+            for mut c in assign(a, &all) {
+                let b = (0..n).find(|&b| ap[b].1.contains(&c.to_lane)).unwrap_or(a);
+                if banned(a, b) && !have.contains(&(c.from_lane, c.to_lane)) {
+                    c.state = CONN_BLOCKED;
+                    c.base = CONN_BLOCKED;
+                    conns.push(c);
+                }
+            }
+        }
+        conns.extend(real);
     }
 
     // candidatas: todo par entrada -> saída que ainda não existe (estado ausente)
@@ -200,25 +403,6 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
                     }
                     let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
                     conns.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ABSENT, base: CONN_ABSENT, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
-                }
-            }
-        }
-    }
-
-    // restrições do OSM
-    let osm = net.nodes[ni].osm_id;
-    if let Some(list) = restr.get(&osm) {
-        for &ri in list {
-            let r = &raw.restrictions[ri];
-            for c in conns.iter_mut() {
-                let in_way = net.segs[net.lanes[c.from_lane as usize].seg as usize].way_id;
-                let out_way = net.segs[net.lanes[c.to_lane as usize].seg as usize].way_id;
-                if in_way != r.from {
-                    continue;
-                }
-                let hit = if r.kind.starts_with("only_") { out_way != r.to } else if r.kind.starts_with("no_") { out_way == r.to } else { false };
-                if hit && c.state == CONN_ALLOWED {
-                    c.state = CONN_BLOCKED;
                 }
             }
         }
@@ -348,5 +532,33 @@ mod tests {
         assert_eq!((lane_group(2, 3, 0), lane_group(2, 3, 1), lane_group(2, 3, 2)), ((0, 1), (0, 2), (1, 2)));
         // um só ramo: todas as faixas
         assert_eq!(lane_group(5, 1, 0), (0, 5));
+    }
+
+    #[test]
+    fn fork_alloc_by_capacity() {
+        use super::fork_alloc;
+        // avenida de 4 + saída de 1 à direita: as 4 seguem, só a da direita também sai
+        assert_eq!(fork_alloc(4, &[4, 1], 0), vec![(0, 4), (3, 4)]);
+        // saída de 2 à direita: ainda só a da direita (uma faixa compartilhada)
+        assert_eq!(fork_alloc(4, &[4, 2], 0), vec![(0, 4), (3, 4)]);
+        // Y de 2 faixas em ramos de 2 e 2, principal à direita: as duas seguem pelo principal, a da esquerda também pelo outro
+        assert_eq!(fork_alloc(2, &[2, 2], 1), vec![(0, 1), (0, 2)]);
+        // 4 faixas que se dividem em 2 + 2: blocos exclusivos
+        assert_eq!(fork_alloc(4, &[2, 2], 0), vec![(0, 2), (2, 4)]);
+        assert_eq!(fork_alloc(4, &[1, 1], 0), vec![(0, 2), (2, 4)]);
+        // 3 faixas em ramos de 2 e 2: a do meio é compartilhada
+        assert_eq!(fork_alloc(3, &[2, 2], 0), vec![(0, 2), (1, 3)]);
+    }
+
+    #[test]
+    fn straight_lanes_keep_their_position() {
+        use super::target_index;
+        use crate::net::K_STRAIGHT;
+        // 4 faixas, a da esquerda converte: as 3 que seguem vão para 1, 2, 3 (não 0, 2, 3)
+        let v: Vec<usize> = (0..3).map(|t| target_index(K_STRAIGHT, t, 3, 1, 4, 0)).collect();
+        assert_eq!(v, vec![1, 2, 3]);
+        // ramal de 1 faixa que converge pela direita entra na faixa da direita; pela esquerda, na da esquerda
+        assert_eq!(target_index(K_STRAIGHT, 0, 1, 0, 4, -1), 3);
+        assert_eq!(target_index(K_STRAIGHT, 0, 1, 0, 4, 1), 0);
     }
 }

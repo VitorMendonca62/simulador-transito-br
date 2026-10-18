@@ -73,16 +73,24 @@ function OdImportBox() {
   const { odImport, odImporting, importOd2018, setOdScale, clearOdImport, zones, data } = useStore(
     useShallow((s) => ({ odImport: s.odImport, odImporting: s.odImporting, importOd2018: s.importOd2018, setOdScale: s.setOdScale, clearOdImport: s.clearOdImport, zones: s.zones, data: s.data })),
   )
+  const [gateways, setGateways] = useState(true)
   const start = () => {
     if (zones.length > 0 && !odImport && !window.confirm(`Substituir as ${zones.length} zonas atuais pelas da Pesquisa OD 2018?`)) return
-    void importOd2018()
+    void importOd2018({ gateways })
   }
+  const gatewayCheck = (
+    <label className="check">
+      <input type="checkbox" checked={gateways} onChange={(e) => setGateways(e.target.checked)} />
+      <span>Entradas e saídas para as cidades vizinhas nas vias principais da divisa (BR-101, BR-232, Agamenon…)</span>
+    </label>
+  )
   if (!odImport) {
     return (
       <div className="od-import">
         <button className="btn sm" disabled={!data || odImporting} onClick={start}>
           {odImporting ? 'Importando…' : 'Importar zonas da Pesquisa OD 2018'}
         </button>
+        {gatewayCheck}
         <p className="hint">Zonas de tráfego do Recife/RMR com a matriz de carro dirigindo (trabalho + educação) por hora.</p>
       </div>
     )
@@ -90,7 +98,18 @@ function OdImportBox() {
   return (
     <div className="od-import">
       <p className="hint">
-        <b>{odImport.name}</b>: {zones.length} zonas no mapa, {odImport.merged} de fora entram pela borda mais próxima. A matriz da hora escolhida fica fixada e acompanha o relógio da simulação.
+        <b>{odImport.name}</b>:{' '}
+        {odImport.gateways > 0 ? (
+          <>
+            {zones.length - odImport.gateways} zonas no mapa; as {odImport.merged} zonas de fora entram e saem por {odImport.gateways} portais na divisa.
+            {odImport.dropped > 0 && <> {Math.round(odImport.dropped).toLocaleString('pt-BR')} viagens/dia entre cidades vizinhas não passam pelo mapa e ficam de fora.</>}
+          </>
+        ) : (
+          <>
+            {zones.length} zonas no mapa, {odImport.merged} de fora entram pela borda mais próxima.
+          </>
+        )}{' '}
+        A matriz da hora escolhida fica fixada e acompanha o relógio da simulação.
       </p>
       <label className="field col">
         <span>
@@ -98,6 +117,8 @@ function OdImportBox() {
         </span>
         <input type="range" min={0} max={1.5} step={0.05} value={odImport.scale} onChange={(e) => setOdScale(Number(e.target.value))} aria-label="Escala da demanda importada" />
       </label>
+      {odImport.gateways > 0 && <GatewayTable />}
+      {gatewayCheck}
       <div className="row tight">
         <button className="btn sm" disabled={odImporting} onClick={start}>
           Reimportar
@@ -105,6 +126,54 @@ function OdImportBox() {
         <button className="btn sm danger" onClick={clearOdImport} title="Mantém as zonas e volta ao modelo gravitacional">
           Desligar matriz
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** Veículos/h que entram e saem por cada portal da divisa na hora atual (células fixadas da matriz). */
+function GatewayTable() {
+  const { zones, odManual, demandParams, selectedZone, selectZone } = useStore(
+    useShallow((s) => ({ zones: s.zones, odManual: s.odManual, demandParams: s.demandParams, selectedZone: s.selectedZone, selectZone: s.selectZone })),
+  )
+  const flow = new Map<number, [number, number]>()
+  for (const [k, v] of Object.entries(odManual)) {
+    const [o, d] = k.split('>').map(Number)
+    const fo = flow.get(o) ?? [0, 0]
+    fo[0] += v
+    flow.set(o, fo)
+    const fd = flow.get(d) ?? [0, 0]
+    fd[1] += v
+    flow.set(d, fd)
+  }
+  const gates = zones.filter((z) => z.gateway).map((z) => ({ z, f: flow.get(z.id) ?? [0, 0] })).sort((a, b) => b.f[0] + b.f[1] - (a.f[0] + a.f[1]))
+  const tot = gates.reduce((s, g) => [s[0] + g.f[0], s[1] + g.f[1]], [0, 0])
+  return (
+    <div className="od gw">
+      <h3>
+        Divisa às {hhmm(demandParams.hour)} <small>entram {Math.round(tot[0])} · saem {Math.round(tot[1])} veíc./h</small>
+      </h3>
+      <div className="od-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">portal</th>
+              <th scope="col">entram</th>
+              <th scope="col">saem</th>
+            </tr>
+          </thead>
+          <tbody>
+            {gates.map(({ z, f }) => (
+              <tr key={z.id} className={z.id === selectedZone ? 'on' : ''} onClick={() => selectZone(z.id === selectedZone ? null : z.id)} style={{ cursor: 'pointer' }}>
+                <th scope="row" title={z.name}>
+                  {z.name.replace(/^Divisa · /, '')}
+                </th>
+                <td>{Math.round(f[0])}</td>
+                <td>{Math.round(f[1])}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -257,6 +326,18 @@ export function ZonePanel() {
         <label className="field">
           <span>Ônibus no fluxo (%)</span>
           <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
+        </label>
+        <label className="check" title="Durante a simulação, as rotas são recalculadas com a velocidade medida em cada trecho; quem usa app desvia de congestionamentos no caminho.">
+          <input type="checkbox" checked={demandParams.reroute ?? true} onChange={(e) => setDemandParams({ reroute: e.target.checked })} />
+          <span>Rotas em tempo real (estilo Waze)</span>
+        </label>
+        <label className="field" title="Motoristas que seguem o tempo real. Os demais escolhem a rota pelo tempo de fluxo livre.">
+          <span>Usam app de navegação (%)</span>
+          <input className="num" type="number" min={0} max={100} step={5} disabled={!(demandParams.reroute ?? true)} value={demandParams.appPct ?? 60} onChange={(e) => setDemandParams({ appPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
+        </label>
+        <label className="field" title="Quanto cada motorista erra ao avaliar a próxima via. 0 = todos escolhem igual (tudo ou nada); 0,3 = espalha entre caminhos com poucos segundos de diferença.">
+          <span>Erro de percepção</span>
+          <input className="num" type="number" min={0} max={1} step={0.05} value={demandParams.perception ?? 0.3} onChange={(e) => setDemandParams({ perception: Math.min(1, Math.max(0, Number(e.target.value))) })} />
         </label>
         <label className="field" title="Motoristas na faixa errada que, em vez de dar a volta, usam a conversão proibida de outra faixa. 0 = ninguém.">
           <span>Ignoram a sinalização (%)</span>

@@ -85,7 +85,12 @@ impl RawOsm {
         if get("type") != Some("restriction") {
             return;
         }
-        let Some(kind) = get("restriction") else { return };
+        // `restriction:motorcar` vale para carros como a geral; `restriction:hgv`, `:bus` etc. não se aplicam ao carro
+        let Some(kind) = get("restriction").or_else(|| get("restriction:motorcar")) else { return };
+        // exceção que inclui carros (ex.: except=motorcar) faz a restrição não valer para o tráfego simulado
+        if get("except").map_or(false, |e| e.split(';').any(|x| matches!(x.trim(), "motorcar" | "motor_vehicle" | "vehicle"))) {
+            return;
+        }
         let from = members.iter().find(|m| m.0 == 1 && m.2 == "from").map(|m| m.1);
         let to = members.iter().find(|m| m.0 == 1 && m.2 == "to").map(|m| m.1);
         let via = members.iter().find(|m| m.0 == 0 && m.2 == "via").map(|m| m.1);
@@ -96,7 +101,8 @@ impl RawOsm {
 }
 
 fn keep_key(k: &str) -> bool {
-    matches!(k, "highway" | "name" | "oneway" | "junction" | "maxspeed" | "service" | "area" | "access" | "lanes" | "busway")
+    matches!(k, "highway" | "name" | "oneway" | "junction" | "maxspeed" | "area" | "lanes" | "busway" | "psv" | "bus" | "motorcar" | "motor_vehicle" | "access")
+        || matches!(k, "motorcar:conditional" | "motor_vehicle:conditional" | "access:conditional")
         || k.starts_with("lanes:")
         || k.starts_with("turn:lanes")
         || k.starts_with("bus:lanes")

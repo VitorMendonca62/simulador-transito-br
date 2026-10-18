@@ -1022,3 +1022,337 @@ fn vehicle_destination_is_random_and_fixed_for_the_whole_trip() {
     assert!(st.finished > 10, "viagens concluídas: {st:?}");
     assert!(nodes.len() > 2, "destinos distintos sorteados: {}", nodes.len());
 }
+
+#[test]
+fn lane_changes_use_blinker_and_respect_solid_zone() {
+    let mut n = sim_net();
+    for _ in 0..60 {
+        run(&mut n, 10.0);
+    }
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.finished > 10, "viagens concluídas com seta e zona contínua: {st:?}");
+    assert!(st.lane_changes > 0, "ainda há trocas de faixa: {st:?}");
+}
+
+/// `PERF_OSM=arquivo cargo test --release recife_behavior -- --ignored --nocapture`: indicadores de comportamento e rota.
+#[test]
+#[ignore]
+fn recife_behavior() {
+    let data = std::fs::read(std::env::var("PERF_OSM").expect("defina PERF_OSM")).unwrap();
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let zones = [q(1, -3000.0, -3000.0, -1500.0, -1500.0, 2500.0), q(2, 1500.0, -3000.0, 3000.0, -1500.0, 2500.0), q(3, -3000.0, 1500.0, -1500.0, 3000.0, 2500.0), q(4, 1500.0, 1500.0, 3000.0, 3000.0, 2500.0)].join(",");
+    let extra = std::env::var("SIM_PARAMS").unwrap_or_default();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let mut sum = [0.0f64; 6];
+    for seed in 1..=3 {
+        let json = format!(r#"{{"zones":[{zones}],"params":{{"seed":{seed},"hour":8,"busShare":0,"beta":0.0{extra}}}}}"#);
+        n.start_sim(&json).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..(15 * 60 * 5) {
+            n.sim.as_mut().unwrap().step(&n.net);
+        }
+        let s = n.sim.as_ref().unwrap();
+        let r = s.report(&n.net);
+        let ms = t.elapsed().as_secs_f64() * 1e3 / 4500.0;
+        let row = [s.stats.finished as f64, r["totalDelayAllVehH"].as_f64().unwrap(), s.stats.queued as f64, s.stats.illegal_moves as f64 + s.stats.solid_crossings as f64 * 1e-6, s.stats.harsh_brakes as f64, ms];
+        eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], row[5], s.reroutes);
+        for k in 0..6 {
+            sum[k] += row[k] / 3.0;
+        }
+    }
+    eprintln!("MÉDIA: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  freadas {:.0}  passo {:.2} ms", sum[0], sum[1], sum[2], sum[3], sum[4], sum[5]);
+}
+
+/// Portal na divisa (zona `gateway`): o tráfego das cidades vizinhas nasce na via expressa que entra no mapa.
+/// Zona comum nunca nasce em via expressa.
+#[test]
+fn gateway_zone_spawns_on_expressway() {
+    let osm = r#"<osm>
+<node id="1" lat="-8.0" lon="-34.910"/><node id="2" lat="-8.0" lon="-34.905"/><node id="3" lat="-8.0" lon="-34.900"/>
+<node id="4" lat="-8.0" lon="-34.895"/><node id="5" lat="-8.0" lon="-34.890"/>
+<way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="trunk"/><tag k="name" v="BR-101"/></way>
+<way id="11"><nd ref="3"/><nd ref="4"/><nd ref="5"/><tag k="highway" v="residential"/><tag k="name" v="Rua A"/></way>
+</osm>"#;
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let spawned = |gateway: bool| {
+        let mut n = build_network(osm.as_bytes()).unwrap();
+        let (g, d) = (square(at(&n, 1), 30.0), square(at(&n, 5), 30.0));
+        let json = format!(
+            r#"{{"zones":[{{"id":1001,"gen":600,"attr":1,"gateway":{gateway},"poly":{g}}},{{"id":2,"gen":0,"attr":1,"poly":{d}}}],
+              "params":{{"seed":3,"hour":8,"busShare":0,"beta":0,"odManual":{{"1001>2":600}}}}}}"#
+        );
+        n.start_sim(&json).unwrap();
+        run(&mut n, 300.0);
+        let st = n.sim.as_ref().unwrap().stats.clone();
+        (st.spawned, st.finished)
+    };
+    let (sp, fin) = spawned(true);
+    assert!(sp > 20 && fin > 5, "portal gera e conclui viagens: gerados {sp}, concluídos {fin}");
+    assert_eq!(spawned(false).0, 0, "zona comum não nasce em via expressa");
+    // o portal pequeno não leva o aviso "sem vias dentro da zona"
+    let n = build_network(osm.as_bytes()).unwrap();
+    let p: crate::demand::Payload = serde_json::from_str(&format!(r#"{{"zones":[{{"id":1001,"gen":1,"attr":1,"gateway":true,"poly":{}}}]}}"#, square(at(&n, 1), 30.0))).unwrap();
+    let r = crate::demand::resolve(&n.net, &p, &crate::demand::straight_line_minutes);
+    assert!(r.zones[0].warning.is_none(), "{:?}", r.zones[0].warning);
+}
+
+
+
+#[test]
+fn straight_connections_never_cross_or_skip_lanes() {
+    // `PERF_OSM` troca a rede de exemplo por um mapa real (ex.: Recife)
+    let mut n = match std::env::var("PERF_OSM") {
+        Ok(p) => build_network_lazy_for_test(&std::fs::read(p).unwrap()),
+        Err(_) => sample(),
+    };
+    n.ensure_conns();
+    let net = &n.net;
+    let (mut same_out, mut skip, mut total) = (0usize, 0usize, 0usize);
+    for ni in 0..net.nodes.len() {
+        let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+        let cs: Vec<_> = net.conns[lo..hi].iter().filter(|c| c.state == crate::net::CONN_ALLOWED && c.kind == crate::net::K_STRAIGHT).collect();
+        total += cs.len();
+        for x in &cs {
+            for y in &cs {
+                let (a, b) = (&net.lanes[x.from_lane as usize], &net.lanes[y.from_lane as usize]);
+                let (c, d) = (&net.lanes[x.to_lane as usize], &net.lanes[y.to_lane as usize]);
+                if a.seg == b.seg && a.dir == b.dir && c.seg == d.seg && c.dir == d.dir && a.idx < b.idx && c.idx > d.idx {
+                    same_out += 1;
+                }
+            }
+        }
+        // saltos: faixas vizinhas da mesma aproximação indo à mesma saída com um buraco de 2+
+        for x in &cs {
+            for y in &cs {
+                let (a, b) = (&net.lanes[x.from_lane as usize], &net.lanes[y.from_lane as usize]);
+                let (c, d) = (&net.lanes[x.to_lane as usize], &net.lanes[y.to_lane as usize]);
+                if a.seg == b.seg && a.dir == b.dir && c.seg == d.seg && c.dir == d.dir && b.idx == a.idx + 1 && d.idx >= c.idx + 2 {
+                    skip += 1;
+                }
+            }
+        }
+    }
+    assert!(total > 0);
+    assert_eq!((same_out, skip), (0, 0), "em frente: faixas que se cruzam / pulam uma faixa de saída ({total} conversões)");
+}
+
+/// Regras de realismo das conversões padrão na rede inteira. `PERF_OSM=mapa` para um mapa real; `AUDIT_SHOW=n` exemplos.
+fn conn_audit(net: &crate::net::Net) -> std::collections::BTreeMap<&'static str, (usize, Vec<String>)> {
+    use crate::net::*;
+    let show: usize = std::env::var("AUDIT_SHOW").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut out: std::collections::BTreeMap<&'static str, (usize, Vec<String>)> = Default::default();
+    let mut hit = |k: &'static str, msg: String| {
+        let e = out.entry(k).or_default();
+        e.0 += 1;
+        if e.1.len() < show {
+            e.1.push(msg);
+        }
+    };
+    for ni in 0..net.nodes.len() {
+        let node = &net.nodes[ni];
+        let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+        let cs: Vec<&Conn> = net.conns[lo..hi].iter().filter(|c| c.state == CONN_ALLOWED).collect();
+        let ends = &node.ends;
+        for &a in ends {
+            let (ins, _) = net.approach_lanes(a);
+            if ins.is_empty() {
+                continue;
+            }
+            let tagged = ins.iter().any(|&l| net.lanes[l as usize].tmask != 0);
+            let tag = if tagged { "c/ turn:lanes" } else { "sem tags" };
+            let h = crate::geo::mul(net.outward(a), -1.0);
+            let ang = |b: u32| {
+                let u = net.outward(b);
+                crate::geo::cross(h, u).atan2(crate::geo::dot(h, u))
+            };
+            let exits: Vec<u32> = ends.iter().copied().filter(|&b| b != a && !net.approach_lanes(b).1.is_empty()).collect();
+            if exits.is_empty() {
+                continue;
+            }
+            let rank = |b: u32| exits.iter().filter(|&&x| ang(x) < ang(b)).count();
+            let where_ = format!("nó osm {} pos [{:.0},{:.0}] ({tag})", node.osm_id, node.pos[0], node.pos[1]);
+            let mine: Vec<&&Conn> = cs.iter().filter(|c| ins.contains(&c.from_lane)).collect();
+            let key = |c: &Conn| {
+                let tl = &net.lanes[c.to_lane as usize];
+                let b = exits.iter().copied().find(|&b| net.approach_lanes(b).1.contains(&c.to_lane)).unwrap_or(u32::MAX);
+                (if b == u32::MAX { usize::MAX } else { rank(b) }, tl.idx as usize)
+            };
+            // A: duas faixas da mesma aproximação se cruzam
+            let mut crossed = false;
+            for x in &mine {
+                for y in &mine {
+                    let (ix, iy) = (net.lanes[x.from_lane as usize].idx, net.lanes[y.from_lane as usize].idx);
+                    if ix < iy && key(x) > key(y) {
+                        crossed = true;
+                    }
+                }
+            }
+            if crossed {
+                hit(if tagged { "A cruzamento entre faixas (c/ tags)" } else { "A cruzamento entre faixas" }, where_.clone());
+            }
+            // B: faixa sem conversão
+            for &l in &ins {
+                if !mine.iter().any(|c| c.from_lane == l) {
+                    hit("B faixa de entrada sem saída", format!("{where_} faixa {}", net.lanes[l as usize].idx));
+                }
+            }
+            // D: duas faixas da mesma aproximação na mesma faixa de saída, com outra faixa daquela saída livre
+            for &b in &exits {
+                let outs = net.approach_lanes(b).1;
+                let to: Vec<u32> = mine.iter().filter(|c| outs.contains(&c.to_lane)).map(|c| c.to_lane).collect();
+                let mut uniq = to.clone();
+                uniq.sort();
+                uniq.dedup();
+                let froms: std::collections::BTreeSet<u32> = mine.iter().filter(|c| outs.contains(&c.to_lane)).map(|c| c.from_lane).collect();
+                if uniq.len() < to.len() && uniq.len() < outs.len() && froms.len() <= outs.len() {
+                    hit("D duas faixas na mesma saída com faixa livre", where_.clone());
+                }
+            }
+            // F: seta do OSM (turn:lanes) pedindo manobra que a geometria não tem
+            if tagged {
+                let kinds: u8 = exits.iter().map(|&b| { let d = ang(b).to_degrees(); if d.abs() < 30.0 { 1u8 << K_STRAIGHT } else if d > 0.0 { 1 << K_RIGHT } else { 1 << K_LEFT } }).fold(0, |m, k| m | k);
+                if ins.iter().any(|&l| { let t = net.lanes[l as usize].tmask & 7; t != 0 && t & kinds != t }) {
+                    hit("F seta do OSM sem manobra correspondente", where_.clone());
+                }
+            }
+            // G: estreitamento (mais faixas em frente que a saída tem)
+            for &b in &exits {
+                let outs = net.approach_lanes(b).1;
+                let n_s = mine.iter().filter(|c| c.kind == K_STRAIGHT && outs.contains(&c.to_lane)).map(|c| c.from_lane).collect::<std::collections::BTreeSet<_>>().len();
+                if n_s > outs.len() {
+                    hit("G estreitamento em frente", format!("{where_} {} → {}", n_s, outs.len()));
+                }
+            }
+            // E: saída "em frente" que ninguém usa
+            for &b in &exits {
+                if ang(b).to_degrees().abs() < 30.0 && !mine.iter().any(|c| net.approach_lanes(b).1.contains(&c.to_lane)) {
+                    hit("E saída em frente sem conversão", where_.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn default_connections_are_realistic() {
+    let mut n = match std::env::var("PERF_OSM") {
+        Ok(p) => build_network_lazy_for_test(&std::fs::read(p).unwrap()),
+        Err(_) => sample(),
+    };
+    n.ensure_conns();
+    let r = conn_audit(&n.net);
+    for (k, (c, ex)) in &r {
+        eprintln!("{k}: {c}");
+        for e in ex {
+            eprintln!("    {e}");
+        }
+    }
+    // sem tags do OSM, nenhuma aproximação pode ter faixas que se cruzam
+    assert!(!r.contains_key("A cruzamento entre faixas"), "{:?}", r.get("A cruzamento entre faixas"));
+    if std::env::var("PERF_OSM").is_err() {
+        assert!(!r.contains_key("B faixa de entrada sem saída"), "{:?}", r.get("B faixa de entrada sem saída"));
+    }
+}
+
+/// Galeria SVG de cruzamentos (conversões padrão). `PERF_OSM=mapa GALLERY=arquivo.html [GALLERY_N=40] [GALLERY_SEED=1]`.
+#[test]
+#[ignore]
+fn conn_gallery() {
+    use crate::net::*;
+    let data = std::fs::read(std::env::var("PERF_OSM").unwrap()).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let net = &n.net;
+    let count: usize = std::env::var("GALLERY_N").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let mut seed: u64 = std::env::var("GALLERY_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let name = |si: u32| net.names.get(net.segs[si as usize].name as usize).cloned().unwrap_or_default();
+    // cruzamentos com alguma aproximação de 2+ faixas e 3+ pontas
+    let cands: Vec<usize> = (0..net.nodes.len()).filter(|&ni| {
+        let e = &net.nodes[ni].ends;
+        e.len() >= 3 && e.iter().any(|&x| net.approach_lanes(x).0.len() >= 2)
+    }).collect();
+    let mut picked = Vec::new();
+    while picked.len() < count.min(cands.len()) {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        let ni = cands[(seed % cands.len() as u64) as usize];
+        if !picked.contains(&ni) { picked.push(ni); }
+    }
+    let pal = ["#ff4d4d", "#7cfc00", "#4f6bff", "#ffd166", "#ff9a3d", "#4cc9f0", "#c77dff", "#f78fb3"];
+    let mut html = String::from("<html><body style='background:#0b0f10;color:#ddd;font:12px sans-serif'><div style='display:flex;flex-wrap:wrap'>");
+    for &ni in &picked {
+        let c = net.nodes[ni].pos;
+        let r = 24.0f32;
+        let k = 240.0 / (2.0 * r);
+        let tx = |p: [f32; 2]| ((p[0] - c[0] as f32 + r) * k, (p[1] - c[1] as f32 + r) * k);
+        let mut svg = format!("<svg width='240' height='240' viewBox='0 0 240 240' style='background:#141a1c;margin:2px'>");
+        // faixas: linha da faixa até 30 m antes/depois
+        for &e in &net.nodes[ni].ends {
+            let (ins, outs) = net.approach_lanes(e);
+            for &l in &ins {
+                let ln = &net.lanes[l as usize];
+                let a = [ln.end[0] - ln.edir[0] * 18.0, ln.end[1] - ln.edir[1] * 18.0];
+                let (x0, y0) = tx(a); let (x1, y1) = tx(ln.end);
+                svg += &format!("<line x1='{x0}' y1='{y0}' x2='{x1}' y2='{y1}' stroke='#3a4446' stroke-width='6'/><line x1='{x0}' y1='{y0}' x2='{x1}' y2='{y1}' stroke='#666' stroke-width='1' marker-end=''/>");
+                svg += &format!("<circle cx='{x1}' cy='{y1}' r='3' fill='{}'/><text x='{}' y='{}' fill='#fff' font-size='8'>{}{}</text>", pal[ln.idx as usize % 8], x1 + 4.0, y1 - 4.0, ln.idx, if ln.tmask != 0 { "*" } else { "" });
+            }
+            for &l in &outs {
+                let ln = &net.lanes[l as usize];
+                let b = [ln.start[0] + ln.sdir[0] * 18.0, ln.start[1] + ln.sdir[1] * 18.0];
+                let (x0, y0) = tx(ln.start); let (x1, y1) = tx(b);
+                svg += &format!("<line x1='{x0}' y1='{y0}' x2='{x1}' y2='{y1}' stroke='#2c3436' stroke-width='6'/><circle cx='{x0}' cy='{y0}' r='2.5' fill='#ddd'/><text x='{}' y='{}' fill='#999' font-size='8'>{}</text>", x0 + 3.0, y0 + 9.0, ln.idx);
+            }
+        }
+        let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+        for cn in net.conns[lo..hi].iter().filter(|c| c.state == CONN_ALLOWED) {
+            let q = cn.curve;
+            let p = |i: usize| tx([q[i * 2], q[i * 2 + 1]]);
+            let (a, b, cc, d) = (p(0), p(1), p(2), p(3));
+            let col = pal[net.lanes[cn.from_lane as usize].idx as usize % 8];
+            svg += &format!("<path d='M{} {} C{} {} {} {} {} {}' stroke='{col}' fill='none' stroke-width='1.6' opacity='0.9'/>", a.0, a.1, b.0, b.1, cc.0, cc.1, d.0, d.1);
+        }
+        let names: Vec<String> = net.nodes[ni].ends.iter().map(|&e| { let (i, o) = net.approach_lanes(e); format!("{} ({}→ {}←)", name(e >> 1), i.len(), o.len()) }).collect();
+        svg += "</svg>";
+        html += &format!("<div style='width:244px;font-size:10px'>{svg}<div>#{} osm {} {}</div><div style='color:#888;height:38px;overflow:hidden'>{}</div></div>", picked.iter().position(|&x| x == ni).unwrap(), net.nodes[ni].osm_id, if net.nodes[ni].signal { "🚦" } else { "" }, names.join(" · "));
+    }
+    html += "</div></body></html>";
+    std::fs::write(std::env::var("GALLERY").unwrap(), html).unwrap();
+}
+
+/// `PERF_OSM=mapa NODES=osm1,osm2 cargo test --release conn_dump -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn conn_dump() {
+    use crate::net::*;
+    let data = std::fs::read(std::env::var("PERF_OSM").unwrap()).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let net = &n.net;
+    let name = |si: u32| net.names.get(net.segs[si as usize].name as usize).cloned().unwrap_or_default();
+    let ids: Vec<i64> = std::env::var("NODES").unwrap().split(',').map(|x| x.trim().parse().unwrap()).collect();
+    for ni in (0..net.nodes.len()).filter(|&i| ids.contains(&net.nodes[i].osm_id)) {
+        eprintln!("nó osm {}", net.nodes[ni].osm_id);
+        for r in n.raw.restrictions.iter().filter(|r| r.via == net.nodes[ni].osm_id) {
+            eprintln!("  restrição {} de way {} para way {}", r.kind, r.from, r.to);
+        }
+        let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+        for &a in &net.nodes[ni].ends {
+            let (ins, outs) = net.approach_lanes(a);
+            let h = crate::geo::mul(net.outward(a), -1.0);
+            eprintln!("  ponta {a} '{}' way {} entra {} sai {} (chega rumo {:.0}°)", name(a >> 1), net.segs[(a >> 1) as usize].way_id, ins.len(), outs.len(), h[1].atan2(h[0]).to_degrees());
+            for &b in &net.nodes[ni].ends {
+                if b == a || net.approach_lanes(b).1.is_empty() || ins.is_empty() { continue; }
+                let u = net.outward(b);
+                eprintln!("      -> ponta {b} '{}' ângulo {:.0}° ({} faixas)", name(b >> 1), crate::geo::cross(h, u).atan2(crate::geo::dot(h, u)).to_degrees(), net.approach_lanes(b).1.len());
+            }
+            for &l in &ins {
+                let blocked: Vec<String> = net.conns[lo..hi].iter().filter(|c| c.state == CONN_BLOCKED && c.from_lane == l).map(|c| { let b = net.nodes[ni].ends.iter().find(|&&b| net.approach_lanes(b).1.contains(&c.to_lane)).unwrap(); format!("p{}#{}", b, net.lanes[c.to_lane as usize].idx) }).collect();
+                if !blocked.is_empty() { eprintln!("      faixa {} BLOQUEADAS por restrição: {}", net.lanes[l as usize].idx, blocked.join(" ")); }
+                let v: Vec<String> = net.conns[lo..hi].iter().filter(|c| c.state == CONN_ALLOWED && c.from_lane == l).map(|c| { let tl = &net.lanes[c.to_lane as usize]; let b = net.nodes[ni].ends.iter().find(|&&b| net.approach_lanes(b).1.contains(&c.to_lane)).unwrap(); format!("{}→p{}#{}", ["L","S","R","U"][c.kind as usize], b, tl.idx) }).collect();
+                eprintln!("      faixa {} (tag {}): {}", net.lanes[l as usize].idx, net.lanes[l as usize].tmask, v.join(" "));
+            }
+        }
+    }
+}

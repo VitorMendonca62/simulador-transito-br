@@ -158,7 +158,7 @@ fn emit_seg(net: &Net, s: &Seg, m: &mut TileMesh) {
         if big {
             m.yellow.strip(&sl, -0.34, -0.12);
             m.yellow.strip(&sl, 0.12, 0.34);
-        } else if s.hw != HW_SERVICE {
+        } else {
             m.yellow.dashes(&sl, 3.0, 5.0, 0.13);
         }
     }

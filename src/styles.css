@@ -210,6 +210,10 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
 .od td.manual { background: #2a2410; color: var(--orange); }
 .od td input { width: 54px; background: #0e1514; border: 1px solid var(--accent); border-radius: 4px; color: inherit; padding: 1px 3px; }
 .od td.sum, .od tr.sum td { color: var(--dim); }
+.od.gw .od-scroll { max-height: 220px; overflow-y: auto; }
+.od.gw th[scope='row'] { text-align: left; max-width: 150px; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 500; }
+.od.gw tbody tr:hover th, .od.gw tbody tr:hover td { background: #16201e; }
+.od.gw tr.on th, .od.gw tr.on td { background: #1d2b28; color: var(--accent); }
 
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin: 8px 0 4px; }
 .stats div { display: grid; }

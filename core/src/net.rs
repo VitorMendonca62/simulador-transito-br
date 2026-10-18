@@ -12,7 +12,6 @@ pub const HW_TERTIARY: u8 = 4;
 pub const HW_UNCLASSIFIED: u8 = 5;
 pub const HW_RESIDENTIAL: u8 = 6;
 pub const HW_LIVING: u8 = 7;
-pub const HW_SERVICE: u8 = 8;
 pub const HW_BUSWAY: u8 = 9;
 
 pub const NO_NAME: u32 = u32::MAX;
@@ -83,7 +82,7 @@ pub struct NewPt {
 pub struct NewRoad {
     /// id único da via (vira o `way` das chaves de trecho)
     pub id: i64,
-    /// classe OSM: residential, tertiary, secondary, primary, trunk, service...
+    /// classe OSM: residential, tertiary, secondary, primary, trunk...
     pub hw: String,
     pub name: String,
     pub oneway: bool,
@@ -163,12 +162,6 @@ impl BaseCache {
             let t = Tags(&w.tags);
             let Some((hw, link)) = t.get("highway").and_then(parse_highway) else { continue };
             if t.get("area") == Some("yes") {
-                continue;
-            }
-            if hw == HW_SERVICE && matches!(t.get("service"), Some("driveway") | Some("parking_aisle")) {
-                continue;
-            }
-            if matches!(t.get("access"), Some("no") | Some("private")) && hw == HW_SERVICE {
                 continue;
             }
             let pts: Vec<(i64, i32, i32)> = w.refs.iter().filter_map(|&r| raw.coord(r).map(|(la, lo)| (r, la, lo))).collect();
@@ -302,7 +295,6 @@ fn parse_highway(v: &str) -> Option<(u8, bool)> {
         "unclassified" => HW_UNCLASSIFIED,
         "residential" => HW_RESIDENTIAL,
         "living_street" => HW_LIVING,
-        "service" => HW_SERVICE,
         "busway" => HW_BUSWAY,
         _ => return None,
     };
@@ -535,7 +527,6 @@ pub fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
     let w = match hw {
         HW_MOTORWAY | HW_TRUNK => 3.6,
         HW_PRIMARY | HW_SECONDARY | HW_BUSWAY => 3.4,
-        HW_SERVICE => 2.7,
         _ => 3.1,
     };
     let maxspeed = t
@@ -574,7 +565,12 @@ pub fn way_attrs(t: &Tags, hw: u8, link: bool) -> Attrs {
             bus_b[nb - 1] = true;
         }
     }
-    if hw == HW_BUSWAY {
+    // corredor exclusivo: ônibus liberados e carro proibido (sempre ou em horário, ex.: Conde da Boa Vista
+    // `motorcar:conditional=no @ (06:00-22:00)`; o horário não é avaliado: vale como exclusivo)
+    let psv_ok = ["psv", "bus"].iter().any(|k| matches!(t.get(k), Some("yes") | Some("designated")));
+    let car_no = ["motorcar", "motor_vehicle", "access"].iter().any(|k| matches!(t.get(k), Some("no")))
+        || ["motorcar:conditional", "motor_vehicle:conditional", "access:conditional"].iter().any(|k| t.get(k).map_or(false, |v| v.trim_start().starts_with("no")));
+    if hw == HW_BUSWAY || (psv_ok && car_no) {
         bus_f.iter_mut().for_each(|b| *b = true);
         bus_b.iter_mut().for_each(|b| *b = true);
     }

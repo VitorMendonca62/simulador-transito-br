@@ -112,7 +112,7 @@ export function VehicleCard() {
           </dd>
           <dt>Outros</dt>
           <dd>
-            {info.ruleBreaker ? 'infrator · ' : ''}troca de faixa em {f(info.laneChangeCooldown, 1)} s · via de hierarquia {info.rank}
+            {info.ruleBreaker ? 'infrator · ' : ''}troca de faixa em {f(info.laneChangeCooldown, 1)} s ({info.laneChangeBlock}) · via de hierarquia {info.rank}
           </dd>
         </dl>
       )}

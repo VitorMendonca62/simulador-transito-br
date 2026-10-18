@@ -456,6 +456,12 @@ export class MapView {
       g.poly(z.poly.flat()).fill({ color: z.color, alpha: sel ? 0.26 : 0.14 })
       g.poly(z.poly.flat()).stroke({ width: (sel ? 2.6 : 1.6) * px, color: sel ? 0xffffff : z.color, alpha: 0.9, join: 'round' })
       if (sel && this.mode === 'zones') for (const p of z.poly) g.circle(p[0], p[1], 6 * px).fill(0xffffff).stroke({ width: 2 * px, color: z.color })
+      // portal da divisa: o polígono tem ~60 m, então ganha um marcador de tamanho fixo na tela
+      if (z.gateway) {
+        const c = z.poly.reduce((s, p) => [s[0] + p[0] / z.poly.length, s[1] + p[1] / z.poly.length], [0, 0])
+        g.circle(c[0], c[1], (sel ? 11 : 8) * px).fill({ color: 0x0b1210, alpha: 0.85 }).stroke({ width: (sel ? 3 : 2) * px, color: sel ? 0xffffff : 0xfbbf24 })
+        g.circle(c[0], c[1], 3 * px).fill(0xfbbf24)
+      }
       const el = document.createElement('span')
       el.textContent = z.name
       el.style.setProperty('--zc', `#${z.color.toString(16).padStart(6, '0')}`)

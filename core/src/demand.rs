@@ -19,6 +19,9 @@ pub struct ZoneIn {
     pub attr: f64,
     /// 24 fatores relativos (0..); vazio = plano
     pub profile: Vec<f64>,
+    /// portal na divisa do mapa (entrada/saída das cidades vizinhas): polígono pequeno em volta do nó de fora,
+    /// pode nascer em via expressa
+    pub gateway: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -162,7 +165,7 @@ pub fn resolve(net: &Net, p: &Payload, travel_min: &dyn Fn(usize, usize, &[[f64;
         let g = z.gen * profile_at(&z.profile, p.params.hour);
         let warning = if z.poly.len() < 3 {
             Some("polígono incompleto".to_string())
-        } else if road_m < 1.0 {
+        } else if road_m < 1.0 && !(z.gateway && nodes > 0) {
             Some("sem vias dentro da zona".to_string())
         } else {
             None

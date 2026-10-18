@@ -318,6 +318,8 @@ impl Network {
                 "redRuns": s.stats.red_runs,
                 "laneChanges": s.stats.lane_changes,
                 "illegalMoves": s.stats.illegal_moves,
+                "harshBrakes": s.stats.harsh_brakes,
+                "solidCrossings": s.stats.solid_crossings,
                 "skipped": s.stats.skipped,
             })
             .to_string(),

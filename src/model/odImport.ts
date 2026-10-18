@@ -1,6 +1,7 @@
 /** Importação das zonas de tráfego e da matriz de carro da Pesquisa OD Metropolitana 2018 (Recife). */
 import { ZONE_COLORS, type Zone } from './demand'
-import type { NetworkMeta } from './types'
+import { findGateways, gatewaySplitter, gatewayZones, inside, internalZones, type GatewayInfo } from './gatewayImport'
+import type { NetworkData } from './types'
 
 /** Arquivo gerado por scripts/od_recife/gerar_od.py (public/data/od2018_zonas.json). */
 export interface OdSource {
@@ -19,8 +20,12 @@ export interface OdImport {
   scale: number
   /** 24 listas planas [idOrigem, idDestino, veíc./h] (escala 1) */
   hourly: number[][]
-  /** zonas da pesquisa fora do mapa, incorporadas à zona de borda mais próxima */
+  /** zonas da pesquisa fora do mapa (incorporadas à zona de borda mais próxima, ou servidas pelos portais) */
   merged: number
+  /** portais de entrada/saída na divisa do mapa (`gatewayImport.ts`); ausente = zonas de fora incorporadas */
+  gateways?: GatewayInfo[]
+  /** veículos por dia útil descartados: viagens entre cidades vizinhas que não atravessam o mapa */
+  dropped?: number
 }
 
 export const OD2018_URL = `${import.meta.env.BASE_URL}data/od2018_zonas.json`
@@ -30,16 +35,6 @@ const M_PER_DEG = 111_319.490_793_273_57
 const MIN_NODES = 3
 
 type Pt = [number, number]
-
-const inside = (p: Pt, poly: Pt[]) => {
-  let r = false
-  for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
-    const [ax, ay] = poly[a]
-    const [bx, by] = poly[b]
-    if (ay > p[1] !== by > p[1] && p[0] < ((bx - ax) * (p[1] - ay)) / (by - ay) + ax) r = !r
-  }
-  return r
-}
 
 /** Sutherland–Hodgman contra o retângulo [x0, y0, x1, y1]. */
 function clipRect(poly: Pt[], [x0, y0, x1, y1]: number[]): Pt[] {
@@ -75,10 +70,13 @@ const label = (z: OdSource['zonas'][number]) => {
 }
 
 /**
- * Escolhe as zonas que têm vias no mapa carregado (recortadas à área da rede) e incorpora as demais
- * à zona mantida mais próxima: quem vem de fora entra pela borda do mapa mais perto da sua origem.
+ * Escolhe as zonas que têm vias no mapa carregado (recortadas à área da rede). As demais:
+ * - sem `gateways`: são incorporadas à zona mantida mais próxima (quem vem de fora entra pela borda do mapa mais perto da sua origem);
+ * - com `gateways`: entram e saem por portais nas vias principais que cruzam a divisa (`gatewayImport.ts`), e só ficam no mapa as zonas que
+ *   ele cobre de fato (as de borda, com um canto de rede, passam a ser de fora).
  */
-export function buildOdImport(src: OdSource, meta: NetworkMeta, nodeXY: Float32Array): { zones: Zone[]; imp: OdImport } {
+export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'nodeXY' | 'segU32'>, opts: { gateways?: boolean } = {}): { zones: Zone[]; imp: OdImport } {
+  const { meta, nodeXY } = data
   const [latC, lonC, kx] = meta.geo
   const proj = ([lon, lat]: Pt): Pt => [(lon - lonC) * kx, -(lat - latC) * M_PER_DEG]
   const b = meta.bounds
@@ -88,6 +86,7 @@ export function buildOdImport(src: OdSource, meta: NetworkMeta, nodeXY: Float32A
     return ring
   })
   // nós da rede por zona (com pré-filtro pela caixa do polígono)
+  const cap = opts.gateways ? Infinity : MIN_NODES
   const counts = polys.map((poly) => {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
     for (const [x, y] of poly) {
@@ -95,44 +94,19 @@ export function buildOdImport(src: OdSource, meta: NetworkMeta, nodeXY: Float32A
     }
     if (x1 < b[0] || x0 > b[2] || y1 < b[1] || y0 > b[3]) return 0
     let n = 0
-    for (let i = 0; i < nodeXY.length && n < MIN_NODES; i += 2) {
+    for (let i = 0; i < nodeXY.length && n < cap; i += 2) {
       const p: Pt = [nodeXY[i], nodeXY[i + 1]]
       if (p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1 && inside(p, poly)) n++
     }
     return n
   })
-  const keptIdx = src.zonas.map((_, i) => i).filter((i) => counts[i] >= MIN_NODES)
+  const keep = opts.gateways
+    ? internalZones(polys, src.zonas.map((z) => z.municipio), counts, nodeXY, MIN_NODES)
+    : counts.map((n) => n >= MIN_NODES)
+  const keptIdx = src.zonas.map((_, i) => i).filter((i) => keep[i])
   if (keptIdx.length === 0) throw new Error('Nenhuma zona da Pesquisa OD 2018 cobre este mapa (só há dados para a Região Metropolitana do Recife).')
   const clipped = new Map(keptIdx.map((i) => [i, clipRect(polys[i], b)]))
-  const kc = keptIdx.map((i) => [i, centroid(clipped.get(i)!)] as const)
-  const target = new Map<number, number>() // id da pesquisa -> id da zona mantida
-  src.zonas.forEach((z, i) => {
-    if (clipped.has(i)) return target.set(z.id, z.id)
-    const c = centroid(polys[i])
-    let best = kc[0]
-    let bd = Infinity
-    for (const k of kc) {
-      const d = Math.hypot(k[1][0] - c[0], k[1][1] - c[1])
-      if (d < bd) [bd, best] = [d, k]
-    }
-    target.set(z.id, src.zonas[best[0]].id)
-  })
-  const hourly = src.horas.map((flat) => {
-    const acc = new Map<string, number>()
-    for (let i = 0; i < flat.length; i += 3) {
-      const o = target.get(flat[i])
-      const d = target.get(flat[i + 1])
-      if (o == null || d == null) continue
-      const k = `${o}>${d}`
-      acc.set(k, (acc.get(k) ?? 0) + flat[i + 2])
-    }
-    const out: number[] = []
-    for (const [k, v] of acc) {
-      const [o, d] = k.split('>').map(Number)
-      out.push(o, d, Math.round(v * 100) / 100)
-    }
-    return out
-  })
+  const idx = new Map(src.zonas.map((z, i) => [z.id, i]))
   const zones: Zone[] = keptIdx.map((i, n) => ({
     id: src.zonas[i].id,
     name: label(src.zonas[i]),
@@ -142,7 +116,79 @@ export function buildOdImport(src: OdSource, meta: NetworkMeta, nodeXY: Float32A
     profile: 'od2018',
     color: ZONE_COLORS[n % ZONE_COLORS.length],
   }))
-  return { zones, imp: { name: `Pesquisa OD ${src.ano} · carro dirigindo`, scale: 1, hourly, merged: src.zonas.length - keptIdx.length } }
+  const merged = src.zonas.length - keptIdx.length
+  const name = `Pesquisa OD ${src.ano} · carro dirigindo`
+  const pack = (acc: Map<string, number>) => {
+    const out: number[] = []
+    for (const [k, v] of acc) {
+      const [o, d] = k.split('>').map(Number)
+      if (v >= 0.005) out.push(o, d, Math.round(v * 100) / 100)
+    }
+    return out
+  }
+  const add = (acc: Map<string, number>, o: number, d: number, v: number) => {
+    const k = `${o}>${d}`
+    acc.set(k, (acc.get(k) ?? 0) + v)
+  }
+
+  if (!opts.gateways) {
+    const kc = keptIdx.map((i) => [i, centroid(clipped.get(i)!)] as const)
+    const target = new Map<number, number>() // id da pesquisa -> id da zona mantida
+    src.zonas.forEach((z, i) => {
+      if (clipped.has(i)) return target.set(z.id, z.id)
+      const c = centroid(polys[i])
+      let best = kc[0]
+      let bd = Infinity
+      for (const k of kc) {
+        const d = Math.hypot(k[1][0] - c[0], k[1][1] - c[1])
+        if (d < bd) [bd, best] = [d, k]
+      }
+      target.set(z.id, src.zonas[best[0]].id)
+    })
+    const hourly = src.horas.map((flat) => {
+      const acc = new Map<string, number>()
+      for (let i = 0; i < flat.length; i += 3) {
+        const o = target.get(flat[i])
+        const d = target.get(flat[i + 1])
+        if (o != null && d != null) add(acc, o, d, flat[i + 2])
+      }
+      return pack(acc)
+    })
+    return { zones, imp: { name, scale: 1, hourly, merged } }
+  }
+
+  const ext = src.zonas.map((z, i) => ({ i, poly: polys[i], municipio: z.municipio })).filter((z) => !keep[z.i])
+  const gates = findGateways({ nodeXY, segU32: data.segU32, names: meta.names }, ext)
+  if (gates.length === 0) throw new Error('Nenhuma via principal cruza a divisa do mapa: não há onde pôr entradas e saídas.')
+  const cents = src.zonas.map((_, i) => centroid(clipped.get(i) ?? polys[i]))
+  const sp = gatewaySplitter(gates, (id) => cents[idx.get(id)!])
+  let dropped = 0
+  const hourly = src.horas.map((flat) => {
+    const acc = new Map<string, number>()
+    for (let i = 0; i < flat.length; i += 3) {
+      const [o, d, v] = [flat[i], flat[i + 1], flat[i + 2]]
+      const io = idx.get(o)
+      const id = idx.get(d)
+      if (io == null || id == null) continue
+      const [ko, kd] = [keep[io], keep[id]]
+      if (ko && kd) add(acc, o, d, v)
+      else if (kd) for (const [g, f] of sp.inbound(o, d)) add(acc, g, d, v * f)
+      else if (ko) for (const [g, f] of sp.outbound(o, d)) add(acc, o, g, v * f)
+      else if (o !== d) {
+        const split = sp.through(o, d)
+        if (split.length === 0) dropped += v
+        for (const [pair, f] of split) {
+          const [ga, gb] = sp.pairOf(pair)
+          add(acc, ga, gb, v * f)
+        }
+      } else dropped += v
+    }
+    return pack(acc)
+  })
+  return {
+    zones: [...zones, ...gatewayZones(gates)],
+    imp: { name, scale: 1, hourly, merged, gateways: gates, dropped: Math.round(dropped) },
+  }
 }
 
 /**

@@ -116,6 +116,11 @@ impl Metrics {
         }
     }
 
+    /// Razão velocidade medida / livre (média móvel de ~5 s) do trecho direcionado `d`; 1 sem dados.
+    pub fn speed_ratio(&self, d: usize) -> f32 {
+        if self.seen[d] { self.ema_ratio[d] } else { 1.0 }
+    }
+
     pub fn entered(&mut self, d: usize) {
         self.entries[d] = self.entries[d].saturating_add(1);
         self.run_entries[d] += 1;

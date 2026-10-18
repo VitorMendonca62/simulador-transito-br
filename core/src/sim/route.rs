@@ -47,7 +47,6 @@ pub fn free_speed(s: &Seg) -> f32 {
             HW_PRIMARY => 60.0,
             HW_SECONDARY => 50.0,
             HW_TERTIARY => 40.0,
-            HW_SERVICE => 20.0,
             _ => 30.0,
         }
     };
@@ -62,16 +61,24 @@ pub struct Router {
     radj: Vec<(u32, f32)>,
 }
 
-pub fn turn_penalty(net: &Net, kind: u8, node: u32) -> f32 {
-    let n = &net.nodes[node as usize];
-    let base = match kind {
+/// Parte geométrica da penalidade (a manobra em si, sem fila).
+pub fn turn_base(kind: u8) -> f32 {
+    match kind {
         K_LEFT => 5.0,
         K_RIGHT => 2.0,
         K_UTURN => 60.0,
         _ => 0.0,
-    };
-    let junction = if n.signal { 14.0 } else if n.ends.len() >= 3 { 3.0 } else { 0.0 };
-    base + junction
+    }
+}
+
+/// Espera típica no cruzamento quando ainda não há medição (semáforo, cruzamento sem semáforo).
+pub fn junction_penalty(net: &Net, node: u32) -> f32 {
+    let n = &net.nodes[node as usize];
+    if n.signal { 14.0 } else if n.ends.len() >= 3 { 3.0 } else { 0.0 }
+}
+
+pub fn turn_penalty(net: &Net, kind: u8, node: u32) -> f32 {
+    turn_base(kind) + junction_penalty(net, node)
 }
 
 impl Router {
@@ -146,6 +153,14 @@ impl Router {
     }
 }
 
+/// Dijkstra reverso de uma zona feito em fatias (alguns milhares de nós por passo da simulação), para recalcular
+/// as rotas com o trânsito medido sem travar o passo. Ao terminar, `dist` substitui a árvore da zona.
+pub struct TreeJob {
+    pub zone: usize,
+    pub dist: Vec<f32>,
+    heap: BinaryHeap<Item>,
+}
+
 /// Roteamento por **faixa**: o grafo tem um nó por faixa; as arestas são as conversões ligadas e as trocas de faixa
 /// entre faixas vizinhas do mesmo trecho (custo maior em trechos curtos, onde não há espaço para trocar).
 /// `dist[faixa]` = tempo estimado desde o início da faixa até a zona de destino.
@@ -154,11 +169,15 @@ pub struct LaneRouter {
     pub time: Vec<f32>,
     /// custo (s) de trocar para uma faixa vizinha neste trecho
     pub change: Vec<f32>,
+    /// multiplicador do custo de trocar **para** esta faixa (ocupação: entrar numa faixa cheia é mais difícil)
+    pub change_mul: Vec<f32>,
     radj_off: Vec<u32>,
     /// (faixa de origem, penalidade da conversão)
     radj: Vec<(u32, f32)>,
     /// vizinhas (esquerda, direita) no mesmo trecho e sentido; NONE se não há
     pub nb: Vec<[u32; 2]>,
+    /// posição em `radj` da k-ésima conversão passada a `new` (para trocar a penalidade com o trânsito)
+    edge_of: Vec<u32>,
 }
 
 /// Custo (s) de uma troca de faixa em um trecho de `len` metros.
@@ -194,9 +213,18 @@ impl LaneRouter {
                 }
             }
         }
-        let mut edges: Vec<(u32, u32, f32)> = conns.iter().map(|&(f, t, p)| (t, f, p)).collect();
+        let mut edges: Vec<(u32, u32, f32, u32)> = conns.iter().enumerate().map(|(k, &(f, t, p))| (t, f, p, k as u32)).collect();
         edges.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)).then(x.2.partial_cmp(&y.2).unwrap()));
-        edges.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+        let mut edge_of = vec![0u32; conns.len()];
+        let mut kept: Vec<(u32, u32, f32, u32)> = Vec::with_capacity(edges.len());
+        for e in edges {
+            match kept.last() {
+                Some(l) if l.0 == e.0 && l.1 == e.1 => {}
+                _ => kept.push(e),
+            }
+            edge_of[e.3 as usize] = (kept.len() - 1) as u32;
+        }
+        let edges = kept;
         let mut radj_off = vec![0u32; nl + 1];
         for e in &edges {
             radj_off[e.0 as usize + 1] += 1;
@@ -205,7 +233,7 @@ impl LaneRouter {
             radj_off[i + 1] += radj_off[i];
         }
         let radj = edges.iter().map(|e| (e.1, e.2)).collect();
-        LaneRouter { time, change, radj_off, radj, nb }
+        LaneRouter { change_mul: vec![1.0; nl], time, change, radj_off, radj, nb, edge_of }
     }
 
     /// Dijkstra reverso a partir das faixas que terminam na zona de destino.
@@ -234,7 +262,7 @@ impl LaneRouter {
                 if a == NONE {
                     continue;
                 }
-                let nd = d + self.change[a as usize];
+                let nd = d + self.change[a as usize] * self.change_mul[b as usize];
                 if nd < dist[a as usize] {
                     dist[a as usize] = nd;
                     heap.push(Item(nd, a));
@@ -279,7 +307,7 @@ impl LaneRouter {
                 if la == NONE {
                     continue;
                 }
-                let nd = d + self.change[a as usize];
+                let nd = d + self.change[a as usize] * self.change_mul[b as usize];
                 if nd < dist[la as usize] {
                     dist[la as usize] = nd;
                     heap.push(Item(nd, a));
@@ -287,5 +315,52 @@ impl LaneRouter {
             }
         }
         dist
+    }
+
+    /// Troca a penalidade da k-ésima conversão (na ordem passada a `new`).
+    pub fn set_pen(&mut self, k: usize, pen: f32) {
+        self.radj[self.edge_of[k] as usize].1 = pen;
+    }
+
+    /// Começa a árvore da zona `zone` (reaproveita o vetor `buf`).
+    pub fn job_start(&self, zone: usize, targets: &[u32], mut buf: Vec<f32>) -> TreeJob {
+        buf.clear();
+        buf.resize(self.time.len(), f32::INFINITY);
+        let mut heap = BinaryHeap::new();
+        for &t in targets {
+            buf[t as usize] = self.time[t as usize];
+            heap.push(Item(buf[t as usize], t));
+        }
+        TreeJob { zone, dist: buf, heap }
+    }
+
+    /// Avança a árvore em até `budget` nós retirados da fila; `true` quando terminou.
+    pub fn job_run(&self, job: &mut TreeJob, budget: usize) -> bool {
+        let dist = &mut job.dist;
+        for _ in 0..budget {
+            let Some(Item(d, b)) = job.heap.pop() else { return true };
+            if d > dist[b as usize] {
+                continue;
+            }
+            let (lo, hi) = (self.radj_off[b as usize] as usize, self.radj_off[b as usize + 1] as usize);
+            for &(a, pen) in &self.radj[lo..hi] {
+                let nd = d + pen + self.time[a as usize];
+                if nd < dist[a as usize] {
+                    dist[a as usize] = nd;
+                    job.heap.push(Item(nd, a));
+                }
+            }
+            for &a in &self.nb[b as usize] {
+                if a == NONE {
+                    continue;
+                }
+                let nd = d + self.change[a as usize] * self.change_mul[b as usize];
+                if nd < dist[a as usize] {
+                    dist[a as usize] = nd;
+                    job.heap.push(Item(nd, a));
+                }
+            }
+        }
+        job.heap.is_empty()
     }
 }

@@ -14,6 +14,8 @@ export interface Zone {
   /** perfil próprio (24 fatores), usado no lugar de `profile` (zonas importadas da Pesquisa OD) */
   profileValues?: number[]
   color: number
+  /** portal na divisa do mapa (entrada/saída das cidades vizinhas): pode nascer em via expressa */
+  gateway?: boolean
 }
 
 export interface DemandParams {
@@ -27,9 +29,15 @@ export interface DemandParams {
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
   seed: number
+  /** recalcula as rotas com o tempo medido durante a simulação (estilo Waze) */
+  reroute?: boolean
+  /** % de motoristas que seguem o tempo real; os demais usam o tempo de fluxo livre */
+  appPct?: number
+  /** erro de percepção (0–1) que espalha motoristas entre caminhos parecidos */
+  perception?: number
 }
 
-export const DEFAULT_PARAMS: DemandParams = { beta: 0.08, intrazone: false, hour: 8, busShare: 2, illegalPct: 0, seed: 1 }
+export const DEFAULT_PARAMS: DemandParams = { beta: 0.08, intrazone: false, hour: 8, busShare: 2, illegalPct: 0, seed: 1, reroute: true, appPct: 60, perception: 0.3 }
 
 export interface Profile {
   id: string
@@ -58,7 +66,7 @@ export const hexColor = (c: number) => `#${c.toString(16).padStart(6, '0')}`
 /** Payload para o núcleo (`demand_json`). */
 export function demandPayload(zones: Zone[], params: DemandParams, odManual: Record<string, number>) {
   return {
-    zones: zones.map((z) => ({ id: z.id, poly: z.poly, gen: z.gen, attr: z.attr, profile: z.profileValues ?? profileById(z.profile).values })),
+    zones: zones.map((z) => ({ id: z.id, poly: z.poly, gen: z.gen, attr: z.attr, profile: z.profileValues ?? profileById(z.profile).values, gateway: z.gateway ?? false })),
     params: { beta: params.beta, intrazone: params.intrazone, hour: params.hour, odManual },
   }
 }

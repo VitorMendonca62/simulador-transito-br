@@ -80,7 +80,7 @@ interface State {
   demandParams: DemandParams
   odManual: Record<string, number>
   /** matriz da Pesquisa OD importada (resumo para a interface) */
-  odImport: { name: string; scale: number; merged: number } | null
+  odImport: { name: string; scale: number; merged: number; gateways: number; dropped: number } | null
   odImporting: boolean
   selectedZone: number | null
   demand: DemandResult | null
@@ -126,8 +126,11 @@ interface State {
   setDemandParams: (patch: Partial<DemandParams>) => void
   /** Fixa (ou libera, com null) uma célula da matriz OD em veículos/h. */
   setOdCell: (fromId: number, toId: number, value: number | null) => void
-  /** substitui as zonas pelas da Pesquisa OD 2018 que cobrem o mapa e fixa a matriz de carro */
-  importOd2018: () => Promise<void>
+  /**
+   * substitui as zonas pelas da Pesquisa OD 2018 que cobrem o mapa e fixa a matriz de carro; com `gateways`, o tráfego das
+   * cidades vizinhas entra e sai por portais nas vias principais da divisa (senão, pela zona de borda mais próxima)
+   */
+  importOd2018: (opts?: { gateways?: boolean }) => Promise<void>
   setOdScale: (scale: number) => void
   /** desliga a matriz importada (mantém as zonas, volta ao modelo gravitacional) */
   clearOdImport: () => void
@@ -264,7 +267,9 @@ export const useStore = create<State>((set, get) => {
   }
   /** Recalcula a matriz OD no núcleo (debounce) e sincroniza zonas com o mapa. */
   const refreshDemand = () => {
-    const imp = odImportRecord ? { name: odImportRecord.name, scale: odImportRecord.scale, merged: odImportRecord.merged } : null
+    const imp = odImportRecord
+      ? { name: odImportRecord.name, scale: odImportRecord.scale, merged: odImportRecord.merged, gateways: odImportRecord.gateways?.length ?? 0, dropped: odImportRecord.dropped ?? 0 }
+      : null
     set({ zones: [...zoneRecord], demandParams: { ...paramsRecord }, odManual: { ...odRecord }, odImport: imp })
     viewRef.current?.setZones(zoneRecord, get().selectedZone)
     persistDemand()
@@ -500,7 +505,7 @@ export const useStore = create<State>((set, get) => {
       const { data } = get()
       if (!data) return
       const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
-      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
+      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
       const id = get().scenarios.reduce((m, x) => Math.max(m, x.id), 0) + 1
       const next = [...get().scenarios, { id, name: name || `Cenário ${id}`, edits: editPayload(), sim, minutes }]
       set({ scenarios: next })
@@ -545,7 +550,7 @@ export const useStore = create<State>((set, get) => {
         const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
         await simStart({
           zones: dp.zones,
-          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
+          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
         })
         simHeatKind(get().sim.heat === 'off' ? -1 : get().sim.heat === 'speed' ? 0 : 1)
         simRun(true, get().sim.speed)
@@ -606,20 +611,25 @@ export const useStore = create<State>((set, get) => {
       refreshDemand()
     },
 
-    importOd2018: async () => {
+    importOd2018: async (opts = {}) => {
       const { data } = get()
       if (!data || get().odImporting) return
       set({ odImporting: true })
       try {
         const res = await fetch(OD2018_URL)
         if (!res.ok) throw new Error(`não foi possível ler ${OD2018_URL} (${res.status})`)
-        const { zones, imp } = buildOdImport((await res.json()) as OdSource, data.meta, data.nodeXY)
+        const { zones, imp } = buildOdImport((await res.json()) as OdSource, data, opts)
         zoneRecord = zones
         odImportRecord = imp
         syncOdImport()
         set({ selectedZone: null })
         refreshDemand()
-        get().notify(`${zones.length} zonas importadas; ${imp.merged} zonas fora do mapa incorporadas à borda.`)
+        const ng = imp.gateways?.length ?? 0
+        get().notify(
+          ng > 0
+            ? `${zones.length - ng} zonas no mapa e ${ng} entradas/saídas na divisa para ${imp.merged} zonas de fora.`
+            : `${zones.length} zonas importadas; ${imp.merged} zonas fora do mapa incorporadas à borda.`,
+        )
       } catch (e) {
         set({ error: e instanceof Error ? e.message : String(e) })
       } finally {

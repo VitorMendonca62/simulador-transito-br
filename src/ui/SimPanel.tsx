@@ -65,6 +65,14 @@ export function SimPanel() {
             <dt>Manobras irregulares</dt>
             <dd>{(st.illegalMoves ?? 0).toLocaleString('pt-BR')}</dd>
           </div>
+          <div title="Trocas de faixa sobre a linha contínua antes do cruzamento, feitas por quem ficou preso na fila da faixa errada">
+            <dt>Cruzaram linha contínua</dt>
+            <dd>{(st.solidCrossings ?? 0).toLocaleString('pt-BR')}</dd>
+          </div>
+          <div title="Freadas acima de 5 m/s² (uma por episódio)">
+            <dt>Freadas bruscas</dt>
+            <dd>{(st.harshBrakes ?? 0).toLocaleString('pt-BR')}</dd>
+          </div>
           <div>
             <dt>Viagem média</dt>
             <dd>{st.meanTravel ? `${(st.meanTravel / 60).toFixed(1)} min` : '—'}</dd>

@@ -149,6 +149,10 @@ export interface SimStats {
   redRuns: number
   laneChanges: number
   illegalMoves?: number
+  /** trocas de faixa na linha contínua antes do nó (preso na fila da faixa errada) */
+  solidCrossings?: number
+  /** freadas acima de 5 m/s² */
+  harshBrakes?: number
   /** viagens da matriz que não nasceram (sem caminho da origem ao destino) */
   skipped?: number
 }
@@ -212,6 +216,7 @@ export interface VehicleInfo {
   rank: number
   toNode: number
   laneChangeCooldown: number
+  laneChangeBlock: string
   costOwn: number | null
   lanes: { idx: number; here: boolean; cost: number | null; conn: string | null }[]
   ruleBreaker: boolean
