@@ -281,7 +281,7 @@ pub const K_STRAIGHT: u8 = 1;
 pub const K_RIGHT: u8 = 2;
 pub const K_UTURN: u8 = 3;
 
-fn parse_highway(v: &str) -> Option<(u8, bool)> {
+pub(crate) fn parse_highway(v: &str) -> Option<(u8, bool)> {
     let (base, link) = match v.strip_suffix("_link") {
         Some(b) => (b, true),
         None => (v, false),

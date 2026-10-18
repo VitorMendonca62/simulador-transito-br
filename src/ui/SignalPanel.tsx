@@ -15,7 +15,8 @@ function streetOf(d: NetworkData, end: number): string {
 /** Nome curto do cruzamento: até duas ruas que chegam nele. */
 function signalLabel(d: NetworkData, def: SignalDef): string {
   const names = [...new Set(def.ends.map((e) => streetOf(d, e.end)))]
-  return names.length === 0 ? `Nó ${def.node}` : names.slice(0, 2).join(' × ')
+  const base = names.length === 0 ? `Nó ${def.node}` : names.slice(0, 2).join(' × ')
+  return def.ext != null ? `${base} · CTTU ${String(def.ext).padStart(3, '0')}` : base
 }
 
 /** Rótulo de direção: de onde o veículo vem (a = ângulo de deslocamento, Y para baixo). */

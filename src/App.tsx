@@ -8,6 +8,7 @@ import { BuildPanel, ErasePanel } from './ui/BuildPanel'
 import { SegmentPanel } from './ui/SegmentPanel'
 import { ZonePanel } from './ui/ZonePanel'
 import { LayerPanel } from './ui/LayerPanel'
+import { CttuSignalBox } from './ui/CttuSignalBox'
 import { SignalPanel } from './ui/SignalPanel'
 import { ScenarioPanel } from './ui/ScenarioPanel'
 import { SimPanel } from './ui/SimPanel'
@@ -101,6 +102,7 @@ export function App() {
             <section className="panel">
               <h2>Semáforo</h2>
               <p className="hint">Clique em qualquer ponto de uma via para colocar um semáforo (a via é dividida ali, com uma fase extra para pedestres). Clique num nó para ligar o semáforo dele. Depois ajuste as fases no modo Conversões; para remover, use <b>Remover semáforo</b>.</p>
+              <CttuSignalBox />
             </section>
           )}
           <SignalPanel />
@@ -133,7 +135,9 @@ export function App() {
           <span>{data.meta.counts.nodes.toLocaleString('pt-BR')} nós</span>
           <span>{data.meta.counts.segments.toLocaleString('pt-BR')} trechos</span>
           <span>{data.meta.counts.lanes.toLocaleString('pt-BR')} faixas</span>
-          <span>{data.meta.counts.signals} semáforos</span>
+          <span title={data.meta.signalSource === 'ext' ? 'Semáforos da base oficial da CTTU (dados.recife.pe.gov.br)' : 'Semáforos das tags do OpenStreetMap'}>
+            {data.meta.counts.signals} semáforos{data.meta.signalSource === 'ext' ? ' (CTTU)' : ''}
+          </span>
           <span>importado em {importMs.toFixed(0)} ms</span>
           <ZoomLabel />
           <PerfStats />

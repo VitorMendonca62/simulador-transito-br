@@ -57,6 +57,8 @@ export interface SignalDef {
   node: number
   /** id OSM do nó (estável entre reconstruções) */
   osm: number
+  /** código do semáforo na base externa (CTTU), quando os semáforos vêm dela */
+  ext?: number | null
   /** defasagem do ciclo (s) */
   offset: number
   phases: SignalPhase[]
@@ -70,6 +72,8 @@ export interface NetworkMeta {
   counts: { nodes: number; segments: number; lanes: number; connections: number; signals: number }
   names: string[]
   signals: SignalDef[]
+  /** origem dos semáforos: `ext` = base oficial da CTTU, `osm` = tags do OpenStreetMap */
+  signalSource?: 'ext' | 'osm'
 }
 
 export interface NetworkData {

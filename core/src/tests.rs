@@ -1443,3 +1443,83 @@ fn bridge_sharing_nodes_with_ground_road_is_separated() {
     assert_eq!(ends(3), vec![3], "rampa no mesmo nível segue conectada ao viaduto");
     assert!(n.net.meshes_ok());
 }
+
+/// Avenida de pista dupla (duas mãos a ~15 m) cortada por uma rua; semáforo OSM na rua, longe de tudo.
+const DUAL: &str = r#"<?xml version="1.0"?><osm version="0.6">
+ <node id="1" lat="-8.0600000" lon="-34.9100000"/><node id="2" lat="-8.0600000" lon="-34.9050000"/><node id="3" lat="-8.0600000" lon="-34.9000000"/>
+ <node id="11" lat="-8.0601350" lon="-34.9000000"/><node id="12" lat="-8.0601350" lon="-34.9050000"/><node id="13" lat="-8.0601350" lon="-34.9100000"/>
+ <node id="20" lat="-8.0580000" lon="-34.9050000"/><node id="21" lat="-8.0570000" lon="-34.9050000"><tag k="highway" v="traffic_signals"/></node>
+ <node id="22" lat="-8.0620000" lon="-34.9050000"/>
+ <way id="100"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="primary"/><tag k="oneway" v="yes"/><tag k="name" v="Av. A"/></way>
+ <way id="101"><nd ref="11"/><nd ref="12"/><nd ref="13"/><tag k="highway" v="primary"/><tag k="oneway" v="yes"/><tag k="name" v="Av. A"/></way>
+ <way id="102"><nd ref="21"/><nd ref="20"/><nd ref="2"/><nd ref="12"/><nd ref="22"/><tag k="highway" v="residential"/><tag k="name" v="Rua B"/></way>
+</osm>"#;
+
+fn ext(id: u32, lat: f64, lon: f64, cruzamento: bool) -> crate::extsig::ExtSignal {
+    crate::extsig::ExtSignal { id, lat, lon, cruzamento }
+}
+
+#[test]
+fn external_signals_replace_osm_ones() {
+    let osm = build_network(DUAL.as_bytes()).unwrap();
+    assert_eq!(osm.net.signals.len(), 1, "sem base externa fica o semáforo do OSM");
+
+    let pts = [
+        ext(7, -8.0600700, -34.9050600, true), // cruzamento: os dois nós da pista dupla (2 e 12)
+        ext(8, -8.0600675, -34.9080000, false), // travessia entre as mãos, longe de vértices
+    ];
+    let n = build_network_ext(DUAL.as_bytes(), &pts).unwrap();
+    let sig: Vec<&Node> = n.net.signals.iter().map(|s| &n.net.nodes[s.node as usize]).collect();
+    let ids: std::collections::HashSet<i64> = sig.iter().map(|n| n.osm_id).collect();
+    assert!(!ids.contains(&21), "semáforo do OSM removido");
+    assert!(ids.contains(&2) && ids.contains(&12), "os dois nós do cruzamento: {ids:?}");
+    let novos: Vec<&&Node> = sig.iter().filter(|n| n.osm_id >= 200 << 40).collect();
+    assert_eq!(novos.len(), 2, "um nó novo em cada mão da avenida");
+    assert!(novos.iter().all(|n| n.ends.len() == 2), "nós de trecho");
+    let m = n.ext_signals.as_ref().unwrap();
+    assert_eq!(m.get(&2), Some(&7));
+    assert!(novos.iter().all(|x| m.get(&x.osm_id) == Some(&8)));
+    let meta: serde_json::Value = serde_json::from_str(&n.meta_json()).unwrap();
+    assert_eq!(meta["signalSource"], "ext");
+}
+
+#[test]
+fn external_signals_outside_map_keep_osm() {
+    let n = build_network_ext(DUAL.as_bytes(), &[ext(1, -23.56, -46.65, true)]).unwrap();
+    assert!(n.ext_signals.is_none());
+    assert_eq!(n.net.signals.len(), 1);
+}
+
+/// Mapa real com a base da CTTU: `RECIFE_OSM=~/Downloads/mapa-recife.osm cargo test --release cttu_recife -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn cttu_recife() {
+    let Ok(path) = std::env::var("RECIFE_OSM") else { return };
+    let data = std::fs::read(path).unwrap();
+    let pts: Vec<crate::extsig::ExtSignal> = serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap();
+    let osm = build_network(&data).unwrap();
+    let t = std::time::Instant::now();
+    let n = build_network_ext(&data, &pts).unwrap();
+    let m = n.ext_signals.as_ref().unwrap();
+    let [x0, y0, x1, y1] = n.net.bounds;
+    let geo = n.net.geo;
+    let inside: Vec<u32> = pts
+        .iter()
+        .filter(|p| {
+            let (x, y) = ((p.lon - geo[1]) * geo[2], -(p.lat - geo[0]) * 111_319.490_793_273_57);
+            x >= x0 && x <= x1 && y >= y0 && y <= y1
+        })
+        .map(|p| p.id)
+        .collect();
+    let placed: std::collections::HashSet<u32> = n.net.signals.iter().filter_map(|s| m.get(&n.net.nodes[s.node as usize].osm_id).copied()).collect();
+    let missing: Vec<u32> = inside.iter().copied().filter(|i| !placed.contains(i)).collect();
+    println!(
+        "OSM: {} semáforos | CTTU: {} nós sinalizados, {} de {} pontos no mapa encaixados ({:.0} ms); sem encaixe: {:?}",
+        osm.net.signals.len(),
+        n.net.signals.len(),
+        placed.len(),
+        inside.len(),
+        t.elapsed().as_secs_f64() * 1e3,
+        missing
+    );
+}

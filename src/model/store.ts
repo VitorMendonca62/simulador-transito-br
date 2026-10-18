@@ -18,6 +18,7 @@ import {
   loadRoads,
   loadScenarios,
   loadSigConfigs,
+  loadSignalSource,
   loadMap,
   loadSegEdits,
   saveConnEdits,
@@ -26,6 +27,7 @@ import {
   saveRoads,
   saveScenarios,
   saveSigConfigs,
+  saveSignalSource,
   saveMap,
   saveSegEdits,
   segEditKey,
@@ -37,6 +39,7 @@ import {
   type ScenarioRec,
   type SegKeyTuple,
   type SigConfigs,
+  type SignalSource,
   type SegEdit,
   type SegEdits,
 } from './persistence'
@@ -82,6 +85,9 @@ interface State {
   /** matriz da Pesquisa OD importada (resumo para a interface) */
   odImport: { name: string; scale: number; merged: number; gateways: number; dropped: number } | null
   odImporting: boolean
+  /** origem dos semáforos: base oficial da CTTU (Recife) ou tags do OSM */
+  signalSource: SignalSource
+  signalsImporting: boolean
   selectedZone: number | null
   demand: DemandResult | null
   /** simulação de tráfego: ocioso, pausada ou rodando */
@@ -134,6 +140,8 @@ interface State {
   setOdScale: (scale: number) => void
   /** desliga a matriz importada (mantém as zonas, volta ao modelo gravitacional) */
   clearOdImport: () => void
+  /** troca os semáforos da rede: `cttu` = base oficial da CTTU no lugar dos do OSM; `osm` = volta aos do OSM */
+  setSignalSource: (src: SignalSource) => Promise<void>
   setLayer: (k: LayerKey, on: boolean) => void
   setMode: (m: EditMode) => void
   setScope: (s: EditScope) => void
@@ -209,13 +217,15 @@ let zoneRecord: Zone[] = []
 let paramsRecord: DemandParams = { ...DEFAULT_PARAMS }
 let odRecord: Record<string, number> = {}
 let odImportRecord: OdImport | null = null
+/** origem dos semáforos da rede (vai junto das edições para o núcleo) */
+let sigSourceRecord: SignalSource = 'osm'
 /** matriz fixada por hora enviada à simulação (só com importação ativa) */
 let odHourly: Record<string, number>[] | undefined
 let demandTimer = 0
 let demandSave = 0
 let cancelBenchFn: (() => void) | null = null
 const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
-const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord, priorities: prioRecord })
+const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord, priorities: prioRecord, signalSource: sigSourceRecord })
 export const getSegRecord = () => segRecord
 
 /** Registra (ou apaga, se voltou ao padrão) a edição da conversão `c` do nó carregado. */
@@ -371,12 +381,14 @@ export const useStore = create<State>((set, get) => {
         odRecord = {}
         odImportRecord = null
         odHourly = undefined
+        sigSourceRecord = 'osm'
         set({ selectedZone: null, demand: null })
       } else {
         connRecord = await loadConnEdits()
         prioRecord = await loadPrioEdits()
         segRecord = await loadSegEdits()
         sigRecord = await loadSigConfigs()
+        sigSourceRecord = await loadSignalSource()
         set({ scenarios: await loadScenarios() })
         roadRecord = await loadRoads()
         removedRecord = await loadRemoved()
@@ -390,6 +402,7 @@ export const useStore = create<State>((set, get) => {
       }
       const { data, ms } = await importMap(buffer, name, editPayload())
       if (persist) await saveMap(name, buffer)
+      set({ signalSource: sigSourceRecord })
       set({ fileName: name, importMs: ms, loading: false, selected: null, selectedSeg: null })
       install(data, { fit: true })
     } catch (e) {
@@ -473,6 +486,8 @@ export const useStore = create<State>((set, get) => {
     odManual: {},
     odImport: null,
     odImporting: false,
+    signalSource: 'osm',
+    signalsImporting: false,
     selectedZone: null,
     demand: null,
     sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false },
@@ -642,6 +657,31 @@ export const useStore = create<State>((set, get) => {
       syncOdImport()
       refreshDemand()
     },
+    setSignalSource: async (src) => {
+      if (!get().data || get().signalsImporting) return
+      const prev = sigSourceRecord
+      sigSourceRecord = src
+      set({ signalsImporting: true })
+      try {
+        const { data } = await editNetwork(editPayload())
+        // a CTTU só cobre o Recife: fora dele o núcleo mantém os semáforos do OSM
+        const got: SignalSource = data.meta.signalSource === 'ext' ? 'cttu' : 'osm'
+        sigSourceRecord = got
+        saveSignalSource(got)
+        install(data, { fit: false })
+        set({ signalSource: got })
+        if (src === 'cttu' && got !== 'cttu') get().notify('Nenhum semáforo da CTTU cai neste mapa (a base cobre só o Recife). Ficam os do OSM.')
+        else if (got === 'cttu') {
+          const ctrl = new Set(data.meta.signals.map((s) => s.ext).filter((x) => x != null)).size
+          get().notify(`${ctrl} semáforos da CTTU importados (${data.meta.signals.length} nós). Os do OSM foram removidos.`)
+        } else get().notify(`Semáforos do OSM restaurados (${data.meta.signals.length}).`)
+      } catch (e) {
+        sigSourceRecord = prev
+        set({ error: e instanceof Error ? e.message : String(e) })
+      } finally {
+        set({ signalsImporting: false })
+      }
+    },
     clearOdImport: () => {
       odImportRecord = null
       odRecord = {}
@@ -722,6 +762,9 @@ export const useStore = create<State>((set, get) => {
           prioRecord = { ...(sc.priorities ?? {}) }
           savePrioEdits({ ...prioRecord })
           sigRecord = Object.fromEntries((sc.signalConfigs ?? []).map((c) => [String(c.node), c]))
+          sigSourceRecord = sc.signalSource === 'cttu' ? 'cttu' : 'osm'
+          saveSignalSource(sigSourceRecord)
+          set({ signalSource: sigSourceRecord })
           roadRecord = sc.roads ?? []
           removedRecord = sc.removed ?? []
           history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
@@ -932,7 +975,7 @@ export const useStore = create<State>((set, get) => {
 
     exportScenario: () => {
       const { data, fileName } = get()
-      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...prioRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord })
+      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...prioRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord }, sigSourceRecord)
     },
     notify: (msg) => {
       set({ toast: msg })

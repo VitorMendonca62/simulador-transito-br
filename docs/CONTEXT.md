@@ -27,7 +27,7 @@ Referência visual: fundo escuro com grid, asfalto cinza-escuro, nós como círc
 | UI | **Vite + TypeScript + React** (React só para painéis; motor do mapa fora do React) |
 | Núcleo | **Rust → WebAssembly** (`core/`, wasm-pack, roda em Web Worker): parse OSM/PBF, grafo, faixas/conexões, geometria, depois simulação |
 | Escala | Bairro/região (dezenas de milhares de nós), processado no navegador |
-| Semáforos | **Somente do OSM** (`highway=traffic_signals`) na fase 1; add/remover manual na fase 2 |
+| Semáforos | Padrão: tags `highway=traffic_signals` do OSM. Botão **Importar semáforos da CTTU** (modo Semáforo) troca pela base oficial (`public/data/semaforos_cttu.json`, gerada por `scripts/semaforos_recife/`), encaixada nos nós por `core/src/extsig.rs`; a escolha vai nas edições (`signalSource`), no autosave e nos cenários. Fora do Recife ficam os do OSM. Tempos/fases continuam sintéticos (a CTTU não publica planos) |
 | Persistência | Cenário em **JSON versionado** exportável + **autosave em IndexedDB**; sem backend por enquanto |
 | Regras BR | Amarelo separa sentidos opostos; branco separa faixas do mesmo sentido; ciclo verde/amarelo/vermelho; rotatórias (`junction=roundabout`, prioridade de quem circula); faixas de ônibus (`busway`, `lanes:bus`) |
 

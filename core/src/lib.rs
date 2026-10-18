@@ -3,6 +3,7 @@
 
 pub mod conn;
 pub mod demand;
+pub mod extsig;
 pub mod geo;
 pub mod net;
 pub mod osm;
@@ -29,6 +30,8 @@ pub struct Network {
     sim: Option<sim::Sim>,
     /// conexões por nó só sob demanda (a interface pede ao selecionar); desligado nos testes
     lazy: bool,
+    /// semáforos de base externa (nó OSM -> id externo); `None` = semáforos do próprio OSM
+    ext_signals: Option<std::collections::HashMap<i64, u32>>,
 }
 
 fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool) -> Result<Net, String> {
@@ -40,24 +43,30 @@ fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool) -
     Ok(net)
 }
 
-fn build_network_with(data: &[u8], lazy: bool) -> Result<Network, String> {
-    let raw = osm::parse(data)?;
+fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal]) -> Result<Network, String> {
+    let mut raw = osm::parse(data)?;
+    let ext_signals = if ext.is_empty() { None } else { extsig::replace_signals(&mut raw, ext) };
     let edits = Edits::default();
     let base = BaseCache::new(&raw)?;
     let net = build_parts(&raw, &base, &edits, lazy)?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
-    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy })
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals })
 }
 
 /// Rede com conexões por nó sob demanda (como no navegador).
 pub fn build_network_lazy(data: &[u8]) -> Result<Network, String> {
-    build_network_with(data, true)
+    build_network_with(data, true, &[])
+}
+
+/// Como `build_network`, com os semáforos do OSM trocados pelos da base externa (quando ela cobre o mapa).
+pub fn build_network_ext(data: &[u8], ext: &[extsig::ExtSignal]) -> Result<Network, String> {
+    build_network_with(data, false, ext)
 }
 
 /// Rede com todas as conexões calculadas (testes, simulação).
 pub fn build_network(data: &[u8]) -> Result<Network, String> {
-    build_network_with(data, false)
+    build_network_with(data, false, &[])
 }
 
 impl Network {
@@ -121,7 +130,15 @@ impl Network {
 
 #[wasm_bindgen]
 pub fn import_osm(data: &[u8]) -> Result<Network, JsError> {
-    build_network_with(data, true).map_err(|e| JsError::new(&e))
+    build_network_with(data, true, &[]).map_err(|e| JsError::new(&e))
+}
+
+/// Importa trocando os semáforos do OSM pelos da base externa. JSON: lista de `{id, lat, lon, cruzamento}`.
+/// Se nenhum ponto cai no mapa, ficam os do OSM.
+#[wasm_bindgen]
+pub fn import_osm_signals(data: &[u8], signals_json: &str) -> Result<Network, JsError> {
+    let ext: Vec<extsig::ExtSignal> = serde_json::from_str(signals_json).map_err(|e| JsError::new(&format!("semáforos inválidos: {e}")))?;
+    build_network_with(data, true, &ext).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen]
@@ -135,6 +152,7 @@ impl Network {
                 json!({
                     "node": s.node,
                     "osm": n.nodes[s.node as usize].osm_id as f64,
+                    "ext": self.ext_signals.as_ref().and_then(|m| m.get(&n.nodes[s.node as usize].osm_id)),
                     "offset": s.offset,
                     "phases": s.phases.iter().map(|p| json!({"green": p.green, "yellow": p.yellow, "allRed": p.all_red, "ends": p.ends})).collect::<Vec<_>>(),
                     "ends": s.ends.iter().map(|e| json!({"end": e.end, "key": e.key, "x": e.pos[0], "y": e.pos[1], "a": e.angle})).collect::<Vec<_>>(),
@@ -147,6 +165,7 @@ impl Network {
             "counts": {"nodes": n.nodes.len(), "segments": n.segs.len(), "lanes": n.lanes.len(), "connections": n.conns.len(), "signals": n.signals.len()},
             "names": n.names,
             "signals": signals,
+            "signalSource": if self.ext_signals.is_some() { "ext" } else { "osm" },
         })
         .to_string()
     }

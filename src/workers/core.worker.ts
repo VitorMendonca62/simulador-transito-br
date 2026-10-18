@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { import_osm, type Network } from '../../core/pkg/core.js'
+import init, { import_osm, import_osm_signals, type Network } from '../../core/pkg/core.js'
 import type { NetworkData, NetworkMeta, SimStats, TileData, TileUpdate, WorkerIn, WorkerOut } from '../model/types'
 
 let ready: Promise<unknown> | null = null
@@ -7,6 +7,31 @@ let ready: Promise<unknown> | null = null
 let current: Network | null = null
 /** bytes do mapa importado, para criar redes extras (execução headless de cenários) */
 let sourceBytes: Uint8Array | null = null
+
+/**
+ * Semáforos oficiais da CTTU (gerados por scripts/semaforos_recife/gerar_semaforos.py). Quando as edições pedem
+ * `signalSource: "cttu"`, substituem os `highway=traffic_signals` do OSM; fora do Recife nenhum ponto cai no mapa
+ * e ficam os do OSM.
+ */
+const CTTU_URL = `${import.meta.env.BASE_URL}data/semaforos_cttu.json`
+let cttuSignals: Promise<string> | null = null
+const loadCttu = () =>
+  (cttuSignals ??= fetch(new URL(CTTU_URL, self.location.origin)).then((r) => {
+    if (!r.ok) throw new Error(`não foi possível ler ${CTTU_URL} (${r.status})`)
+    return r.text()
+  })).catch((e) => {
+    cttuSignals = null
+    throw e
+  })
+
+/** Origem dos semáforos pedida nas edições (JSON do núcleo). */
+const sourceOf = (edits?: string): 'osm' | 'cttu' => (edits && /"signalSource"\s*:\s*"cttu"/.test(edits) ? 'cttu' : 'osm')
+/** origem com que `current` foi montada */
+let currentSource: 'osm' | 'cttu' = 'osm'
+
+async function importNet(bytes: Uint8Array, source: 'osm' | 'cttu'): Promise<Network> {
+  return source === 'cttu' ? import_osm_signals(bytes, await loadCttu()) : import_osm(bytes)
+}
 
 /** Ladrilhos sujos: buffers concatenados fatiados por visões (sem cópia), um conjunto de malhas por ladrilho. */
 function extractTiles(net: Network): TileUpdate {
@@ -191,7 +216,7 @@ async function runBench(msg: Extract<WorkerIn, { type: 'bench' }>) {
   try {
     if (!sourceBytes) throw new Error('Nenhum mapa carregado')
     await ready
-    net = import_osm(sourceBytes)
+    net = await importNet(sourceBytes, sourceOf(msg.edits))
     net.apply_edits(msg.edits)
     net.sim_init(msg.sim)
     const total = Math.round((msg.minutes * 60) / SIM_DT)
@@ -349,10 +374,19 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     if (msg.type === 'import') {
       current?.free()
       sourceBytes = new Uint8Array(msg.buffer)
-      current = import_osm(sourceBytes)
+      currentSource = sourceOf(msg.edits)
+      current = await importNet(sourceBytes, currentSource)
       if (msg.edits && msg.edits !== '[]') current.apply_edits(msg.edits)
     } else if (msg.type === 'edit') {
-      if (!current) throw new Error('Nenhum mapa carregado')
+      if (!current || !sourceBytes) throw new Error('Nenhum mapa carregado')
+      const src = sourceOf(msg.edits)
+      if (src !== currentSource) {
+        // os semáforos externos mudam os nós da rede bruta: remonta a partir dos bytes do mapa
+        const next = await importNet(sourceBytes, src)
+        current.free()
+        current = next
+        currentSource = src
+      }
       current.apply_edits(msg.edits)
     } else return
     const data = extract(current)
