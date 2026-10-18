@@ -222,6 +222,13 @@ fn lc_block_text(c: u8) -> &'static str {
     }
 }
 
+/// zíper: folga (s) entre chegadas ao ponto de convergência e espera (s) a partir da qual a outra corrente cede
+const MERGE_GAP: f32 = 1.0;
+const MERGE_WAIT: f32 = 2.0;
+/// abaixo desta velocidade (m/s) a corrente está em fila e alterna um a um; acima, só cede após `MERGE_COURTESY` s de espera
+const MERGE_SLOW: f32 = 5.0;
+const MERGE_COURTESY: f32 = 20.0;
+
 /// MOBIL: polidez (peso do incômodo aos outros), limiar (m/s²), viés de manter a direita, freada máxima imposta ao novo seguidor
 const MOBIL_P: f32 = 0.3;
 const MOBIL_TH: f32 = 0.2;
@@ -288,6 +295,11 @@ pub struct Sim {
     pseed: Vec<u32>,
     /// instante em que o veículo chegaria ao fim da faixa atual em fluxo livre (base do atraso por conversão)
     t_due: Vec<f32>,
+    /// instante em que a viagem foi pedida (entra na fila de entrada) e se o veículo já saiu da faixa onde nasceu
+    t_req: Vec<f32>,
+    left_gate: Vec<bool>,
+    /// por zona de origem: (espera na fila de entrada, tempo na faixa de nascimento, veículos) — diagnóstico das divisas
+    pub entry_stats: Vec<(f64, f64, u32)>,
     dists: Vec<Vec<f32>>,
     zone_ids: Vec<i64>,
     zone_poly: Vec<Vec<[f64; 2]>>,
@@ -563,6 +575,9 @@ impl Sim {
             app: Vec::new(),
             pseed: Vec::new(),
             t_due: Vec::new(),
+            t_req: Vec::new(),
+            left_gate: Vec::new(),
+            entry_stats: vec![(0.0, 0.0, 0); nz],
             dists,
             zone_ids: init.zones.iter().map(|z| z.id).collect(),
             zone_poly: init.zones.iter().map(|z| z.poly.clone()).collect(),
@@ -729,6 +744,33 @@ impl Sim {
         }
     }
 
+    /// Diagnóstico das entradas por zona: espera média na fila de entrada, tempo médio até sair da faixa de nascimento,
+    /// fila atual e faixas de origem.
+    pub fn gate_report(&self, net: &Net) -> String {
+        let _ = net;
+        let mut out = String::new();
+        for z in 0..self.zone_ids.len() {
+            let (qw, lt, k) = self.entry_stats[z];
+            let queued: usize = self.gates[z].iter().map(|&g| self.pending[g as usize].len()).sum();
+            if k == 0 && queued == 0 {
+                continue;
+            }
+            let on_gate: usize = self.gates[z].iter().map(|&g| self.edge_veh[g as usize].len()).sum();
+            out += &format!(
+                "zona {}{}: {} saíram da faixa de origem, espera na fila {:.0} s, tempo na faixa de origem {:.0} s, fila agora {}, na faixa de origem agora {} ({} faixas de origem)\n",
+                self.zone_ids[z],
+                if self.zone_gateway[z] { " (portal)" } else { "" },
+                k,
+                if k > 0 { qw / k as f64 } else { 0.0 },
+                if k > 0 { lt / k as f64 } else { 0.0 },
+                queued,
+                on_gate,
+                self.gates[z].len()
+            );
+        }
+        out
+    }
+
     /// Tempo (s) para percorrer o resto da faixa `l` a partir de `s` em fluxo livre (mesma base do roteador).
     fn free_left(&self, l: usize, s: f32) -> f32 {
         let ln = &self.lanes[l];
@@ -841,7 +883,7 @@ impl Sim {
 
     // ------------------------------------------------------------------ veículos
 
-    fn spawn_vehicle(&mut self, lane: u32, origin: u16, dest: u16, kind: u8) -> bool {
+    fn spawn_vehicle(&mut self, lane: u32, origin: u16, dest: u16, kind: u8, t_req: f32) -> bool {
         let Some(tree) = self.pick_target(dest as usize, lane as usize) else { return false };
         let drv = Drv { tgt: tree as usize, kind, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32 };
         // nasce na faixa do mesmo trecho que melhor leva ao destino escolhido
@@ -929,6 +971,8 @@ impl Sim {
                 self.app.push(false);
                 self.pseed.push(0);
                 self.t_due.push(0.0);
+                self.t_req.push(0.0);
+                self.left_gate.push(false);
                 self.tgt.push(0);
                 i
             }
@@ -963,6 +1007,8 @@ impl Sim {
         self.mand[id] = false;
         self.insert_sorted(lane, id);
         self.t_due[id] = self.time as f32 + self.free_left(lane as usize, s0);
+        self.t_req[id] = t_req;
+        self.left_gate[id] = false;
         self.metrics.entered(self.lanes[lane as usize].dirseg as usize);
         self.n_alive += 1;
         self.stats.spawned += 1;
@@ -1119,8 +1165,9 @@ impl Sim {
         if local.1 != NONE {
             return local;
         }
-        // dentro da zona e sem caminho por dentro até o ponto: sai no próximo nó dela
-        if self.lane_zone[l] == t.zone && self.sink[t.zone as usize][lane.to_node as usize] {
+        // chegou a um nó da zona de destino e não há caminho por dentro dela até o ponto sorteado: sai aqui (ex.: portal
+        // da divisa que cobre as duas pistas — o ponto sorteado pode ser a ponta da outra pista, inalcançável)
+        if self.sink[t.zone as usize][lane.to_node as usize] {
             return (0.0, SINK);
         }
         other
@@ -1297,23 +1344,45 @@ impl Sim {
             // fusão sem placa nem semáforo e de mesma hierarquia: zíper (quem chega primeiro entra), sem prioridade fixa à direita
             let zip = cf.merge && !signaled && me.rank == o.rank;
             if zip || !self.has_priority(me, o, signaled) {
-                // convergência na mesma faixa sem preferência: quem chega primeiro entra (desempate pelo id)
+                // convergência na mesma faixa sem preferência (zíper): em movimento, entra quem chega primeiro ao ponto,
+                // com uma folga; quem já está parado esperando entra quando o próximo da outra corrente ainda consegue
+                // frear com conforto — esse cede (senão, num fluxo contínuo, quem espera nunca entraria)
                 if cf.merge && !signaled_green_streams(signaled, me, o) {
-                    let t_me = (d_end + cf.s_me) / v_me;
+                    let t_me = t_reach(d_end + cf.s_me).min((d_end + cf.s_me) / v_me);
+                    let queued = self.wait[id] > MERGE_WAIT;
                     let blocked = self.edge_veh[cf.other as usize].iter().find(|&&j| {
                         let j = j as usize;
+                        if self.s[j] - self.vlen[j] > cf.s_other + 1.0 {
+                            return false; // já passou do ponto
+                        }
                         let t_j = ((cf.s_other - self.s[j]).max(0.0)) / self.v[j].max(2.0);
-                        t_j < t_me || (t_j == t_me && cf.other < cc)
+                        t_j < t_me + MERGE_GAP || (t_j == t_me && cf.other < cc)
                     }).or_else(|| self.edge_veh[o.from as usize].iter().rev().take(2).find(|&&j| {
                         let j = j as usize;
                         if self.v[j] < 0.5 {
                             return false; // parado na linha: a ordem de espera (acima) arbitra
                         }
-                        let t_j = (self.lanes[o.from as usize].len - self.s[j] + cf.s_other) / self.v[j].max(2.0);
-                        t_j < t_me || (t_j == t_me && cf.other < cc)
+                        let d_j = self.lanes[o.from as usize].len - self.s[j];
+                        let can_stop = self.v[j] * self.v[j] / (2.0 * self.bcomf[j]) + 3.0 < d_j;
+                        // cede a quem espera: em fila (corrente lenta) alterna um a um; em fluxo livre só depois de muita espera
+                        if can_stop && ((queued && self.v[j] < MERGE_SLOW) || self.wait[id] > MERGE_COURTESY) {
+                            return false;
+                        }
+                        let t_j = (d_j + cf.s_other) / self.v[j].max(2.0);
+                        t_j < t_me + MERGE_GAP || (t_j == t_me && cf.other < cc)
                     })).copied();
                     if let Some(j) = blocked {
                         { REASON.with(|r| r.set(6)); BLOCKER.with(|b| b.set(j as i64)); return false; }
+                    }
+                    // eu ainda posso frear e alguém da outra corrente está parado esperando há mais tempo: cedo a vez
+                    if self.v[id] * self.v[id] / (2.0 * self.bcomf[id]) + 3.0 < d_end {
+                        let slow = self.v[id] < MERGE_SLOW;
+                        if let Some(&k) = self.edge_veh[o.from as usize].last() {
+                            let k = k as usize;
+                            if self.choice[k] == cf.other && self.v[k] < 0.5 && self.wait[k] > self.wait[id] && ((slow && self.wait[k] > MERGE_WAIT) || self.wait[k] > MERGE_COURTESY) {
+                                { REASON.with(|r| r.set(6)); BLOCKER.with(|b| b.set(k as i64)); return false; }
+                            }
+                        }
                     }
                 }
                 continue;
@@ -1663,6 +1732,14 @@ impl Sim {
                 self.s[i] = over;
                 self.insert_sorted(cc, i);
                 self.sample_conn_delay(cc as usize - self.nl, self.time as f32 - self.t_due[i]);
+                if !self.left_gate[i] {
+                    self.left_gate[i] = true;
+                    let o = self.origin[i] as usize;
+                    let st = &mut self.entry_stats[o];
+                    st.0 += (self.t_spawn[i] - self.t_req[i]).max(0.0) as f64;
+                    st.1 += (self.time as f32 - self.t_spawn[i]) as f64;
+                    st.2 += 1;
+                }
                 self.multi.push(cc);
             } else {
                 let c = &self.conns[e - self.nl];
@@ -1996,8 +2073,8 @@ impl Sim {
         let nz = self.zone_ids.len();
         // filas de entrada (primeiro as pendentes)
         for g in 0..self.pending.len() {
-            while let Some(&(origin, dest, kind, _)) = self.pending[g].front() {
-                if self.spawn_vehicle(g as u32, origin as u16, dest, kind) {
+            while let Some(&(origin, dest, kind, t_req)) = self.pending[g].front() {
+                if self.spawn_vehicle(g as u32, origin as u16, dest, kind, t_req) {
                     self.pending[g].pop_front();
                     self.stats.queued = self.stats.queued.saturating_sub(1);
                 } else {
@@ -2027,7 +2104,7 @@ impl Sim {
                         continue;
                     }
                     let kind = if (self.rng.f() as f64) < self.params.bus_share / 100.0 { 1 } else { 0 };
-                    if !self.spawn_vehicle(gate, i as u16, j as u16, kind) {
+                    if !self.spawn_vehicle(gate, i as u16, j as u16, kind, self.time as f32) {
                         if self.pending[gate as usize].len() < 200 {
                             self.pending[gate as usize].push_back((i as u32, j as u16, kind, self.time as f32));
                             self.stats.queued += 1;

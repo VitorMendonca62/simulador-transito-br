@@ -1357,6 +1357,70 @@ fn conn_dump() {
     }
 }
 
+/// Vazão de entrada pelos portais da divisa num mapa real. `PERF_OSM=mapa cargo test --release gateway_entry_flow -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn gateway_entry_flow() {
+    use crate::net::*;
+    let data = std::fs::read(std::env::var("PERF_OSM").unwrap()).unwrap();
+    let mut n = build_network_lazy_for_test(&data);
+    n.ensure_conns();
+    let rate: f64 = std::env::var("GATE_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(1800.0);
+    // pontas da rede em vias principais com 2+ faixas entrando no mapa
+    let mut ends: Vec<(usize, usize)> = Vec::new();
+    for (ni, nd) in n.net.nodes.iter().enumerate() {
+        if nd.ends.len() != 1 {
+            continue;
+        }
+        let e = nd.ends[0];
+        let s = &n.net.segs[(e >> 1) as usize];
+        let (_, outs) = n.net.approach_lanes(e);
+        if s.hw <= HW_PRIMARY && outs.len() >= 2 && s.poly.length() > 60.0 {
+            ends.push((ni, outs.len()));
+        }
+    }
+    ends.sort_by_key(|x| std::cmp::Reverse(x.1));
+    ends.truncate(4);
+    // portais escolhidos à mão: GATE_NODES=osm1,osm2 (raio GATE_R m)
+    if let Ok(v) = std::env::var("GATE_NODES") {
+        let ids: Vec<i64> = v.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        ends = (0..n.net.nodes.len()).filter(|&i| ids.contains(&n.net.nodes[i].osm_id)).map(|i| (i, 0)).collect();
+    }
+    let gate_r: f64 = std::env::var("GATE_R").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+    let sq = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let mut zones = Vec::new();
+    let mut od = Vec::new();
+    for (k, &(ni, lanes)) in ends.iter().enumerate() {
+        let id = 1001 + k;
+        eprintln!("portal {id}: nó osm {} ({} faixas entrando) '{}'", n.net.nodes[ni].osm_id, lanes, n.net.nodes[ni].ends.first().map(|&e| n.net.names.get(n.net.segs[(e >> 1) as usize].name as usize).cloned().unwrap_or_default()).unwrap_or_default());
+        let out = std::env::var("GATE_DIR").map_or(false, |v| v == "out");
+        zones.push(format!(r#"{{"id":{id},"gen":{rate},"attr":1,"gateway":true,"poly":{}}}"#, sq(n.net.nodes[ni].pos, gate_r)));
+        od.push(if out { format!(r#""2>{id}":{rate}"#) } else { format!(r#""{id}>2":{rate}"#) });
+    }
+    let b = n.net.bounds;
+    let c = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+    zones.push(format!(r#"{{"id":2,"gen":{},"attr":1,"poly":{}}}"#, rate * 4.0, sq(c, 2500.0)));
+    let json = format!(r#"{{"zones":[{}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0,"odManual":{{{}}}}}}}"#, zones.join(","), od.join(","));
+    n.start_sim(&json).unwrap();
+    let mins: usize = std::env::var("GATE_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
+    for m in 1..=mins {
+        for _ in 0..300 {
+            n.sim.as_mut().unwrap().step(&n.net);
+        }
+        if m % 5 == 0 {
+            let s = n.sim.as_ref().unwrap();
+            eprintln!("min {m:>2}: gerados {} (esperado {:.0}) fila de entrada {} vivos {} concluídos {}", s.stats.spawned, rate * ends.len() as f64 * m as f64 / 60.0, s.stats.queued, s.n_alive, s.stats.finished);
+        }
+    }
+    eprintln!("{}", n.sim.as_mut().unwrap().gate_report(&n.net));
+    let s = n.sim.as_mut().unwrap();
+    let r = s.report(&n.net);
+    eprintln!("atraso médio (todos) {} s; perdidos {}", r["meanDelayAll"], s.stats.lost);
+    for l in s.stuck_report(&n.net, std::env::var("STUCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0)).iter().take(25) {
+        eprintln!("PRESO {l}");
+    }
+}
+
 /// Viaduto (layer=1) que no OSM compartilha nós com a rotatória do térreo: os níveis não se conectam,
 /// mas a rampa que termina no viaduto continua ligada a ele.
 #[test]
