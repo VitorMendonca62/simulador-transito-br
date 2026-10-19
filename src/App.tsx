@@ -3,7 +3,7 @@ import { MapView } from './engine/MapView'
 import { viewRef } from './engine/instance'
 import { getSegRecord, useStore } from './model/store'
 import { useShallow } from 'zustand/react/shallow'
-import { Dock } from './ui/Dock'
+import { Dock, SimDock } from './ui/Dock'
 import { PerfStats } from './ui/PerfStats'
 import { pickFile, Toolbar } from './ui/Toolbar'
 import { RecifeDialog } from './ui/RecifeDialog'
@@ -106,6 +106,7 @@ export function App() {
       <Toolbar />
 
       {data && <Dock />}
+      {data && <SimDock />}
 
       {!data && !loading && (
         <div className="empty">

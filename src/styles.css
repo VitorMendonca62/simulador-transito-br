@@ -405,3 +405,12 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
 .scale { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-variant-numeric: tabular-nums; }
 .scale i { display: inline-block; height: 6px; border: 1.5px solid var(--text); border-top: 0; }
 .scale em { font-style: normal; color: var(--dim); }
+
+/* simulação fixa à esquerda (acima da barra de status) */
+.drawer.sim-dock { left: 12px; right: auto; width: 340px; max-height: calc(100% - 150px); }
+.drawer.sim-dock.closed { width: 220px; }
+.drawer.sim-dock.closed .drawer-head { padding-bottom: 12px; }
+@media (max-width: 760px) {
+  .drawer.sim-dock { top: 120px; bottom: auto; left: 12px; right: 12px; width: auto; max-height: 35%; }
+  .drawer.sim-dock.closed { width: auto; }
+}

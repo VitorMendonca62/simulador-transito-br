@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useStore, type EditMode } from '../model/store'
 import { BuildPanel, ErasePanel } from './BuildPanel'
 import { CttuSignalBox } from './CttuSignalBox'
-import { IconClose, IconCompare, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
+import { IconChevron, IconClose, IconCompare, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
 import { Inspector } from './Inspector'
 import { LayerPanel } from './LayerPanel'
 import { ScenarioPanel } from './ScenarioPanel'
@@ -12,7 +12,7 @@ import { SignalPanel } from './SignalPanel'
 import { SimPanel } from './SimPanel'
 import { DemandParamsPanel, ZonePanel } from './ZonePanel'
 
-export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'sim' | 'scenarios' | 'layers'
+export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'scenarios' | 'layers'
 
 type Item = {
   id: DockId
@@ -24,7 +24,7 @@ type Item = {
   guide: ReactNode
 }
 
-/** Ordem: editar a malha (conversões, faixas, obras, semáforos), demanda e simulação, depois a vista. */
+/** Ordem: editar a malha (conversões, faixas, obras, semáforos), demanda e cenários, depois a vista. A simulação fica à esquerda (`SimDock`). */
 const ITEMS: Item[] = [
   {
     id: 'turns',
@@ -76,12 +76,6 @@ const ITEMS: Item[] = [
     guide: <>Desenhe zonas de geração e atração de viagens no mapa (clique nos vértices) ou importe as da Pesquisa OD 2018.</>,
   },
   {
-    id: 'sim',
-    label: 'Simulação',
-    icon: IconSim,
-    guide: <>Inicie a simulação depois de ter zonas de demanda. Em <b>Parâmetros de demanda</b>, ajuste a hora e o comportamento dos motoristas. Clique num veículo no mapa para acompanhá-lo.</>,
-  },
-  {
     id: 'scenarios',
     label: 'Cenários A/B',
     icon: IconCompare,
@@ -131,13 +125,6 @@ function Body({ id }: { id: DockId }) {
       )
     case 'zones':
       return <ZonePanel />
-    case 'sim':
-      return (
-        <>
-          <SimPanel />
-          <DemandParamsPanel />
-        </>
-      )
     case 'scenarios':
       return <ScenarioPanel />
     case 'layers':
@@ -165,7 +152,7 @@ export function Dock() {
       <nav className="rail" aria-label="Ferramentas">
         {ITEMS.map((it, k) => (
           <span key={it.id} className="rail-slot">
-            {(k === 4 || k === 7) && <span className="rail-sep" aria-hidden="true" />}
+            {(k === 4 || k === 6) && <span className="rail-sep" aria-hidden="true" />}
             <button className="rail-btn" aria-pressed={open === it.id} aria-label={it.label} data-tip={it.label} onClick={() => toggle(it)}>
               <it.icon size={20} />
               {active === it.id && open !== it.id && <i className="rail-on" title="Ferramenta ativa no mapa" aria-hidden="true" />}
@@ -191,5 +178,52 @@ export function Dock() {
         </aside>
       )}
     </>
+  )
+}
+
+const SIM_OPEN_KEY = 'sim-dock-open'
+
+/** Simulação sempre à mão, no lado esquerdo; pode ser recolhida (a escolha fica neste navegador). */
+export function SimDock() {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(SIM_OPEN_KEY) !== '0'
+    } catch {
+      return true
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIM_OPEN_KEY, open ? '1' : '0')
+    } catch {
+      /* armazenamento indisponível: só não lembra */
+    }
+  }, [open])
+  return (
+    <aside className={`drawer sim-dock${open ? '' : ' closed'}`} aria-label="Simulação">
+      <header className="drawer-head">
+        <span className="drawer-ico">
+          <IconSim size={18} />
+        </span>
+        <h1>Simulação</h1>
+        <button className="x-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? 'Recolher simulação' : 'Abrir simulação'} title={open ? 'Recolher' : 'Abrir'}>
+          <span style={{ display: 'grid', transform: open ? 'rotate(180deg)' : undefined }}>
+            <IconChevron size={16} />
+          </span>
+        </button>
+      </header>
+      {open && (
+        <>
+          <p className="guide">
+            Inicie a simulação depois de ter zonas de demanda. Em <b>Parâmetros de demanda</b>, ajuste a hora e o comportamento dos motoristas. Clique num veículo no mapa
+            para acompanhá-lo.
+          </p>
+          <div className="drawer-body">
+            <SimPanel />
+            <DemandParamsPanel />
+          </div>
+        </>
+      )}
+    </aside>
   )
 }

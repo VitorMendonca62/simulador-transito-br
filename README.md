@@ -39,7 +39,7 @@ No app, clique em **Recife**. O mapa da cidade já vem com o projeto, e o app pe
 - as **zonas de demanda da Pesquisa OD 2018**, com a matriz de viagens de carro;
 - os **semáforos oficiais da CTTU**, no lugar dos do OpenStreetMap.
 
-Depois abra **Simulação** no trilho da direita e clique em **Iniciar**. A simulação começa às 05:00 e segue o perfil horário da pesquisa.
+Depois clique em **Iniciar** no painel **Simulação**, à esquerda. A simulação começa às 05:00 e segue o perfil horário da pesquisa.
 
 Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.openstreetmap.org/export) ou baixe um recorte `.pbf` (Geofabrik, BBBike) e use **Importar → Mapa**.
 
@@ -79,6 +79,8 @@ Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.o
 | **Exportar cenário** | Baixa um `.json` com todas as edições. |
 | **+ / − / Ajustar** | Zoom e enquadrar o mapa inteiro. A escala aparece no rodapé. |
 
+**Painel Simulação, à esquerda.** Fica sempre aberto (pode ser recolhido): iniciar, pausar, velocidade (1× a 30×), mapa de calor, gráficos e os **parâmetros de demanda** (hora, ônibus, app de navegação, infrações).
+
 **Trilho da direita.** Cada ícone abre um painel com instruções no topo. Os ícones de edição também ligam a ferramenta correspondente no mapa.
 
 | Painel | Para quê |
@@ -88,7 +90,6 @@ Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.o
 | **Construção e demolição** | Alterne entre **Construir** (clique para cada ponto da via nova) e **Demolir** (clique no trecho). |
 | **Semáforos** | Lista com busca por rua ou código CTTU. Clique num semáforo, na lista ou no mapa, para ver ciclo, fases e quando cada aproximação tem verde. **Colocar semáforo** cria um semáforo onde você clicar. |
 | **Zonas de demanda** | Desenhe zonas ou importe as da Pesquisa OD 2018; veja a matriz OD e as entradas e saídas na divisa. |
-| **Simulação** | Iniciar, pausar, velocidade (1× a 30×), mapa de calor, gráficos e os **parâmetros de demanda** (hora, ônibus, app de navegação, infrações). |
 | **Cenários A/B** | Salve, altere e compare cenários. |
 | **Camadas** | Liga e desliga vias, sinalização, nomes, nós, semáforos, veículos, zonas e grade. |
 
