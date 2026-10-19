@@ -3,28 +3,45 @@ import { MapView } from './engine/MapView'
 import { viewRef } from './engine/instance'
 import { getSegRecord, useStore } from './model/store'
 import { useShallow } from 'zustand/react/shallow'
-import { Inspector } from './ui/Inspector'
-import { BuildPanel, ErasePanel } from './ui/BuildPanel'
-import { SegmentPanel } from './ui/SegmentPanel'
-import { ZonePanel } from './ui/ZonePanel'
-import { LayerPanel } from './ui/LayerPanel'
-import { CttuSignalBox } from './ui/CttuSignalBox'
-import { SignalPanel } from './ui/SignalPanel'
-import { ScenarioPanel } from './ui/ScenarioPanel'
-import { SimPanel } from './ui/SimPanel'
+import { Dock } from './ui/Dock'
 import { PerfStats } from './ui/PerfStats'
-import { Toolbar } from './ui/Toolbar'
+import { pickFile, Toolbar } from './ui/Toolbar'
+import { RecifeDialog } from './ui/RecifeDialog'
+import { IconMap, IconPin } from './ui/Icons'
 
-/** Só este componente assina o zoom: o pan (zoom igual) não re-renderiza o resto da tela. */
-function ZoomLabel() {
-  const zoom = useStore((s) => Math.round(s.zoom * 100) / 100)
-  return <span>{zoom.toFixed(2)} px/m</span>
+/** Comprimento redondo (1, 2 ou 5 × 10ⁿ m) que ocupa até ~110 px na tela. */
+function niceLength(pxPerM: number): number {
+  const max = 110 / pxPerM
+  const p = 10 ** Math.floor(Math.log10(max))
+  return [5, 2, 1].map((k) => k * p).find((v) => v <= max) ?? p
+}
+
+const fmtDist = (m: number) => (m >= 1000 ? `${(m / 1000).toLocaleString('pt-BR')} km` : `${m.toLocaleString('pt-BR')} m`)
+
+/** Escala do mapa: barra com distância redonda e razão 1:N (tela a 96 px por polegada, 1 px = 0,2646 mm).
+ * Só este componente assina o zoom: o pan (zoom igual) não re-renderiza o resto da tela. */
+function ScaleBar() {
+  // 3 algarismos significativos: muda pouco no zoom contínuo, mas não perde precisão longe
+  const zoom = useStore((s) => (s.zoom > 0 ? Number(s.zoom.toPrecision(3)) : 0))
+  if (!(zoom > 0)) return null
+  const len = niceLength(zoom)
+  const denom = 1 / zoom / 0.000264583
+  const round = 10 ** Math.max(0, Math.floor(Math.log10(denom)) - 1)
+  const ratio = Math.round(denom / round) * round
+  return (
+    <span className="scale" title={`${zoom.toLocaleString('pt-BR')} px por metro na tela`}>
+      <i style={{ width: `${len * zoom}px` }} />
+      {fmtDist(len)}
+      <em>1:{ratio.toLocaleString('pt-BR')}</em>
+    </span>
+  )
 }
 
 export function App() {
   const host = useRef<HTMLDivElement>(null)
   const [drag, setDrag] = useState(false)
-  const { data, loading, error, toast, fileName, importMs, mode } = useStore(useShallow((s) => ({ data: s.data, loading: s.loading, error: s.error, toast: s.toast, fileName: s.fileName, importMs: s.importMs, mode: s.mode })))
+  const { data, loading, error, toast, fileName, importMs } = useStore(useShallow((s) => ({ data: s.data, loading: s.loading, error: s.error, toast: s.toast, fileName: s.fileName, importMs: s.importMs })))
+  const [recife, setRecife] = useState(false)
 
   useEffect(() => {
     const view = new MapView(host.current!)
@@ -88,26 +105,7 @@ export function App() {
       <div className="map" ref={host} />
       <Toolbar />
 
-      {data && (
-        <aside className="side">
-          <SimPanel />
-          <ScenarioPanel />
-          <LayerPanel />
-          {mode === 'nodes' && <Inspector />}
-          {mode === 'lanes' && <SegmentPanel />}
-          {mode === 'build' && <BuildPanel />}
-          {mode === 'erase' && <ErasePanel />}
-          {mode === 'zones' && <ZonePanel />}
-          {mode === 'signal' && (
-            <section className="panel">
-              <h2>Semáforo</h2>
-              <p className="hint">Clique em qualquer ponto de uma via para colocar um semáforo (a via é dividida ali, com uma fase extra para pedestres). Clique num nó para ligar o semáforo dele. Depois ajuste as fases no modo Conversões; para remover, use <b>Remover semáforo</b>.</p>
-              <CttuSignalBox />
-            </section>
-          )}
-          <SignalPanel />
-        </aside>
-      )}
+      {data && <Dock />}
 
       {!data && !loading && (
         <div className="empty">
@@ -116,14 +114,16 @@ export function App() {
             Importe um mapa do OpenStreetMap (<code>.osm</code> ou <code>.pbf</code>) ou arraste o arquivo para cá.
           </p>
           <div className="row">
-            <button className="btn primary" onClick={() => document.getElementById('file-input')?.click()}>
-              Importar mapa
+            <button className="btn primary with-ico" onClick={() => setRecife(true)}>
+              <IconPin size={16} />
+              Abrir o Recife
+            </button>
+            <button className="btn with-ico" onClick={() => pickFile('map')}>
+              <IconMap size={16} />
+              Importar mapa (.osm / .pbf)
             </button>
             <button className="btn" onClick={() => void useStore.getState().loadUrl('/sample.osm', 'sample.osm')}>
-              Abrir exemplo
-            </button>
-            <button className="btn" onClick={() => void useStore.getState().loadUrl('/sample.pbf', 'sample.pbf')}>
-              Exemplo .pbf
+              Exemplo sintético
             </button>
           </div>
         </div>
@@ -139,7 +139,7 @@ export function App() {
             {data.meta.counts.signals} semáforos{data.meta.signalSource === 'ext' ? ' (CTTU)' : ''}
           </span>
           <span>importado em {importMs.toFixed(0)} ms</span>
-          <ZoomLabel />
+          <ScaleBar />
           <PerfStats />
         </div>
       )}
@@ -151,6 +151,21 @@ export function App() {
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}
+      {recife && <RecifeDialog onClose={() => setRecife(false)} />}
+      <footer className="credits">
+        Feito por{' '}
+        <a href="https://github.com/VitorMendonca62" target="_blank" rel="noreferrer">
+          vitormendonca62
+        </a>
+        <span aria-hidden="true">·</span>
+        <a href="https://www.linkedin.com/in/vitormendonca62/" target="_blank" rel="noreferrer">
+          LinkedIn
+        </a>
+        <span aria-hidden="true">·</span>
+        <a href="https://github.com/VitorMendonca62/simulador-transito-br" target="_blank" rel="noreferrer" title="Código-fonte sob a licença GNU AGPL v3.0">
+          Código-fonte (AGPL)
+        </a>
+      </footer>
       {drag && <div className="drop">Solte o arquivo .osm / .pbf para importar</div>}
     </div>
   )

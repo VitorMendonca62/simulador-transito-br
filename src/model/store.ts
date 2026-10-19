@@ -3,6 +3,7 @@ import type { LayerKey, LayerState } from '../engine/MapView'
 import { viewRef } from '../engine/instance'
 import { DEFAULT_PARAMS, demandPayload, PROFILES, ZONE_COLORS, type DemandParams, type Zone } from './demand'
 import { applyOdImport, buildOdImport, OD2018_URL, type OdImport, type OdSource } from './odImport'
+
 import { DIFF_PALETTE, diffLevels, HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
 import type { VehicleInfo } from './types'
 import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, importMap, onSim, resolveDemand, runBench, sendConnEdits, sendPrioEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
@@ -46,6 +47,9 @@ import {
 import { ROAD_PRESETS } from './presets'
 import { applyPatch, segInfo, segsOfWay, type SegPatch } from './segments'
 import { CONN_ABSENT, CONN_ALLOWED, type NetworkData, type NodeConns, type SignalDef, type SimStats } from './types'
+
+/** recorte do Recife do OpenStreetMap (outubro de 2026), comprimido */
+const RECIFE_URL = `${import.meta.env.BASE_URL}data/mapa-recife.osm.gz`
 
 export type EditMode = 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal'
 export type EditScope = 'seg' | 'way'
@@ -163,6 +167,8 @@ interface State {
   setZoom: (z: number) => void
   openFile: (file: File) => Promise<void>
   loadUrl: (url: string, name: string) => Promise<void>
+  /** mapa do Recife embutido no app; opcionalmente já com as zonas da Pesquisa OD 2018 e os semáforos da CTTU */
+  loadRecife: (opts: { zones: boolean; signals: boolean }) => Promise<void>
   restore: () => Promise<void>
   toggleConns: (conns: number[]) => void
   /** Arrasto origem -> destino no nó selecionado: liga a conversão ou, se já ligada, remove. */
@@ -799,6 +805,26 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         set({ loading: false, error: `Não foi possível carregar ${name}: ${e instanceof Error ? e.message : e}` })
       }
+    },
+
+    loadRecife: async ({ zones, signals }) => {
+      const name = 'mapa-recife.osm'
+      set({ loading: true, error: null })
+      try {
+        const res = await fetch(RECIFE_URL)
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+        // o servidor pode já ter descomprimido (Content-Encoding); senão, descomprime aqui
+        const raw = new Uint8Array(await res.arrayBuffer())
+        const gz = raw[0] === 0x1f && raw[1] === 0x8b
+        const buf = gz ? await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : raw.buffer
+        await run(buf, name, true)
+      } catch (e) {
+        set({ loading: false, error: `Não foi possível carregar ${name}: ${e instanceof Error ? e.message : e}` })
+        return
+      }
+      if (!get().data) return
+      if (signals) await get().setSignalSource('cttu')
+      if (zones) await get().importOd2018({ gateways: true })
     },
 
     restore: async () => {

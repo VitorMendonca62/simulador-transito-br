@@ -1,8 +1,9 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { PHASE_COLORS } from '../engine/SignalLayer'
 import { SEG_STRIDE, type NetworkData, type SignalDef } from '../model/types'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
+import { IconSearch } from './Icons'
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`
 const phaseColor = (i: number) => hex(PHASE_COLORS[i % PHASE_COLORS.length])
@@ -51,6 +52,54 @@ function fromWhere(a: number): string {
   return dirs[Math.round(deg / 45) % 8]
 }
 
+const YELLOW = '#facc15'
+const ALL_RED = '#7a3040'
+
+/** Ciclo inteiro numa barra: verde de cada fase na cor dela, amarelo e vermelho geral entre elas. */
+function CycleBar({ def }: { def: SignalDef }) {
+  const cycle = def.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0) || 1
+  const pct = (v: number) => `${(v / cycle) * 100}%`
+  return (
+    <div className="cycle">
+      <div className="cycle-bar" role="img" aria-label={def.phases.map((p, j) => `fase ${j + 1}: ${p.green} s de verde`).join(', ')}>
+        {def.phases.map((p, j) => (
+          <span key={j} style={{ display: 'contents' }}>
+            <i style={{ width: pct(p.green), background: phaseColor(j) }} title={`Fase ${j + 1}: verde ${p.green} s`}>
+              {p.green / cycle > 0.12 && `F${j + 1}`}
+            </i>
+            {p.yellow > 0 && <i style={{ width: pct(p.yellow), background: YELLOW }} title={`Fase ${j + 1}: amarelo ${p.yellow} s`} />}
+            {p.allRed > 0 && <i style={{ width: pct(p.allRed), background: ALL_RED }} title={`Fase ${j + 1}: vermelho geral ${p.allRed} s`} />}
+          </span>
+        ))}
+      </div>
+      <div className="cycle-axis">
+        <span>0 s</span>
+        <span>{cycle.toFixed(0)} s</span>
+      </div>
+    </div>
+  )
+}
+
+/** Quando a aproximação tem verde (e amarelo) ao longo do ciclo; o resto é vermelho. */
+function ApproachTimeline({ def, end }: { def: SignalDef; end: number }) {
+  const cycle = def.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0) || 1
+  const green = def.phases.reduce((a, p) => a + (p.ends.includes(end) ? p.green : 0), 0)
+  return (
+    <span className="appr-time" title={`${green} s de verde por ciclo (${Math.round((green / cycle) * 100)} %)`}>
+      {def.phases.map((p, j) => {
+        const on = p.ends.includes(end)
+        return (
+          <span key={j} style={{ display: 'contents' }}>
+            <i style={{ width: `${(p.green / cycle) * 100}%`, background: on ? phaseColor(j) : undefined }} />
+            <i style={{ width: `${(p.yellow / cycle) * 100}%`, background: on ? YELLOW : undefined }} />
+            <i style={{ width: `${(p.allRed / cycle) * 100}%` }} />
+          </span>
+        )
+      })}
+    </span>
+  )
+}
+
 function NumberField({ value, onChange, label, max = 600 }: { value: number; onChange: (v: number) => void; label: string; max?: number }) {
   return <input type="number" min={0} max={max} step={1} value={value} aria-label={label} onChange={(e) => onChange(Number(e.target.value))} />
 }
@@ -86,10 +135,26 @@ function Editor({ index, def, ctrl }: { index: number; def: SignalDef; ctrl?: Ct
           )}
         </p>
       )}
+      <dl className="sig-facts">
+        <div>
+          <dt>Ciclo</dt>
+          <dd>{cycle.toFixed(0)} s</dd>
+        </div>
+        <div>
+          <dt>Fases</dt>
+          <dd>{def.phases.length}</dd>
+        </div>
+        <div>
+          <dt>Aproximações</dt>
+          <dd>{def.ends.length}</dd>
+        </div>
+        <div>
+          <dt>Nós</dt>
+          <dd>{ctrl?.count ?? 1}</dd>
+        </div>
+      </dl>
+      <CycleBar def={def} />
       <div className="row tight">
-        <span className="hint" style={{ margin: 0 }}>
-          Ciclo <b>{cycle.toFixed(0)} s</b>
-        </span>
         <label className="inline">
           Defasagem
           <NumberField value={def.offset} onChange={(v) => setOffset(index, v)} label="Defasagem do ciclo (s)" />
@@ -134,6 +199,7 @@ function Editor({ index, def, ctrl }: { index: number; def: SignalDef; ctrl?: Ct
             <span className="appr-name">
               {streetOf(data, e.end)}
               <i>vindo do {fromWhere(e.a)}</i>
+              <ApproachTimeline def={def} end={e.end} />
             </span>
             <span className="appr-ph" role="radiogroup" aria-label={`Fase de ${streetOf(data, e.end)}`}>
               {def.phases.map((_, j) => (
@@ -182,8 +248,13 @@ type SigRowProps = {
 const SigRow = memo(function SigRow({ index: i, def: s, ctrl, data, isOpen, mode, setOpen, setMode, select }: SigRowProps) {
   const label = useMemo(() => signalLabel(data, s), [data, s])
   const total = s.phases.reduce((a, p) => a + p.green + p.yellow + p.allRed, 0)
+  const li = useRef<HTMLLIElement>(null)
+  // aberto pela lista ou por um clique no mapa: rola a lista até ele
+  useEffect(() => {
+    if (isOpen) li.current?.scrollIntoView({ block: 'start' })
+  }, [isOpen])
   return (
-    <li className={[isOpen ? 'open' : '', ctrl && ctrl.pos > 0 ? 'sig-sub' : ''].join(' ').trim() || undefined}>
+    <li ref={li} className={[isOpen ? 'open' : '', ctrl && ctrl.pos > 0 ? 'sig-sub' : ''].join(' ').trim() || undefined}>
       <button
         className="sig-head"
         aria-expanded={isOpen}
@@ -214,7 +285,20 @@ const SigRow = memo(function SigRow({ index: i, def: s, ctrl, data, isOpen, mode
 export function SignalPanel() {
   const { data, signals, selected, select, setMode, mode, resetSignals, sigEdits } = useStore(useShallow((s) => ({ data: s.data, signals: s.signals, selected: s.selected, select: s.select, setMode: s.setMode, mode: s.mode, resetSignals: s.resetSignals, sigEdits: s.sigEdits })))
   const [open, setOpen] = useState<number | null>(null)
+  const [query, setQuery] = useState('')
   const { order, ctrl } = useMemo(() => controllers(signals), [signals])
+  // busca por rua ou código CTTU; o controlador entra inteiro quando um nó dele casa
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    if (!q || !data) return order
+    const hit = new Set<number>()
+    order.forEach((i) => {
+      const s = signals[i]
+      const text = `${signalLabel(data, s)} ${s.ext != null ? cttu(s.ext) + ' ' + s.ext : ''}`.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      if (text.includes(q)) hit.add(s.ext != null ? -1 - s.ext : i)
+    })
+    return order.filter((i) => hit.has(i) || (signals[i].ext != null && hit.has(-1 - signals[i].ext!)))
+  }, [order, signals, query, data])
 
   const current = useMemo(() => {
     const i = signals.findIndex((s) => s.node === selected)
@@ -240,8 +324,15 @@ export function SignalPanel() {
           Nenhum semáforo neste mapa. Selecione um cruzamento (modo <b>Conversões</b>) e use <b>Adicionar semáforo</b>.
         </p>
       )}
+      {signals.length > 0 && (
+        <label className="search">
+          <IconSearch size={15} />
+          <input type="search" placeholder="Buscar rua ou código CTTU" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Buscar semáforo" />
+        </label>
+      )}
+      {query && <p className="hint">{shown.length} de {signals.length} nós</p>}
       <ul className="sigs">
-        {order.map((i) => (
+        {shown.map((i) => (
           <SigRow key={signals[i].node} index={i} def={signals[i]} ctrl={ctrl.get(i)} data={data} isOpen={current === i} mode={mode} setOpen={setOpen} setMode={setMode} select={select} />
         ))}
       </ul>

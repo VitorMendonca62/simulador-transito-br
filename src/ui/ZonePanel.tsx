@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { hexColor, PROFILES, profileById, ZONE_COLORS, type Zone } from '../model/demand'
+import { hexColor, PROFILES, profileById, TYPICAL_PARAMS, ZONE_COLORS, type Zone } from '../model/demand'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -272,9 +272,8 @@ function OdMatrix() {
 }
 
 export function ZonePanel() {
-  const { zones, selectedZone, selectZone, demandParams, setDemandParams, demand } = useStore(useShallow((s) => ({ zones: s.zones, selectedZone: s.selectedZone, selectZone: s.selectZone, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand })))
+  const { zones, selectedZone, selectZone, demand } = useStore(useShallow((s) => ({ zones: s.zones, selectedZone: s.selectedZone, selectZone: s.selectZone, demand: s.demand })))
   const sel = zones.find((z) => z.id === selectedZone) ?? null
-  const total = demand ? demand.zones.reduce((a, z) => a + z.genNow, 0) : 0
   return (
     <section className="panel">
       <h2>
@@ -303,52 +302,70 @@ export function ZonePanel() {
       </ul>
       {sel && <ZoneEditor z={sel} />}
 
-      <div className="params">
-        <h3>Parâmetros de demanda</h3>
-        <label className="field col">
-          <span>
-            Hora do dia <b>{hhmm(demandParams.hour)}</b>
-            {zones.length > 0 && <em> · {Math.round(total)} veíc./h gerados</em>}
-          </span>
-          <input type="range" min={0} max={23.75} step={0.25} value={demandParams.hour} onChange={(e) => setDemandParams({ hour: Number(e.target.value) })} aria-label="Hora do dia" />
-        </label>
-        <label className="field col">
-          <span>
-            Sensibilidade ao tempo de viagem <b>{demandParams.beta.toFixed(2)}</b>
-          </span>
-          <input type="range" min={0} max={0.3} step={0.01} value={demandParams.beta} onChange={(e) => setDemandParams({ beta: Number(e.target.value) })} aria-label="Sensibilidade ao tempo de viagem" />
-          <span className="hint">0 = destinos só por atração · alto = prefere zonas próximas</span>
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={demandParams.intrazone} onChange={(e) => setDemandParams({ intrazone: e.target.checked })} />
-          <span>Permitir viagens dentro da mesma zona</span>
-        </label>
-        <label className="field">
-          <span>Ônibus no fluxo (%)</span>
-          <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
-        </label>
-        <label className="check" title="Durante a simulação, as rotas são recalculadas com a velocidade medida em cada trecho; quem usa app desvia de congestionamentos no caminho.">
-          <input type="checkbox" checked={demandParams.reroute ?? true} onChange={(e) => setDemandParams({ reroute: e.target.checked })} />
-          <span>Rotas em tempo real (estilo Waze)</span>
-        </label>
-        <label className="field" title="Motoristas que seguem o tempo real. Os demais escolhem a rota pelo tempo de fluxo livre.">
-          <span>Usam app de navegação (%)</span>
-          <input className="num" type="number" min={0} max={100} step={5} disabled={!(demandParams.reroute ?? true)} value={demandParams.appPct ?? 60} onChange={(e) => setDemandParams({ appPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
-        </label>
-        <label className="field" title="Quanto cada motorista erra ao avaliar a próxima via. 0 = todos escolhem igual (tudo ou nada); 0,3 = espalha entre caminhos com poucos segundos de diferença.">
-          <span>Erro de percepção</span>
-          <input className="num" type="number" min={0} max={1} step={0.05} value={demandParams.perception ?? 0.3} onChange={(e) => setDemandParams({ perception: Math.min(1, Math.max(0, Number(e.target.value))) })} />
-        </label>
-        <label className="field" title="Motoristas na faixa errada que, em vez de dar a volta, usam a conversão proibida de outra faixa. 0 = ninguém.">
-          <span>Ignoram a sinalização (%)</span>
-          <input className="num" type="number" min={0} max={100} step={5} value={demandParams.illegalPct ?? 0} onChange={(e) => setDemandParams({ illegalPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
-        </label>
-        <label className="field">
-          <span>Semente aleatória</span>
-          <input className="num" type="number" min={0} step={1} value={demandParams.seed} onChange={(e) => setDemandParams({ seed: Math.max(0, Math.round(Number(e.target.value))) })} />
-        </label>
-      </div>
       <OdMatrix />
+    </section>
+  )
+}
+
+/** Hora, escolha de destino e comportamento dos motoristas: entram na geração de viagens e na simulação. */
+export function DemandParamsPanel() {
+  const { zones, demandParams, setDemandParams, demand } = useStore(useShallow((s) => ({ zones: s.zones, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand })))
+  const total = demand ? demand.zones.reduce((a, z) => a + z.genNow, 0) : 0
+  const typical = (Object.keys(TYPICAL_PARAMS) as (keyof typeof TYPICAL_PARAMS)[]).every((k) => demandParams[k] === TYPICAL_PARAMS[k])
+  return (
+    <section className="panel params">
+      <h2>Parâmetros de demanda</h2>
+      <div className="row tight">
+        <button className="btn sm" disabled={typical} onClick={() => setDemandParams(TYPICAL_PARAMS)} title="Ônibus 3 %, app de navegação 50 %, ignoram a sinalização 5 %, fecham o cruzamento 20 %, viagens na mesma zona. Mantém a hora e a semente.">
+          {typical ? 'Valores típicos do Recife' : 'Usar valores típicos do Recife'}
+        </button>
+      </div>
+      <label className="field col">
+        <span>
+          Hora do dia <b>{hhmm(demandParams.hour)}</b>
+          {zones.length > 0 && <em> · {Math.round(total)} veíc./h gerados</em>}
+        </span>
+        <input type="range" min={0} max={23.75} step={0.25} value={demandParams.hour} onChange={(e) => setDemandParams({ hour: Number(e.target.value) })} aria-label="Hora do dia" />
+      </label>
+      <label className="field col">
+        <span>
+          Sensibilidade ao tempo de viagem <b>{demandParams.beta.toFixed(2)}</b>
+        </span>
+        <input type="range" min={0} max={0.3} step={0.01} value={demandParams.beta} onChange={(e) => setDemandParams({ beta: Number(e.target.value) })} aria-label="Sensibilidade ao tempo de viagem" />
+        <span className="hint">0 = destinos só por atração · alto = prefere zonas próximas</span>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={demandParams.intrazone} onChange={(e) => setDemandParams({ intrazone: e.target.checked })} />
+        <span>Permitir viagens dentro da mesma zona</span>
+      </label>
+      <label className="field">
+        <span>Ônibus no fluxo (%)</span>
+        <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
+      </label>
+      <label className="check" title="Durante a simulação, as rotas são recalculadas com a velocidade medida em cada trecho; quem usa app desvia de congestionamentos no caminho.">
+        <input type="checkbox" checked={demandParams.reroute ?? true} onChange={(e) => setDemandParams({ reroute: e.target.checked })} />
+        <span>Rotas em tempo real (estilo Waze)</span>
+      </label>
+      <label className="field" title="Motoristas que seguem o tempo real. Os demais escolhem a rota pelo tempo de fluxo livre.">
+        <span>Usam app de navegação (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} disabled={!(demandParams.reroute ?? true)} value={demandParams.appPct ?? 60} onChange={(e) => setDemandParams({ appPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
+      </label>
+      <label className="field" title="Quanto cada motorista erra ao avaliar a próxima via. 0 = todos escolhem igual (tudo ou nada); 0,3 = espalha entre caminhos com poucos segundos de diferença.">
+        <span>Erro de percepção</span>
+        <input className="num" type="number" min={0} max={1} step={0.05} value={demandParams.perception ?? 0.3} onChange={(e) => setDemandParams({ perception: Math.min(1, Math.max(0, Number(e.target.value))) })} />
+      </label>
+      <label className="field" title="Motoristas na faixa errada que, em vez de dar a volta, usam a conversão proibida de outra faixa. 0 = ninguém.">
+        <span>Ignoram a sinalização (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} value={demandParams.illegalPct ?? 0} onChange={(e) => setDemandParams({ illegalPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
+      </label>
+      <label className="field" title="Parcela dos motoristas que entram no cruzamento com a fila da saída parada ou quase, sem espaço garantido para sair, e ficam parados dentro dele segurando a transversal (proibido pelo CTB art. 45). Os demais só entram com espaço para sair. 0 = ninguém.">
+        <span>Fecham o cruzamento (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} value={demandParams.boxBlockPct ?? 0} onChange={(e) => setDemandParams({ boxBlockPct: Math.min(100, Math.max(0, Number(e.target.value))) })} />
+      </label>
+      <label className="field">
+        <span>Semente aleatória</span>
+        <input className="num" type="number" min={0} step={1} value={demandParams.seed} onChange={(e) => setDemandParams({ seed: Math.max(0, Math.round(Number(e.target.value))) })} />
+      </label>
     </section>
   )
 }

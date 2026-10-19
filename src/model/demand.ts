@@ -39,7 +39,15 @@ export interface DemandParams {
   perception?: number
 }
 
-export const DEFAULT_PARAMS: DemandParams = { beta: 0.08, intrazone: false, hour: 8, busShare: 2, illegalPct: 0, seed: 1, reroute: true, appPct: 60, perception: 0.3 }
+/** Comportamento típico do trânsito do Recife (estimativas, não medições):
+ * - beta 0,08/min: faixa usual de modelos gravitacionais de carro (0,05–0,1/min); com as zonas da OD 2018 a matriz é a da pesquisa
+ * - viagens na mesma zona: as zonas da OD são do tamanho de bairros e têm viagens de carro internas
+ * - ônibus 3 % dos veículos: ~2,8 mil ônibus no sistema, 4–6 % nos corredores e menos nas vias locais
+ * - app de navegação 50 %: a maioria dos motoristas tem Waze/Google Maps, mas no trajeto diário só parte segue a rota em tempo real
+ * - ignoram a sinalização 5 %; fecham o cruzamento 20 %: infrações comuns nos cruzamentos do centro e da Agamenon */
+export const TYPICAL_PARAMS = { beta: 0.08, intrazone: true, busShare: 3, illegalPct: 5, boxBlockPct: 20, reroute: true, appPct: 50, perception: 0.3 } satisfies Partial<DemandParams>
+
+export const DEFAULT_PARAMS: DemandParams = { ...TYPICAL_PARAMS, hour: 5, seed: 1 }
 
 export interface Profile {
   id: string
