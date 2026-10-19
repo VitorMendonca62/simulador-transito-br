@@ -1827,7 +1827,16 @@ fn recife_occ_chains() {
     let mut n = build_network_ext(&data, &pts).unwrap();
     n.ensure_conns();
     let secs: f64 = std::env::var("SIM_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800.0);
-    n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0.0,"illegalPct":5,"boxBlockPct":20}}}}"#)).unwrap();
+    // SIM_JSON: payload completo da simulação capturado do app (zonas OD etc.); SIM_HOUR troca a hora
+    if let Ok(p) = std::env::var("SIM_JSON") {
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        if let Some(h) = std::env::var("SIM_HOUR").ok().and_then(|h| h.parse::<f64>().ok()) {
+            v["params"]["hour"] = serde_json::json!(h);
+        }
+        n.start_sim(&v.to_string()).unwrap();
+    } else {
+        n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0.0,"illegalPct":5,"boxBlockPct":20}}}}"#)).unwrap();
+    }
     for _ in 0..(secs / 0.2) as u32 {
         n.sim.as_mut().unwrap().step(&n.net);
     }
@@ -1861,6 +1870,37 @@ fn recife_occ_chains() {
         }
     }
     eprintln!("ciclos: {cycles}");
+    let cs = s.courtesy_stuck(60.0);
+    eprintln!("presos por cortesia (>60 s): {}", cs.len());
+    for l in cs.iter().take(10) {
+        eprintln!("   {l}");
+    }
+    // acompanha os pedintes de cortesia por alguns passos
+    if std::env::var("LC_TRACE").is_ok() {
+        let ids: Vec<usize> = cs.iter().filter_map(|l| l.split("Some(\"#").nth(1)).filter_map(|x| x.split(' ').next()?.parse().ok()).collect();
+        for t in 0..30 {
+            s.step(net);
+            if t % 3 == 0 {
+                for &r in ids.iter().rev().take(3) {
+                    eprintln!("   t{t} {}", s.lc_state(r));
+                }
+            }
+        }
+    }
+    // podem entrar (verde/livre) mas seguem parados
+    let mut k = 0;
+    for it in &list {
+        if it["ok"] != true || it["wait"].as_f64().unwrap() < 120.0 {
+            continue;
+        }
+        let i = it["id"].as_i64().unwrap() as usize;
+        let (txt, _) = s.who_holds(net, i);
+        eprintln!("== livre e parado ({}) {txt}", it["street"]);
+        k += 1;
+        if k >= 15 {
+            break;
+        }
+    }
     // aproximações em vermelho há muito tempo: fases do semáforo do nó
     let mut seen_nodes = std::collections::BTreeSet::new();
     for it in &list {

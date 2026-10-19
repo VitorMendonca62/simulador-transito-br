@@ -1788,7 +1788,8 @@ impl Sim {
         // pedidos de passagem: quem está com seta ligada para uma troca obrigatória
         self.wants.clear();
         for i in 0..self.alive.len() {
-            if self.alive[i] && self.mand[i] && self.blink_to[i] != NONE && (self.edge[i] as usize) < self.nl {
+            // seta ligada há muito sem nova tentativa (a cada tentativa ela é renovada) não é mais pedido
+            if self.alive[i] && self.mand[i] && self.blink_to[i] != NONE && (self.edge[i] as usize) < self.nl && (self.time as f32 - self.blink_t[i]) < 10.0 {
                 self.wants.push((self.blink_to[i], i as u32));
             }
         }
@@ -2244,6 +2245,10 @@ impl Sim {
                         }
                         self.choice[i] = c;
                         self.cool[i] = 1.0;
+                        // desiste da troca: sem isso a seta ficava ligada para sempre e quem está na faixa vizinha
+                        // seguia cedendo a vez (cortesia) a quem nunca entra — e este, pela fila justa, cedia a ele
+                        self.mand[i] = false;
+                        self.blink_to[i] = NONE;
                         return;
                     }
                 }
@@ -2889,6 +2894,36 @@ impl Sim {
     }
 
     /// Veículos na frente de faixa parados há mais tempo (para achar gargalos): [{id, wait, reason, blocker, street}].
+    /// Depuração: estado de troca de faixa do veículo `i`.
+    pub fn lc_state(&self, i: usize) -> String {
+        let e = self.edge[i] as usize;
+        let costs: Vec<String> = if e < self.nl { let (lo, hi) = self.lanes_of(e); (lo..hi).map(|cl| format!("{cl}:{:.0}", self.stay_cost(self.drv(i), cl).0)).collect() } else { vec![] };
+        format!("#{i} edge {e} s {:.1} v {:.1} wait {:.0} lc_why {} blink_to {} blink_age {:.1} cool {:.1} mand {} choice {} rb {} custos {costs:?}", self.s[i], self.v[i], self.wait[i], self.lc_why[i], self.blink_to[i] as i64, self.time as f32 - self.blink_t[i], self.cool[i], self.mand[i], self.choice[i], self.rule_breaker[i])
+    }
+
+    /// Depuração: veículos parados há mais de `min_wait` s cujo líder efetivo é a cortesia a quem pede para entrar.
+    pub fn courtesy_stuck(&mut self, min_wait: f32) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in 0..self.nl {
+            let list = self.edge_veh[e].clone();
+            for (k, &i) in list.iter().enumerate() {
+                let i = i as usize;
+                if self.wait[i] < min_wait {
+                    continue;
+                }
+                if let Some(c) = self.courtesy(i, e, k) {
+                    let own = if k + 1 < list.len() { let j = list[k + 1] as usize; self.s[j] - self.vlen[j] - self.s[i] } else { self.edge_len[e] - self.s[i] };
+                    if c.0 < own {
+                        let r = self.wants.iter().find(|w| w.0 as usize == e && (self.s[w.1 as usize] - self.vlen[w.1 as usize] - self.s[i] - c.0).abs() < 1e-3).map(|w| w.1 as usize);
+                        let rinfo = r.map(|r| format!("#{r} faixa {} s {:.1} resto {:.1} wait {:.0} why {} mand {} lc_why {}", self.edge[r], self.s[r], self.edge_len[self.edge[r] as usize] - self.s[r], self.wait[r], lc_block_text(self.lc_why[r]), self.mand[r], self.lc_why[r]));
+                        out.push(format!("#{i} faixa {e} s {:.1} resto {:.1} wait {:.0} pos {k}/{} cortesia gap {:.2} (próprio {:.1}) -> {rinfo:?}", self.s[i], self.edge_len[e] - self.s[i], self.wait[i], list.len(), c.0, own));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Depuração: o que segura o veículo `i` agora (texto, id de quem segura ou -1).
     pub fn who_holds(&mut self, net: &Net, i: usize) -> (String, i64) {
         let e = self.edge[i] as usize;
@@ -2908,7 +2943,18 @@ impl Sim {
             let ok = self.may_enter(net, i, cc);
             let code = REASON.with(|r| r.get());
             let b = BLOCKER.with(|b| b.get());
-            return (format!("{base} -> entra? {ok} motivo {code} conv {cc}"), if ok { -1 } else { b });
+            if ok {
+                // pode entrar mas está parado: o que faz de líder virtual
+                let k = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
+                let rest = self.edge_len[e] - self.s[i];
+                let ahead = self.ahead_stop_at(net, i, cc, rest);
+                let occ = if rest < 40.0 { self.occ_obstacle(net, i, cc, -rest) } else { None };
+                let ct = self.courtesy(i, e, k);
+                let wants: Vec<(u32, u32, f32)> = self.wants.iter().filter(|w| w.0 as usize == e).map(|w| (w.1, self.edge[w.1 as usize], self.s[w.1 as usize] - self.s[i])).collect();
+                let lead = self.leader(net, i, e, k, true);
+                return (format!("{base} -> entra? sim conv {cc} rest {rest:.1} acc {:.2} | leader {lead:?} ahead {ahead:.1} occ {occ:?} cortesia {ct:?} wants {wants:?}", self.acc[i]), -1);
+            }
+            return (format!("{base} -> entra? {ok} motivo {code} conv {cc}"), b);
         }
         // na conversão: frente da faixa de saída, ou ponto de conflito ocupado
         let to = self.conns[e - self.nl].to as usize;
