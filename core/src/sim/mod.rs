@@ -1393,6 +1393,11 @@ impl Sim {
         best
     }
 
+    /// Faixa `l` curta demais para o veículo `i` parar inteiro nela (só a de um nó a outro do mesmo cruzamento).
+    fn short_link(&self, l: usize, i: usize) -> bool {
+        self.lanes[l].len < self.vlen[i] + 1.0
+    }
+
     /// `o` tem preferência sobre `me`?
     fn has_priority(&self, me: &ConnRt, o: &ConnRt, signaled: bool) -> bool {
         if signaled {
@@ -1410,7 +1415,7 @@ impl Sim {
     }
 
     /// Faixas curtas à frente (comuns no OSM, em cruzamentos de vários nós): quem vai ter de ceder num nó sem semáforo
-    /// logo depois já decide daqui — senão só "vê" o cruzamento a poucos metros da linha, sem distância para parar.
+    /// (ou ao fim de um trecho mais curto que o veículo, mesmo com semáforo) logo depois já decide daqui — senão só "vê" o cruzamento a poucos metros da linha, sem distância para parar.
     /// Devolve a distância até a linha onde terá de parar, ou ∞.
     fn ahead_stop_at(&mut self, net: &Net, i: usize, cc: u32, rest: f32) -> f32 {
         let d_check = (self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) + 20.0).max(25.0);
@@ -1424,7 +1429,7 @@ impl Sim {
             if self.lanes[f].len >= 30.0 || d2 > d_check || !self.edge_veh[f].is_empty() || !self.edge_veh[c as usize].is_empty() {
                 break;
             }
-            if self.end_state[self.lanes[f].end_id as usize] != 0 {
+            if self.end_state[self.lanes[f].end_id as usize] != 0 && !self.short_link(f, i) {
                 break;
             }
             let c2 = self.stay_cost(self.drv(i), f).1;
@@ -1466,6 +1471,11 @@ impl Sim {
         let st = self.end_state[end];
         let v = self.v[id];
         let b = self.bcomf[id];
+        // trecho mais curto que o veículo entre dois nós (canteiro central estreito): quem está nele ainda está dentro do
+        // cruzamento (a traseira fica no nó anterior) e termina a travessia sem esperar o semáforo do fim, cedendo a todos
+        // — senão, parado ali, fecha o nó anterior e trava quem vem no sentido oposto
+        let clearing = st != 0 && self.short_link(lane_id, id);
+        let st = if clearing { 0 } else { st };
         let signaled = st != 0;
         if st == 1 {
             { REASON.with(|r| r.set(2)); return false; }
@@ -1528,8 +1538,10 @@ impl Sim {
         let relaxed = self.wait[id] > 10.0;
         let conflicts = self.conflicts_of(net, cc);
         // ponto de conflito ocupado por quem está dentro do cruzamento (inclusive parado, "fechando" o cruzamento):
-        // ninguém entra, com qualquer sinal ou preferência
-        {
+        // ninguém entra, com qualquer sinal ou preferência — exceto quem já está dentro dele, num trecho mais curto que
+        // o veículo, parado há muito tempo (impasse, como em `occ_obstacle`)
+        let inside_stuck = lane_id == self.edge[id] as usize && self.short_link(lane_id, id) && self.wait[id] > OCC_DEADLOCK;
+        if !inside_stuck {
             let a = (self.amax[id] * 0.6).max(0.5);
             for cf in conflicts.iter() {
                 if cf.merge {
@@ -1575,7 +1587,7 @@ impl Sim {
             let (me, o) = (&self.conns[me_idx], &self.conns[oi]);
             // fusão sem placa nem semáforo e de mesma hierarquia: zíper (quem chega primeiro entra), sem prioridade fixa à direita
             let zip = cf.merge && !signaled && me.rank == o.rank;
-            if zip || !self.has_priority(me, o, signaled) {
+            if !clearing && (zip || !self.has_priority(me, o, signaled)) {
                 // convergência na mesma faixa sem preferência (zíper): em movimento, entra quem chega primeiro ao ponto,
                 // com uma folga; quem já está parado esperando entra quando o próximo da outra corrente ainda consegue
                 // frear com conforto — esse cede (senão, num fluxo contínuo, quem espera nunca entraria)
@@ -1716,7 +1728,7 @@ impl Sim {
             };
             // faixa de destino curta que termina em semáforo fechado: a retenção dela também vale para quem ainda está antes
             let tl = &self.lanes[to as usize];
-            if tl.len < 30.0 {
+            if tl.len < 30.0 && !self.short_link(to as usize, i) {
                 let st = self.end_state[tl.end_id as usize];
                 if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) < rest + clen + tl.len - 1.0) {
                     let stop = (rest + clen + tl.len - 0.5, 0.0);
@@ -2112,7 +2124,7 @@ impl Sim {
                     return;
                 }
                 let end = self.lanes[e].end_id as usize;
-                if self.end_state[end] == 1 && self.red_age[end] > 1.5 {
+                if self.end_state[end] == 1 && self.red_age[end] > 1.5 && !self.short_link(e, i) {
                     self.stats.red_runs += 1;
                     if self.red_log.len() < 40 { self.red_log.push((e as u32, self.v[i], self.choice[i], self.wait[i], self.red_age[end])); }
                 }
@@ -2877,6 +2889,48 @@ impl Sim {
     }
 
     /// Veículos na frente de faixa parados há mais tempo (para achar gargalos): [{id, wait, reason, blocker, street}].
+    /// Depuração: o que segura o veículo `i` agora (texto, id de quem segura ou -1).
+    pub fn who_holds(&mut self, net: &Net, i: usize) -> (String, i64) {
+        let e = self.edge[i] as usize;
+        let list = self.edge_veh[e].clone();
+        let k = list.iter().position(|&x| x as usize == i).unwrap_or(0);
+        let where_ = if e < self.nl { format!("faixa {} resto {:.1}", e, self.edge_len[e] - self.s[i]) } else { format!("conv {} s {:.1}/{:.1} node {}", e, self.s[i], self.edge_len[e], self.conns[e - self.nl].node) };
+        let base = format!("#{i} {where_} v {:.1} wait {:.0} bb {}", self.v[i], self.wait[i], self.box_blocker[i]);
+        if k + 1 < list.len() {
+            let j = list[k + 1] as usize;
+            return (format!("{base} -> líder gap {:.1}", self.s[j] - self.vlen[j] - self.s[i]), j as i64);
+        }
+        if e < self.nl {
+            let cc = self.choice[i];
+            if cc == NONE || cc == SINK {
+                return (format!("{base} -> sem conversão"), -1);
+            }
+            let ok = self.may_enter(net, i, cc);
+            let code = REASON.with(|r| r.get());
+            let b = BLOCKER.with(|b| b.get());
+            return (format!("{base} -> entra? {ok} motivo {code} conv {cc}"), if ok { -1 } else { b });
+        }
+        // na conversão: frente da faixa de saída, ou ponto de conflito ocupado
+        let to = self.conns[e - self.nl].to as usize;
+        if let Some(&j) = self.edge_veh[to].first() {
+            let j = j as usize;
+            let gap = self.edge_len[e] - self.s[i] + self.s[j] - self.vlen[j];
+            if gap < 8.0 {
+                return (format!("{base} -> saída gap {gap:.1}"), j as i64);
+            }
+        }
+        let cfs = self.conflicts_of(net, e as u32);
+        for cf in cfs.iter() {
+            if cf.merge || self.s[i] > cf.s_me - cf.w {
+                continue;
+            }
+            if let Some(j) = self.occ_by(cf, 0.0, i) {
+                return (format!("{base} -> ocupação (conflito conv {})", cf.other), j as i64);
+            }
+        }
+        (format!("{base} -> ?"), -1)
+    }
+
     pub fn stuck_list(&mut self, net: &Net, n: usize) -> Vec<serde_json::Value> {
         use serde_json::json;
         let mut cand: Vec<(f32, usize, usize)> = Vec::new();

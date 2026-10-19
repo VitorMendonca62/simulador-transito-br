@@ -1814,3 +1814,75 @@ fn box_blocking_applies_only_to_share() {
     assert!(all.box_wait_s > none.box_wait_s, "transversal espera mais por cruzamento ocupado");
     assert_eq!(all.junction_overlaps, 0, "ocupação do ponto de conflito impede colisão com quem está parado no cruzamento");
 }
+
+/// `PERF_OSM=arquivo cargo test --release recife_occ_chains -- --ignored --nocapture`: cadeias de "cruzamento ocupado"
+#[test]
+#[ignore]
+fn recife_occ_chains() {
+    let data = std::fs::read(std::env::var("PERF_OSM").expect("defina PERF_OSM")).unwrap();
+    let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
+    let gen = 2500.0;
+    let zones = [q(1, -3000.0, -3000.0, -1500.0, -1500.0, gen), q(2, 1500.0, -3000.0, 3000.0, -1500.0, gen), q(3, -3000.0, 1500.0, -1500.0, 3000.0, gen), q(4, 1500.0, 1500.0, 3000.0, 3000.0, gen)].join(",");
+    let pts: Vec<crate::extsig::ExtSignal> = serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap();
+    let mut n = build_network_ext(&data, &pts).unwrap();
+    n.ensure_conns();
+    let secs: f64 = std::env::var("SIM_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800.0);
+    n.start_sim(&format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":0,"beta":0.0,"illegalPct":5,"boxBlockPct":20}}}}"#)).unwrap();
+    for _ in 0..(secs / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+    }
+    let net = &n.net;
+    let s = n.sim.as_mut().unwrap();
+    eprintln!("vivos {} {:?}", s.n_alive, s.stats);
+    let list = s.stuck_list(net, 3000);
+    let mut shown = 0;
+    let mut cycles = 0;
+    for it in &list {
+        if it["code"] != 11 || it["wait"].as_f64().unwrap() < 120.0 {
+            continue;
+        }
+        let mut cur = it["id"].as_i64().unwrap();
+        let mut seen = vec![];
+        let mut lines = vec![];
+        while cur >= 0 && !seen.contains(&cur) && seen.len() < 12 {
+            seen.push(cur);
+            let (txt, nxt) = s.who_holds(net, cur as usize);
+            lines.push(txt);
+            cur = nxt;
+        }
+        let cyc = cur >= 0 && seen.contains(&cur);
+        cycles += cyc as u32;
+        if shown < 12 {
+            shown += 1;
+            eprintln!("== cadeia ({}){}", it["street"], if cyc { format!(" CICLO volta a #{cur}") } else { String::new() });
+            for l in lines {
+                eprintln!("   {l}");
+            }
+        }
+    }
+    eprintln!("ciclos: {cycles}");
+    // aproximações em vermelho há muito tempo: fases do semáforo do nó
+    let mut seen_nodes = std::collections::BTreeSet::new();
+    for it in &list {
+        if it["code"] != 2 || it["wait"].as_f64().unwrap() < 300.0 {
+            continue;
+        }
+        let i = it["id"].as_i64().unwrap() as usize;
+        let (e, _) = (s.od_of(i).unwrap().2 as usize, 0);
+        let info = s.lane_info(e);
+        let node = net.lanes[e].to as usize;
+        let my_end = (net.lanes[e].seg << 1) | net.lanes[e].dir as u32;
+        eprintln!("   end da faixa: {my_end}");
+        if !seen_nodes.insert(node) {
+            continue;
+        }
+        let name = |sg: u32| net.names.get(net.segs[sg as usize].name as usize).cloned().unwrap_or_default();
+        eprintln!("== vermelho {:.0}s em {} ({}) nó osm {}: {info}", it["wait"].as_f64().unwrap(), it["street"], net.segs[net.lanes[e].seg as usize].way_id, net.nodes[node].osm_id);
+        eprintln!("   ramos do nó: {:?}", net.nodes[node].ends.iter().map(|&x| (x, name(x >> 1), net.segs[(x >> 1) as usize].way_id)).collect::<Vec<_>>());
+        for sg in net.signals.iter().filter(|sg| sg.node as usize == node) {
+            for (k, p) in sg.phases.iter().enumerate() {
+                eprintln!("   fase {k} verde {:.0} ends {:?}", p.green, p.ends.iter().map(|&x| (x, name(x >> 1))).collect::<Vec<_>>());
+            }
+        }
+    }
+}
