@@ -3,11 +3,14 @@
 //! Cada ponto externo é um controlador. Em cruzamento, ele marca os nós de interseção do OSM ao redor
 //! (cruzamentos de pista dupla têm vários nós). Em travessia de meio de quadra, ele marca um nó em cada
 //! pista paralela próxima, criando o nó quando não há vértice perto.
+//!
+//! Ajustes conferidos à mão (`scripts/semaforos_recife/ajustes_manuais.json`, mesclados no JSON da CTTU) trocam o
+//! encaixe automático por nós OSM e pontos explícitos, e as fases por eixo por fases definidas pelo nome das vias.
 
 use crate::osm::{way_level, RawOsm};
 use std::collections::HashMap;
 
-#[derive(serde::Deserialize, Clone)]
+#[derive(serde::Deserialize, Clone, Default)]
 pub struct ExtSignal {
     pub id: u32,
     pub lat: f64,
@@ -15,6 +18,60 @@ pub struct ExtSignal {
     /// `true` quando a fonte cita uma via transversal (cruzamento); `false` = travessia em trecho
     #[serde(default)]
     pub cruzamento: bool,
+    /// nós OSM do controlador conferidos à mão: substituem o encaixe automático (os que não existem no mapa são ignorados)
+    #[serde(default)]
+    pub nos: Vec<i64>,
+    /// pontos `[lat, lon]` conferidos à mão onde o semáforo fica num trecho (ex.: entrada de uma rua): nó na via mais próxima
+    #[serde(default)]
+    pub pontos: Vec<[f64; 2]>,
+    /// fases conferidas à mão, na ordem do ciclo; vazio = uma fase por eixo de aproximação
+    #[serde(default)]
+    pub fases: Vec<ExtPhase>,
+}
+
+/// Fase de um controlador externo. As aproximações entram pelo nome da via de chegada.
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct ExtPhase {
+    /// partes do nome da via (sem diferenciar maiúsculas); `"*"` = aproximações que nenhuma outra fase cita;
+    /// lista vazia = fase só de pedestres (todos os veículos no vermelho)
+    #[serde(default)]
+    pub vias: Vec<String>,
+    #[serde(default = "d_green")]
+    pub verde: f32,
+    #[serde(default = "d_yellow")]
+    pub amarelo: f32,
+    #[serde(default = "d_all_red")]
+    pub vermelho: f32,
+}
+
+fn d_green() -> f32 {
+    30.0
+}
+fn d_yellow() -> f32 {
+    3.0
+}
+fn d_all_red() -> f32 {
+    2.0
+}
+
+impl ExtPhase {
+    /// A via `name` é citada pela fase (sem contar o `"*"`).
+    pub fn cites(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        self.vias.iter().any(|v| v != "*" && !v.is_empty() && name.contains(&v.to_lowercase()))
+    }
+    pub fn rest(&self) -> bool {
+        self.vias.iter().any(|v| v == "*")
+    }
+}
+
+/// Semáforos externos encaixados no mapa.
+#[derive(Default)]
+pub struct ExtSignals {
+    /// nó OSM -> id externo (controlador)
+    pub nodes: HashMap<i64, u32>,
+    /// fases conferidas à mão por controlador
+    pub phases: HashMap<u32, Vec<ExtPhase>>,
 }
 
 /// Raio em que todos os nós de interseção pertencem ao mesmo cruzamento
@@ -33,9 +90,35 @@ fn car_way(tags: &[(String, String)]) -> bool {
     get("area") != Some("yes") && get("highway").and_then(crate::net::parse_highway).is_some() && way_level(tags) == 0
 }
 
+/// Trechos mais próximos de `p`, um por via (até `R_MIDBLOCK`): (dist², via, trecho, t, direção), do mais perto ao mais longe.
+fn near_segs(p: [f64; 2], segs: &[(usize, usize, [f64; 2], [f64; 2])]) -> Vec<(f64, usize, usize, f64, [f64; 2])> {
+    let d2 = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
+    let mut per_way: HashMap<usize, (f64, usize, f64, [f64; 2])> = HashMap::new(); // via -> (dist², trecho, t, direção)
+    for &(wi, k, a, b) in segs {
+        let r = R_MIDBLOCK;
+        if a[0].max(b[0]) < p[0] - r || a[0].min(b[0]) > p[0] + r || a[1].max(b[1]) < p[1] - r || a[1].min(b[1]) > p[1] + r {
+            continue;
+        }
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+        if l2 < 1e-6 {
+            continue;
+        }
+        let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2).clamp(0.0, 1.0);
+        let d = d2(p, [a[0] + ab[0] * t, a[1] + ab[1] * t]);
+        if d <= R_MIDBLOCK * R_MIDBLOCK && per_way.get(&wi).map_or(true, |w| d < w.0) {
+            let l = l2.sqrt();
+            per_way.insert(wi, (d, k, t, [ab[0] / l, ab[1] / l]));
+        }
+    }
+    let mut best: Vec<(f64, usize, usize, f64, [f64; 2])> = per_way.into_iter().map(|(wi, (d, k, t, dir))| (d, wi, k, t, dir)).collect();
+    best.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+    best
+}
+
 /// Troca os semáforos do OSM pelos externos. Se nenhum ponto externo cai na área do mapa, nada muda e
-/// devolve `None`. Senão devolve o mapa nó OSM → id externo de cada nó marcado.
-pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i64, u32>> {
+/// devolve `None`. Senão devolve o nó OSM → id externo de cada nó marcado e as fases conferidas à mão.
+pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignals> {
     if raw.nodes.is_empty() {
         return None;
     }
@@ -58,7 +141,9 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i
         let (la, lo) = ((s.lat * 1e7) as i32, (s.lon * 1e7) as i32);
         la >= la0 && la <= la1 && lo >= lo0 && lo <= lo1
     };
-    let pts: Vec<&ExtSignal> = list.iter().filter(|s| inside(s)).collect();
+    let mut pts: Vec<&ExtSignal> = list.iter().filter(|s| inside(s)).collect();
+    // os conferidos à mão primeiro: um nó disputado fica com eles
+    pts.sort_by_key(|s| s.nos.is_empty() && s.pontos.is_empty());
     if pts.is_empty() {
         return None;
     }
@@ -96,13 +181,57 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i
     }
 
     let mut marked: HashMap<i64, u32> = HashMap::new();
+    let mut phases: HashMap<u32, Vec<ExtPhase>> = HashMap::new();
     let mut new_nodes: Vec<(i64, i32, i32)> = Vec::new();
     // (via, posição de inserção, t no trecho, id novo), aplicadas no fim de trás para frente
     let mut inserts: Vec<(usize, usize, f64, i64)> = Vec::new();
     let d2 = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
 
+    // nó do ponto `t` do trecho `k` da via `wi`: o vértice a menos de `R_REUSE`, ou um nó novo de id `nid`
+    let mut place = |raw: &RawOsm, wi: usize, k: usize, t: f64, nid: i64| -> i64 {
+        let refs = &raw.ways[wi].refs;
+        let (a, b) = (raw.coord(refs[k]).unwrap(), raw.coord(refs[k + 1]).unwrap());
+        let (pa, pb) = (xy(a.0, a.1), xy(b.0, b.1));
+        let q = [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t];
+        if d2(q, pa) <= R_REUSE * R_REUSE && d2(q, pa) <= d2(q, pb) {
+            refs[k]
+        } else if d2(q, pb) <= R_REUSE * R_REUSE {
+            refs[k + 1]
+        } else {
+            let la = a.0 as f64 + (b.0 as f64 - a.0 as f64) * t;
+            let lo = a.1 as f64 + (b.1 as f64 - a.1 as f64) * t;
+            new_nodes.push((nid, la.round() as i32, lo.round() as i32));
+            inserts.push((wi, k + 1, t, nid));
+            nid
+        }
+    };
+
     for s in pts {
         let p = [s.lon * kx, s.lat * ky];
+        // conferido à mão: os nós listados e um nó na via mais próxima de cada ponto
+        if !s.nos.is_empty() || !s.pontos.is_empty() {
+            let mut any = false;
+            for &id in &s.nos {
+                if raw.coord(id).is_some() {
+                    marked.entry(id).or_insert(s.id);
+                    any = true;
+                }
+            }
+            for (j, q) in s.pontos.iter().enumerate() {
+                if let Some(&(_, wi, k, t, _)) = near_segs([q[1] * kx, q[0] * ky], &segs).first() {
+                    let id = place(raw, wi, k, t, SYNTH_BASE + s.id as i64 * 64 + 32 + j as i64);
+                    marked.entry(id).or_insert(s.id);
+                    any = true;
+                }
+            }
+            if any {
+                if !s.fases.is_empty() {
+                    phases.insert(s.id, s.fases.clone());
+                }
+                continue;
+            }
+            // nada do ajuste existe neste mapa (outra versão do OSM): encaixe automático
+        }
         if s.cruzamento {
             let mut near: Vec<(f64, i64)> =
                 junctions.iter().map(|(id, q)| (d2(p, *q), *id)).filter(|e| e.0 <= R_JUNCTION_MAX * R_JUNCTION_MAX).collect();
@@ -118,26 +247,7 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i
             // sem nó de interseção por perto: cai na regra de trecho
         }
         // travessia em trecho: trecho mais próximo de cada via
-        let mut per_way: HashMap<usize, (f64, usize, f64, [f64; 2])> = HashMap::new(); // via -> (dist², trecho, t, direção)
-        for &(wi, k, a, b) in &segs {
-            let r = R_MIDBLOCK;
-            if a[0].max(b[0]) < p[0] - r || a[0].min(b[0]) > p[0] + r || a[1].max(b[1]) < p[1] - r || a[1].min(b[1]) > p[1] + r {
-                continue;
-            }
-            let ab = [b[0] - a[0], b[1] - a[1]];
-            let l2 = ab[0] * ab[0] + ab[1] * ab[1];
-            if l2 < 1e-6 {
-                continue;
-            }
-            let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2).clamp(0.0, 1.0);
-            let d = d2(p, [a[0] + ab[0] * t, a[1] + ab[1] * t]);
-            if d <= R_MIDBLOCK * R_MIDBLOCK && per_way.get(&wi).map_or(true, |w| d < w.0) {
-                let l = l2.sqrt();
-                per_way.insert(wi, (d, k, t, [ab[0] / l, ab[1] / l]));
-            }
-        }
-        let mut best: Vec<(f64, usize, usize, f64, [f64; 2])> = per_way.into_iter().map(|(wi, (d, k, t, dir))| (d, wi, k, t, dir)).collect();
-        best.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+        let best = near_segs(p, &segs);
         let Some(&(_, _, _, _, dir0)) = best.first() else { continue };
         for (j, &(_, wi, k, t, dir)) in best.iter().enumerate() {
             // só as pistas paralelas à mais próxima (a outra mão da avenida), não as transversais
@@ -145,22 +255,7 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i
             if j > 0 && ((dir[0] * dir0[0] + dir[1] * dir0[1]).abs() < 0.85 || t <= 0.0 || t >= 1.0) {
                 continue;
             }
-            let refs = &raw.ways[wi].refs;
-            let (a, b) = (raw.coord(refs[k]).unwrap(), raw.coord(refs[k + 1]).unwrap());
-            let (pa, pb) = (xy(a.0, a.1), xy(b.0, b.1));
-            let q = [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t];
-            let id = if d2(q, pa) <= R_REUSE * R_REUSE && d2(q, pa) <= d2(q, pb) {
-                refs[k]
-            } else if d2(q, pb) <= R_REUSE * R_REUSE {
-                refs[k + 1]
-            } else {
-                let nid = SYNTH_BASE + s.id as i64 * 64 + j as i64;
-                let la = a.0 as f64 + (b.0 as f64 - a.0 as f64) * t;
-                let lo = a.1 as f64 + (b.1 as f64 - a.1 as f64) * t;
-                new_nodes.push((nid, la.round() as i32, lo.round() as i32));
-                inserts.push((wi, k + 1, t, nid));
-                nid
-            };
+            let id = place(raw, wi, k, t, SYNTH_BASE + s.id as i64 * 64 + j as i64);
             marked.entry(id).or_insert(s.id);
         }
     }
@@ -176,5 +271,5 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<HashMap<i
         raw.nodes.dedup_by_key(|n| n.0);
     }
     raw.signals = marked.keys().copied().collect();
-    Some(marked)
+    Some(ExtSignals { nodes: marked, phases })
 }

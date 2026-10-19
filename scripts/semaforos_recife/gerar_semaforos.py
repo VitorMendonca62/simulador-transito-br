@@ -806,6 +806,7 @@ def exportar_app(g: gpd.GeoDataFrame, path: Path):
 
     A posição é a oficial da base principal; só quando um recorte oficial dá outra posição a mais de
     100 m (caso do 255, cuja coordenada principal cai a 4 km do endereço) usa-se a do recorte.
+    Os ajustes conferidos à mão (ajustes_manuais.json: nós OSM e fases) entram por cima.
     """
     itens = []
     for _, r in g[g._coord_valida].iterrows():
@@ -814,6 +815,10 @@ def exportar_app(g: gpd.GeoDataFrame, path: Path):
             lat, lon = r._alt_xy
         itens.append({"id": int(r.id_oficial), "lat": round(float(lat), 6), "lon": round(float(lon), 6),
                       "cruzamento": r.tipo_local == "cruzamento", "tipo": r.tipo_semaforo, "nome": r.intersecao})
+    # nós e fases conferidos à mão (ajustes_manuais.json)
+    sys.path.insert(0, str(Path(__file__).parent))
+    from aplicar_ajustes import aplicar
+    aplicar(itens)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(itens, ensure_ascii=False, separators=(",", ":")))
 

@@ -1,0 +1,60 @@
+{
+  "_sobre": "Semáforos da CTTU conferidos à mão (aplicar_ajustes.py mescla em public/data/semaforos_cttu.json). nos = nós OSM do controlador (substituem o encaixe automático; se nenhum existir no mapa, volta o automático). pontos = [lat, lon] onde criar o semáforo na via mais próxima. fases = ordem do ciclo; vias = partes do nome da via de chegada, \"*\" = o resto, [] = só pedestres. Tempos sintéticos (a CTTU não publica os planos). Nós conferidos no OSM de 2026-10 (mapa-recife-novo.osm).",
+  "ajustes": [
+    {
+      "id": 69,
+      "nota": "Agamenon x Rua do Paissandú / Rua Paissandú x Gen. Joaquim Inácio: as 4 pistas da Agamenon (auxiliar, central e as duas mãos) nas duas Paissandu, mais as convergências na central sentido sul",
+      "nos": [1462082581, 1462082586, 1462082583, 1002219328, 1422741505, 1422741506, 8945140461],
+      "fases": [
+        { "vias": ["Agamenon"], "verde": 40 },
+        { "vias": ["*"], "verde": 25 }
+      ]
+    },
+    {
+      "id": 68,
+      "nota": "Agamenon x Rua Henrique Dias: centrais e auxiliares nos dois sentidos",
+      "nos": [1036684678, 1430717732, 1430717734, 1430717737],
+      "fases": [
+        { "vias": ["Agamenon"], "verde": 40 },
+        { "vias": ["*"], "verde": 25 }
+      ]
+    },
+    {
+      "id": 174,
+      "nota": "Agamenon x Rua Dom Bosco / Rua Joaquim Nabuco: as 4 pistas e a convergência na auxiliar sentido sul",
+      "nos": [1443846306, 994519759, 1001388747, 8955309430, 1036684696, 8955309438],
+      "fases": [
+        { "vias": ["Agamenon"], "verde": 40 },
+        { "vias": ["*"], "verde": 25 }
+      ]
+    },
+    {
+      "id": 711,
+      "nota": "Agamenon x Rua José Luís da Silveira Barros / Pontilhão da Rua Amélia: auxiliar e central sentido sul e a entrada na central sentido norte",
+      "nos": [1441197045, 12412171623, 12412171622],
+      "fases": [
+        { "vias": ["Agamenon"], "verde": 40 },
+        { "vias": ["*"], "verde": 25 }
+      ]
+    },
+    {
+      "id": 37,
+      "nota": "Agamenon x Av. Rui Barbosa / Ponte Raimundo Farias / Rua João Fernandes Vieira: as 4 pistas, a alça da Rui Barbosa na auxiliar sul e a auxiliar norte na João Fernandes Vieira",
+      "nos": [1418602355, 995388322, 324277769, 1036684695, 8958069534],
+      "fases": [
+        { "vias": ["Agamenon"], "verde": 40 },
+        { "vias": ["*"], "verde": 25 }
+      ]
+    },
+    {
+      "id": 672,
+      "nota": "Agamenon x Rua Dr. João Asfora: central e auxiliar sentido norte (na faixa de pedestres) e a entrada da João Asfora; fase de pedestres com tudo fechado",
+      "nos": [11643246225, 11643246224],
+      "pontos": [[-8.0637079, -34.8969417]],
+      "fases": [
+        { "vias": ["Agamenon", "Asfora"], "verde": 40 },
+        { "vias": [], "verde": 15 }
+      ]
+    }
+  ]
+}

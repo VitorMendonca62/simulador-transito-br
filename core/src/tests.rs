@@ -1465,7 +1465,7 @@ const DUAL: &str = r#"<?xml version="1.0"?><osm version="0.6">
 </osm>"#;
 
 fn ext(id: u32, lat: f64, lon: f64, cruzamento: bool) -> crate::extsig::ExtSignal {
-    crate::extsig::ExtSignal { id, lat, lon, cruzamento }
+    crate::extsig::ExtSignal { id, lat, lon, cruzamento, ..Default::default() }
 }
 
 #[test]
@@ -1485,7 +1485,7 @@ fn external_signals_replace_osm_ones() {
     let novos: Vec<&&Node> = sig.iter().filter(|n| n.osm_id >= 200 << 40).collect();
     assert_eq!(novos.len(), 2, "um nó novo em cada mão da avenida");
     assert!(novos.iter().all(|n| n.ends.len() == 2), "nós de trecho");
-    let m = n.ext_signals.as_ref().unwrap();
+    let m = &n.ext_signals.as_ref().unwrap().nodes;
     assert_eq!(m.get(&2), Some(&7));
     assert!(novos.iter().all(|x| m.get(&x.osm_id) == Some(&8)));
     let meta: serde_json::Value = serde_json::from_str(&n.meta_json()).unwrap();
@@ -1549,6 +1549,38 @@ fn external_signal_nodes_share_one_controller() {
 }
 
 #[test]
+fn external_signal_manual_adjustment() {
+    let fases = vec![
+        crate::extsig::ExtPhase { vias: vec!["av. a".into()], verde: 40.0, amarelo: 3.0, vermelho: 2.0 },
+        crate::extsig::ExtPhase { vias: vec!["*".into()], verde: 20.0, amarelo: 3.0, vermelho: 2.0 },
+    ];
+    // só o nó 2 (o encaixe automático pegaria também o 12) e um nó novo na Rua B, ao norte do cruzamento
+    let adj = crate::extsig::ExtSignal { nos: vec![2], pontos: vec![[-8.0590, -34.9050]], fases: fases.clone(), ..ext(9, -8.0600700, -34.9050600, true) };
+    let n = build_network_ext(DUAL.as_bytes(), &[adj]).unwrap();
+    let net = &n.net;
+    let osm: std::collections::HashSet<i64> = net.signals.iter().map(|s| net.nodes[s.node as usize].osm_id).collect();
+    let novo = (200i64 << 40) + 9 * 64 + 32;
+    assert_eq!(osm, [2, novo].into_iter().collect(), "nós do ajuste, sem o encaixe automático");
+    let name = |e: u32| net.names[net.segs[(e >> 1) as usize].name as usize].as_str();
+    let s2 = net.signals.iter().find(|s| net.nodes[s.node as usize].osm_id == 2).unwrap();
+    assert_eq!(s2.phases.iter().map(|p| p.green).collect::<Vec<_>>(), vec![40.0, 20.0]);
+    assert!(!s2.phases[0].ends.is_empty() && s2.phases[0].ends.iter().all(|&e| name(e) == "Av. A"));
+    assert!(!s2.phases[1].ends.is_empty() && s2.phases[1].ends.iter().all(|&e| name(e) == "Rua B"));
+    // no nó novo só chega a Rua B: verde na fase "*", vermelho na da avenida (mesmo ciclo do controlador)
+    let sn = net.signals.iter().find(|s| net.nodes[s.node as usize].osm_id == novo).unwrap();
+    assert_eq!(sn.phases.len(), 2);
+    assert!(sn.phases[0].ends.is_empty() && !sn.phases[1].ends.is_empty());
+    assert_eq!(n.ext_signals.as_ref().unwrap().nodes.get(&novo), Some(&9));
+
+    // nós do ajuste que não existem neste mapa: volta o encaixe automático (com as fases por eixo)
+    let adj = crate::extsig::ExtSignal { nos: vec![999_999], fases, ..ext(9, -8.0600700, -34.9050600, true) };
+    let n = build_network_ext(DUAL.as_bytes(), &[adj]).unwrap();
+    let osm: std::collections::HashSet<i64> = n.net.signals.iter().map(|s| n.net.nodes[s.node as usize].osm_id).collect();
+    assert!(osm.contains(&2) && osm.contains(&12));
+    assert!(n.net.signals.iter().all(|s| s.phases.iter().all(|p| p.green == 30.0)));
+}
+
+#[test]
 fn external_signals_outside_map_keep_osm() {
     let n = build_network_ext(DUAL.as_bytes(), &[ext(1, -23.56, -46.65, true)]).unwrap();
     assert!(n.ext_signals.is_none());
@@ -1565,7 +1597,7 @@ fn cttu_recife() {
     let osm = build_network(&data).unwrap();
     let t = std::time::Instant::now();
     let n = build_network_ext(&data, &pts).unwrap();
-    let m = n.ext_signals.as_ref().unwrap();
+    let m = &n.ext_signals.as_ref().unwrap().nodes;
     let [x0, y0, x1, y1] = n.net.bounds;
     let geo = n.net.geo;
     let inside: Vec<u32> = pts
@@ -1587,4 +1619,66 @@ fn cttu_recife() {
         t.elapsed().as_secs_f64() * 1e3,
         missing
     );
+}
+
+/// Controladores CTTU conferidos à mão: nós, fases e quem tem verde em cada uma, no mapa real.
+/// `RECIFE_OSM=~/Downloads/mapa-recife-novo.osm cargo test --release cttu_ajustes -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn cttu_ajustes_recife() {
+    let Ok(path) = std::env::var("RECIFE_OSM") else { return };
+    let data = std::fs::read(path).unwrap();
+    let pts: Vec<crate::extsig::ExtSignal> = serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap();
+    let n = build_network_ext(&data, &pts).unwrap();
+    let ext = n.ext_signals.as_ref().unwrap();
+    let net = &n.net;
+    let name = |e: u32| net.names.get(net.segs[(e >> 1) as usize].name as usize).map_or("(sem nome)", |s| s.as_str());
+    for p in pts.iter().filter(|p| !p.nos.is_empty() || !p.pontos.is_empty()) {
+        println!("== CTTU {}", p.id);
+        let mut cycle = None;
+        for s in net.signals.iter().filter(|s| ext.nodes.get(&net.nodes[s.node as usize].osm_id) == Some(&p.id)) {
+            let node = &net.nodes[s.node as usize];
+            let c: f32 = s.phases.iter().map(|f| f.green + f.yellow + f.all_red).sum();
+            assert!(cycle.map_or(true, |x| x == c), "mesmo ciclo no controlador");
+            cycle = Some(c);
+            println!("  nó {} ({} ramos)", node.osm_id, node.ends.len());
+            for (k, f) in s.phases.iter().enumerate() {
+                let who: Vec<&str> = f.ends.iter().map(|&e| name(e)).collect();
+                println!("    fase {} {:>3}s: {:?}", k + 1, f.green, who);
+            }
+            assert_eq!(s.phases.len(), p.fases.len(), "nó {}: toda aproximação coberta pelas fases do ajuste", node.osm_id);
+        }
+        let placed = p.nos.iter().filter(|id| net.signals.iter().any(|s| net.nodes[s.node as usize].osm_id == **id)).count();
+        assert_eq!(placed, p.nos.len(), "CTTU {}: todos os nós do ajuste viram semáforo", p.id);
+    }
+}
+
+/// "Fechar o cruzamento" (CTB art. 45) vale só para a parcela `boxBlockPct` dos motoristas: com 0 % quase ninguém
+/// entra sem espaço para sair; com 100 % isso acontece bem mais, e quem está dentro do cruzamento segura a transversal.
+#[test]
+fn box_blocking_applies_only_to_share() {
+    let zones = |pct: f64| format!(r#"{{"zones":[
+      {{"id":1,"gen":2500,"attr":1,"poly":[[-420,-30],[-150,-30],[-150,30],[-420,30]]}},
+      {{"id":2,"gen":2500,"attr":1,"poly":[[150,-30],[420,-30],[420,30],[150,30]]}},
+      {{"id":3,"gen":1500,"attr":2,"poly":[[-60,-320],[60,-320],[60,-250],[-60,-250]]}},
+      {{"id":4,"gen":1500,"attr":2,"poly":[[-60,250],[60,250],[60,320],[-60,320]]}}],
+      "params":{{"seed":3,"hour":8,"busShare":0,"beta":0.01,"boxBlockPct":{pct}}}}}"#);
+    let go = |pct: f64| {
+        let mut n = sample();
+        n.start_sim(&zones(pct)).unwrap();
+        n.sim.as_mut().unwrap().overlap_log = Some(Vec::new());
+        run(&mut n, 1200.0);
+        for l in n.sim.as_ref().unwrap().overlap_log.iter().flatten() {
+            eprintln!("OVL {pct}: {l}");
+        }
+        n.sim.as_ref().unwrap().stats.clone()
+    };
+    let (none, all, part) = (go(0.0), go(100.0), go(30.0));
+    eprintln!("0 %: {none:?}\n100 %: {all:?}\n30 %: {part:?}");
+    assert_eq!(none.box_entries_blockers, 0);
+    assert_eq!(all.box_entries_blockers, all.box_entries);
+    assert!(all.box_entries > (none.box_entries + 5) * 3, "100 % fecha o cruzamento bem mais que 0 %: {} vs {}", all.box_entries, none.box_entries);
+    assert!(part.box_entries_blockers > 0 && part.box_entries_blockers < part.box_entries.max(1) + 1);
+    assert!(all.box_wait_s > none.box_wait_s, "transversal espera mais por cruzamento ocupado");
+    assert_eq!(all.junction_overlaps, 0, "ocupação do ponto de conflito impede colisão com quem está parado no cruzamento");
 }

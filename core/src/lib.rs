@@ -31,10 +31,10 @@ pub struct Network {
     /// conexões por nó só sob demanda (a interface pede ao selecionar); desligado nos testes
     lazy: bool,
     /// semáforos de base externa (nó OSM -> id externo); `None` = semáforos do próprio OSM
-    ext_signals: Option<std::collections::HashMap<i64, u32>>,
+    ext_signals: Option<extsig::ExtSignals>,
 }
 
-fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, ext: Option<&std::collections::HashMap<i64, u32>>) -> Result<Net, String> {
+fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, ext: Option<&extsig::ExtSignals>) -> Result<Net, String> {
     let mut net = Net::build(raw, edits, base)?;
     if !lazy {
         conn::build_connections(&mut net, raw, edits);
@@ -152,7 +152,7 @@ impl Network {
                 json!({
                     "node": s.node,
                     "osm": n.nodes[s.node as usize].osm_id as f64,
-                    "ext": self.ext_signals.as_ref().and_then(|m| m.get(&n.nodes[s.node as usize].osm_id)),
+                    "ext": self.ext_signals.as_ref().and_then(|m| m.nodes.get(&n.nodes[s.node as usize].osm_id)),
                     "offset": s.offset,
                     "phases": s.phases.iter().map(|p| json!({"green": p.green, "yellow": p.yellow, "allRed": p.all_red, "ends": p.ends})).collect::<Vec<_>>(),
                     "ends": s.ends.iter().map(|e| json!({"end": e.end, "key": e.key, "x": e.pos[0], "y": e.pos[1], "a": e.angle})).collect::<Vec<_>>(),

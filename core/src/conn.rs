@@ -461,7 +461,7 @@ fn axes_of<'a>(angles: impl Iterator<Item = &'a f64>) -> Vec<f64> {
 /// Monta os semáforos. `ext` (nó OSM -> código externo) junta num só controlador os nós de mesmo código
 /// (cruzamento de pista dupla, travessia nas duas mãos): mesmo ciclo, mesma defasagem e fases alinhadas
 /// por eixo de aproximação, para que as mãos de um mesmo cruzamento não abram verde conflitante.
-pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32>>) {
+pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::ExtSignals>) {
     let mut signals = Vec::new();
     // aproximações (ponta, ângulo) de cada nó semaforizado
     let mut appr: Vec<(usize, Vec<(u32, f64)>)> = Vec::new();
@@ -483,7 +483,7 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32
         }
     }
     // controlador de cada nó: o código externo, ou o próprio nó (chave negativa)
-    let ctrl_key = |ni: usize| match ext.and_then(|m| m.get(&net.nodes[ni].osm_id)) {
+    let ctrl_key = |ni: usize| match ext.and_then(|m| m.nodes.get(&net.nodes[ni].osm_id)) {
         Some(&c) => c as i64,
         None => -(ni as i64) - 1,
     };
@@ -507,6 +507,8 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32
         let node = &net.nodes[ni];
         let (axes, midblock, offset) = &ctrls[&ctrl_key(ni)];
         let edit = edits.sigs.get(&node.osm_id);
+        // fases conferidas à mão para o controlador externo
+        let fixed = u32::try_from(ctrl_key(ni)).ok().and_then(|c| ext.and_then(|m| m.phases.get(&c)));
         let mut phases: Vec<Phase> = match edit.and_then(|e| e.phases.as_ref()) {
             Some(list) => {
                 let keys: Vec<(u32, String)> = approaches.iter().map(|(e, _)| (*e, approach_key(net, ni as u32, *e))).collect();
@@ -527,6 +529,26 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32
                 }
                 ps
             }
+            // fases pelo nome da via de chegada; o que nenhuma cita vai para a de "*" ou ganha fase própria
+            None if fixed.is_some() => {
+                let list = fixed.unwrap();
+                let name = |e: u32| net.names.get(net.segs[(e >> 1) as usize].name as usize).map_or("", |s| s.as_str());
+                let cited = |e: u32| list.iter().any(|f| f.cites(name(e)));
+                let mut ps: Vec<Phase> = list
+                    .iter()
+                    .map(|f| Phase {
+                        green: f.verde.clamp(0.0, 600.0),
+                        yellow: f.amarelo.clamp(0.0, 60.0),
+                        all_red: f.vermelho.clamp(0.0, 60.0),
+                        ends: approaches.iter().map(|a| a.0).filter(|&e| f.cites(name(e)) || (f.rest() && !cited(e))).collect(),
+                    })
+                    .collect();
+                let rest: Vec<u32> = approaches.iter().map(|a| a.0).filter(|e| !ps.iter().any(|p| p.ends.contains(e))).collect();
+                if !rest.is_empty() {
+                    ps.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: rest });
+                }
+                ps
+            }
             // uma fase por eixo do controlador; um nó sem aproximação naquele eixo fica todo vermelho nela
             None => (0..axes.len())
                 .map(|k| Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().filter(|a| axis_of(axes, a.1) == Some(k)).map(|a| a.0).collect() })
@@ -536,7 +558,7 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&HashMap<i64, u32
             phases.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).collect() });
         }
         // semáforo em trecho (sem cruzamento): fase própria para a travessia de pedestres, que para os dois sentidos
-        if edit.map_or(true, |e| e.phases.is_none()) && *midblock {
+        if edit.map_or(true, |e| e.phases.is_none()) && fixed.is_none() && *midblock {
             phases.push(Phase { green: 12.0, yellow: 0.0, all_red: 0.0, ends: Vec::new() });
         }
         let mut ends = Vec::new();
