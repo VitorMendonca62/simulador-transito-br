@@ -1,80 +1,32 @@
 # Simulador de Trânsito BR
 
-Simulador de trânsito no navegador, com comportamento brasileiro, para gerentes e planejadores testarem mudanças viárias (faixas, semáforos, conversões, vias novas) e compararem o impacto no trânsito. Roda 100% no navegador, sem servidor.
+**Simulador de trânsito microscópico que roda inteiro no navegador, com regras brasileiras (CTB, mão direita) e dados reais do Recife.**
 
-As imagens abaixo usam um recorte real do **Recife** (centro, região da Av. Agamenon Magalhães) importado do OpenStreetMap: 548 nós, 712 trechos, 1.443 faixas e 43 semáforos.
+Feito para gestores e planejadores testarem mudanças viárias antes de executá-las: tirar ou criar uma faixa, mudar um semáforo, proibir uma conversão, abrir uma via nova. Depois é só comparar o trânsito antes e depois. Não precisa de servidor nem de instalação: o núcleo é Rust compilado para WebAssembly e o mapa é desenhado em WebGL.
 
-![Mapa do Recife importado](docs/img/recife-mapa.jpg)
-
-### Recife inteiro com dados da Pesquisa OD 2018
-
-O mesmo simulador com o arquivo `mapa-recife-novo.osm`, que cobre quase toda a cidade: 31.924 nós, 42.106 trechos, 84.122 faixas e 1.071 semáforos.
-
-**Malha viária, sem zonas.**
-
-![Malha viária do Recife](docs/img/recife-novo-mapa.jpg)
-
-**Zonas de tráfego da Pesquisa OD 2018.** São 128 zonas com vias no mapa, importadas com a matriz de carro dirigindo. As 125 zonas da Região Metropolitana que ficam fora do mapa entram pela borda mais próxima.
-
-![Zonas da Pesquisa OD 2018](docs/img/recife-novo-zonas.jpg)
-
-**Trânsito com 50 mil carros na rede.** O pico da manhã foi simulado às 07:22, com a demanda da pesquisa multiplicada por 3: a pesquisa só cobre trabalho e educação. Nesse momento havia 50.040 veículos circulando e 15 mil viagens concluídas, a uma velocidade média de 9,7 km/h. As cores mostram a velocidade de cada veículo: vermelho é parado, laranja até 20 km/h, amarelo até 40 km/h, verde é livre e azul é ônibus.
+[![Licença: AGPL v3](https://img.shields.io/badge/licen%C3%A7a-AGPL--3.0-blue.svg)](LICENSE)
+![Rust + WebAssembly](https://img.shields.io/badge/n%C3%BAcleo-Rust%20%2B%20WASM-orange.svg)
+![React + PixiJS](https://img.shields.io/badge/interface-React%20%2B%20PixiJS-61dafb.svg)
 
 ![Simulação com 50 mil veículos no Recife](docs/img/recife-novo-simulacao.jpg)
 
-![Centro do Recife congestionado](docs/img/recife-novo-simulacao-zoom.jpg)
+<sub>Pico da manhã no Recife com a demanda da Pesquisa OD 2018: 50 mil veículos na rede. Vermelho é parado, laranja até 20 km/h, amarelo até 40 km/h, verde é livre e azul é ônibus.</sub>
 
-## O que faz
+## Sumário
 
-- **Importa mapas do OpenStreetMap** (`.osm` ou `.pbf`) e monta o grafo viário: trechos, faixas por sentido, semáforos, rotatórias, faixas de ônibus, mão única, restrições de conversão.
-- **Desenha a via como ela é**: asfalto, sinalização de solo (linha amarela dupla, faixas brancas, zebras, retenção), nomes de ruas.
-- **Editor de conversões estilo TM:PE**: clique num cruzamento e arraste de uma faixa de origem para uma de destino para permitir ou proibir manobras.
-- **Editor de vias**: número e largura de faixas, mão única, faixa de ônibus; construir vias novas e demolir trechos.
-- **Semáforos**: adicionar, remover e configurar fases, tempos e defasagem, em cruzamentos ou em qualquer ponto de uma via (com fase de pedestres).
-- **Placas de preferência**: em cruzamentos sem semáforo, defina para cada ramo se é via preferencial, "dê a preferência" ou "pare" (ou deixe automático pela hierarquia da via).
-- **Demanda por zonas**: desenhe zonas de geração e atração de viagens. A matriz origem-destino sai de um modelo gravitacional, com perfis horários, e qualquer célula pode ser fixada à mão.
-- **Dados reais do Recife**: importe as zonas de tráfego e a matriz de carro da **Pesquisa Origem-Destino Metropolitana 2018** (ver [Dados reais do Recife](#dados-reais-do-recife-pesquisa-od-2018)).
-- **Simulação microscópica** de carros e ônibus:
-  - roteamento por faixa, com troca de faixa planejada;
-  - semáforo com amarelo e esquerda permissiva;
-  - preferência por brecha, rotatória e a regra da direita do CTB;
-  - motoristas que desrespeitam a sinalização (opcional).
+- [Início rápido](#início-rápido)
+- [O que dá para fazer](#o-que-dá-para-fazer)
+- [Como usar](#como-usar)
+- [Dados reais do Recife](#dados-reais-do-recife)
+- [Arquitetura](#arquitetura)
+- [Desenvolvimento](#desenvolvimento)
+- [Limitações](#limitações)
+- [Fontes dos dados](#fontes-dos-dados)
+- [Licença](#licença)
 
-  É determinística por semente: o mesmo cenário dá o mesmo resultado.
-- **Análise**: mapa de calor (velocidade ou filas), gráficos no tempo com replay e comparação A/B de cenários.
-- **Depuração**: clique num veículo para ver o estado completo. Aparecem a rota, a faixa, o líder, a próxima manobra, se ele pode entrar no cruzamento e quem está bloqueando. Dá para avançar a simulação passo a passo e listar os veículos parados há mais tempo. A barra de status mostra quadros por segundo, CPU, GPU e memória.
+## Início rápido
 
-### Simulação e mapa de calor
-
-Vermelho é parado, laranja é lento e verde é fluxo livre. Os gráficos acompanham veículos na rede, velocidade média, concluídos por minuto e fila de entrada.
-
-![Simulação com mapa de calor de velocidade](docs/img/recife-simulacao-calor.jpg)
-
-### Filas num semáforo
-
-Carros e ônibus respeitam o semáforo e formam filas. Os quadrados são veículos (cor pela velocidade).
-
-![Fila num semáforo](docs/img/recife-fila-semaforo.jpg)
-
-### Editor de conversões
-
-Clique num cruzamento: as origens são os pontos maiores e os destinos os menores. Arraste para criar uma conversão e clique numa curva para removê-la.
-
-![Conversões de um cruzamento](docs/img/recife-conversoes.jpg)
-
-### Rota de um veículo
-
-Clique num carro ou ônibus para ver o caminho que ele ainda vai percorrer, o destino, a velocidade e há quanto tempo está parado.
-
-![Rota de um veículo selecionado](docs/img/recife-rota-veiculo.jpg)
-
-### Comparação de cenários (A/B)
-
-Salve o estado atual como cenário, altere o mapa (por exemplo, tire uma faixa de uma avenida), salve de novo e compare. Cada cenário roda sem desenho, com a mesma semente, e a comparação mostra vazão, atraso total, filas e os cruzamentos mais afetados.
-
-## Como rodar
-
-Requisitos: Node.js, [Rust](https://rustup.rs) e [`wasm-pack`](https://rustwasm.github.io/wasm-pack/).
+Requisitos: [Node.js](https://nodejs.org) 20.19+ ou 22.12+, [Rust](https://rustup.rs) e [`wasm-pack`](https://rustwasm.github.io/wasm-pack/).
 
 ```bash
 npm install
@@ -82,97 +34,197 @@ npm run build:core   # compila o núcleo Rust para WebAssembly
 npm run dev          # abre em http://localhost:5173
 ```
 
-Clique em **Importar mapa** (`.osm`, `.pbf`) ou em **Exemplo** para o mapa sintético. Para um recorte real, exporte uma área em [openstreetmap.org](https://www.openstreetmap.org/export) (até alguns km²) e importe o arquivo.
+No app, clique em **Recife**. O mapa da cidade já vem com o projeto, e o app pergunta se você quer importar junto:
 
-Outros comandos:
+- as **zonas de demanda da Pesquisa OD 2018**, com a matriz de viagens de carro;
+- os **semáforos oficiais da CTTU**, no lugar dos do OpenStreetMap.
 
-```bash
-npm run build   # núcleo + checagem de tipos + build de produção
-npm test        # testes do núcleo Rust (cargo test)
-npm run sample  # regenera o mapa de exemplo em samples/
-```
+Depois abra **Simulação** no trilho da direita e clique em **Iniciar**. A simulação começa às 05:00 e segue o perfil horário da pesquisa.
+
+Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.openstreetmap.org/export) ou baixe um recorte `.pbf` (Geofabrik, BBBike) e use **Importar → Mapa**.
+
+## O que dá para fazer
+
+**Rede viária**
+- Importa mapas do OpenStreetMap (`.osm` ou `.pbf`) e monta o grafo: trechos, faixas por sentido, mão única, rotatórias, faixas de ônibus, viadutos e túneis em níveis separados, restrições de conversão.
+- Desenha a via como ela é: asfalto, linha amarela dupla, faixas brancas, zebras, linha de retenção e nomes das ruas.
+
+**Edição**
+- **Conversões estilo TM:PE** (Cities: Skylines): clique num cruzamento e arraste de uma faixa de origem até uma de destino para liberar ou proibir a manobra.
+- **Faixas**: número e largura de faixas, mão única, faixa de ônibus e inversão de sentido, num trecho ou na via inteira.
+- **Construção e demolição**: desenhe vias novas a partir de presets (rua local, avenida 2+2, via expressa…) ou remova trechos. <kbd>Ctrl</kbd>+<kbd>Z</kbd> desfaz.
+- **Semáforos**: adicione, remova e configure fases, tempos e defasagem (onda verde), em cruzamentos ou em qualquer ponto de uma via, com fase de pedestres.
+- **Placas de preferência**: nos cruzamentos sem semáforo, cada ramo pode ser via preferencial, "dê a preferência" ou "pare".
+
+**Demanda e simulação**
+- **Zonas de demanda**: desenhe zonas de geração e atração. A matriz origem-destino sai de um modelo gravitacional com perfis horários, e qualquer célula pode ser fixada à mão.
+- **Simulação microscópica** de carros e ônibus: modelo de seguimento IDM, troca de faixa planejada pela rota, amarelo e esquerda permissiva no semáforo, preferência por aceitação de brecha, rotatórias e a regra da direita do CTB.
+- **Comportamento ajustável**: % de ônibus, motoristas com app de navegação desviando em tempo real (estilo Waze), quem ignora a sinalização e quem "fecha o cruzamento" (CTB art. 45). Já vem com valores típicos do Recife.
+- **Determinística por semente**: o mesmo cenário dá sempre o mesmo resultado.
+
+**Análise**
+- Mapa de calor de velocidade ou de filas, gráficos ao longo do tempo com replay.
+- **Cenários A/B**: salve o estado atual, altere o mapa, salve de novo e compare vazão, atraso, filas e os cruzamentos mais afetados, com a mesma demanda e semente.
+- **Depuração**: clique num veículo para ver rota, faixa, líder, próxima manobra e quem o está bloqueando; avance passo a passo e liste os veículos parados há mais tempo.
 
 ## Como usar
 
-1. **Conversões**: selecione cruzamentos, edite manobras e semáforos.
-2. **Faixas**: selecione uma via e altere faixas, largura, sentido e faixa de ônibus.
-3. **Construir** e **Demolir**: crie vias novas (presets de via) ou remova trechos.
-4. **Semáforo**: clique em qualquer ponto de uma via para colocar um semáforo.
-5. **Zonas**: desenhe ao menos duas zonas e ajuste geração, atração e perfil. A matriz OD aparece no painel. Com um mapa do Recife, use **Importar zonas da Pesquisa OD 2018**.
-6. **Simulação**: **Iniciar**, escolha a velocidade (1× a 30×), ligue o mapa de calor e clique nos veículos.
-7. **Cenários**: salve, altere e compare. Tudo é guardado no navegador (IndexedDB) e pode ser exportado em JSON.
+**Barra superior**
 
-## Dados reais do Recife (Pesquisa OD 2018)
+| Botão | O que faz |
+| --- | --- |
+| **Importar → Mapa** | Abre um `.osm` ou `.pbf` e descarta as edições do mapa anterior. Também dá para arrastar o arquivo para a janela. |
+| **Importar → Cenário** | Aplica um `.json` exportado (vias, faixas, semáforos, conversões e demanda) sobre o mapa aberto. |
+| **Recife** | Abre o mapa do Recife que vem com o projeto, com as zonas da OD 2018 e os semáforos da CTTU, se você quiser. |
+| **Exportar cenário** | Baixa um `.json` com todas as edições. |
+| **+ / − / Ajustar** | Zoom e enquadrar o mapa inteiro. A escala aparece no rodapé. |
 
-O projeto traz um pipeline reproduzível que transforma os microdados oficiais da Pesquisa Origem-Destino Metropolitana 2018 (ICPS / Grande Recife Consórcio, publicados no [Portal de Dados Abertos do Recife](https://dados.recife.pe.gov.br/dataset/pesquisa-origemdestino-metropolitana-2018)) em demanda para o simulador.
+**Trilho da direita.** Cada ícone abre um painel com instruções no topo. Os ícones de edição também ligam a ferramenta correspondente no mapa.
+
+| Painel | Para quê |
+| --- | --- |
+| **Conversões** | Clique num cruzamento (nó laranja) para ver e editar as manobras faixa a faixa, adicionar semáforo e definir placas de preferência. |
+| **Faixas** | Clique numa via para mudar faixas, largura, mão e faixa de ônibus. |
+| **Construção e demolição** | Alterne entre **Construir** (clique para cada ponto da via nova) e **Demolir** (clique no trecho). |
+| **Semáforos** | Lista com busca por rua ou código CTTU. Clique num semáforo, na lista ou no mapa, para ver ciclo, fases e quando cada aproximação tem verde. **Colocar semáforo** cria um semáforo onde você clicar. |
+| **Zonas de demanda** | Desenhe zonas ou importe as da Pesquisa OD 2018; veja a matriz OD e as entradas e saídas na divisa. |
+| **Simulação** | Iniciar, pausar, velocidade (1× a 30×), mapa de calor, gráficos e os **parâmetros de demanda** (hora, ônibus, app de navegação, infrações). |
+| **Cenários A/B** | Salve, altere e compare cenários. |
+| **Camadas** | Liga e desliga vias, sinalização, nomes, nós, semáforos, veículos, zonas e grade. |
+
+Tudo fica salvo no navegador (IndexedDB): ao reabrir, o mapa e as edições voltam como estavam.
+
+<table>
+  <tr>
+    <td><img src="docs/img/recife-conversoes.jpg" alt="Editor de conversões de um cruzamento"><br><sub>Editor de conversões: origens são os pontos maiores, destinos os menores.</sub></td>
+    <td><img src="docs/img/recife-fila-semaforo.jpg" alt="Fila num semáforo"><br><sub>Carros e ônibus formando fila no semáforo.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/recife-simulacao-calor.jpg" alt="Mapa de calor de velocidade"><br><sub>Mapa de calor de velocidade e gráficos da simulação.</sub></td>
+    <td><img src="docs/img/recife-rota-veiculo.jpg" alt="Rota de um veículo selecionado"><br><sub>Rota restante, destino e estado de um veículo.</sub></td>
+  </tr>
+</table>
+
+## Dados reais do Recife
+
+O projeto traz o mapa do Recife (`public/data/mapa-recife.osm.gz`, recorte do OpenStreetMap de outubro de 2026) e dois conjuntos de dados oficiais já processados. Os scripts que geram cada um estão no repositório e podem ser rodados de novo.
+
+![Zonas de tráfego da Pesquisa OD 2018](docs/img/recife-novo-zonas.jpg)
+
+### Pesquisa Origem-Destino 2018
+
+Os microdados oficiais da Pesquisa Origem-Destino Metropolitana 2018 (ICPS / Grande Recife Consórcio) viram zonas de tráfego e 24 matrizes horárias de viagens de carro.
 
 ```bash
 pip install -r scripts/od_recife/requirements.txt
 python scripts/od_recife/gerar_od.py
 ```
 
-O script baixa os arquivos oficiais para `data/od_recife/_brutos/` e gera:
+O script baixa os arquivos para `data/od_recife/_brutos/` e gera dois conjuntos de saídas:
 
-- **Em `data/od_recife/`:**
-  - fluxos origem-destino de carro por zona de tráfego e por bairro (pico da manhã, pico da tarde e dia útil);
-  - os 10 principais destinos de cada origem;
-  - matrizes OD e o perfil horário;
-  - a correspondência zona × bairro;
-  - uma validação contra as matrizes oficiais de 2020.
-- **`public/data/od2018_zonas.json`:** as 253 zonas de tráfego e 24 matrizes horárias de carro dirigindo, lidas pelo simulador.
+- **Em `data/od_recife/`:** fluxos por zona e por bairro, os principais destinos de cada origem, o perfil horário e uma validação contra as matrizes oficiais de 2020.
+- **Em `public/data/od2018_zonas.json`:** as 253 zonas e as matrizes horárias, que é o arquivo lido pelo simulador.
 
-No painel **Zonas**, **Importar zonas da Pesquisa OD 2018** faz o seguinte:
+Ao importar, o simulador mantém as zonas que têm vias no mapa. As cidades vizinhas entram e saem por portais nas vias principais da divisa (BR-101, BR-232, Agamenon…). A matriz acompanha o relógio da simulação, e uma escala de demanda (0–150 %) ajusta o volume.
 
-- mantém as zonas que têm vias no mapa carregado, recortadas à área da rede;
-- incorpora as demais à zona de borda mais próxima;
-- fixa a matriz da hora escolhida, que acompanha o relógio da simulação;
-- oferece uma **escala de demanda** (0–150%) para calibrar o volume.
+Antes de usar, considere três premissas:
 
-Premissas importantes:
+- **Só trabalho e educação:** compras, saúde, motos, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do real.
+- **Pessoas, não veículos:** os números são pessoas expandidas da amostra. Na categoria "carro dirigindo", um condutor equivale a um veículo.
+- **Dados de 2018:** a pesquisa de 2021 não publicou matriz nem microdados.
 
-- **Unidades e veículos:** os números são pessoas expandidas da amostra. Para "carro dirigindo", um condutor equivale a um veículo.
-- **O que a matriz cobre:** só viagens de **trabalho e educação**. Compras, saúde, serviços, motos, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do tráfego real.
-- **Ano:** os dados são de 2018. A pesquisa OD do Recife de 2021 não publicou matriz nem microdados.
+Detalhes em [`data/od_recife/metadados_e_limitacoes.md`](data/od_recife/metadados_e_limitacoes.md).
 
-Fontes, definições de colunas, filtros e limitações estão em [`data/od_recife/metadados_e_limitacoes.md`](data/od_recife/metadados_e_limitacoes.md).
+### Semáforos da CTTU
+
+Os semáforos vêm da base oficial da CTTU (712 pontos) e substituem os `highway=traffic_signals` do OpenStreetMap.
+
+```bash
+pip install -r scripts/semaforos_recife/requirements.txt
+python scripts/semaforos_recife/gerar_semaforos.py
+```
+
+O script baixa, audita e normaliza a base, agrupa os pontos por interseção e compara com o OSM. Os relatórios ficam em `data/semaforos_recife/`; o arquivo `public/data/semaforos_cttu.json` é o lido pelo simulador.
+
+- **Encaixe no mapa:** o núcleo (`core/src/extsig.rs`) encaixa cada ponto nos nós do mapa. Os nós de um mesmo código CTTU formam um controlador só, com o mesmo ciclo e a mesma defasagem.
+- **Ajustes manuais:** cruzamentos em que o encaixe automático erra, como as pistas centrais e auxiliares da Agamenon, são corrigidos à mão em [`scripts/semaforos_recife/ajustes_manuais.json`](scripts/semaforos_recife/ajustes_manuais.json). Lá ficam os nós do OSM e as fases pelo nome da via.
+- **Reaplicar os ajustes:** para reaplicar sem baixar nada, rode `python scripts/semaforos_recife/aplicar_ajustes.py`.
+
+A CTTU não publica os planos semafóricos. Por isso, ciclos e tempos de verde são estimados e podem ser editados no painel **Semáforos**.
 
 ## Arquitetura
 
+```mermaid
+flowchart LR
+  UI["React<br/>painéis e estado (zustand)"] <--> W["Web Worker"]
+  W <--> C["Núcleo Rust → WASM<br/>OSM, grafo, edição, malhas,<br/>demanda, simulação"]
+  W -- "buffers (zero cópia)" --> R["PixiJS / WebGL<br/>mapa, veículos, calor"]
+  UI --> DB[("IndexedDB<br/>mapa e edições")]
+```
+
 | Parte | Tecnologia |
 | --- | --- |
-| Núcleo (grafo, edição, malhas, simulação, métricas) | Rust compilado para WebAssembly, rodando num Web Worker |
-| Desenho do mapa e veículos | PixiJS (WebGL) |
+| Núcleo (grafo, edição, malhas, demanda, simulação, métricas) | Rust compilado para WebAssembly, num Web Worker |
+| Desenho do mapa e dos veículos | PixiJS (WebGL) |
 | Painéis e estado | React + zustand |
 | Persistência | IndexedDB (`idb-keyval`) |
 
-O mapa é desenhado em ladrilhos de 1 km que só são regerados onde houve edição, e a simulação roda em passos fixos de 0,2 s na própria thread do worker, sem travar a interface. A meta é cerca de 50 mil veículos no navegador.
-
-Estrutura:
+- **Desenho do mapa:** a geometria é gerada no Rust e enviada pronta. O mapa é dividido em ladrilhos de 1 km, e só os ladrilhos tocados por uma edição são regerados.
+- **Simulação:** roda em passos fixos de 0,2 s dentro do worker, sem travar a interface. A meta é cerca de 50 mil veículos no navegador.
 
 ```
-core/        núcleo Rust (osm, net, conn, render, demand, sim/)
-src/engine/  desenho (MapView, camadas de semáforo, veículos, calor, conversões)
-src/model/   estado, ponte com o worker, persistência
-src/ui/      painéis
-docs/        CONTEXT.md (decisões e roadmap) e imagens
-scripts/     mapa de exemplo e pipeline da Pesquisa OD 2018 (od_recife/)
-data/        saídas da Pesquisa OD 2018 (CSVs e metadados)
-public/data/ zonas e matrizes horárias lidas pelo simulador
+core/                 núcleo Rust: osm, net, conn, extsig, render, demand, sim/
+src/engine/           desenho: MapView e camadas (semáforos, veículos, calor, conversões)
+src/model/            estado, ponte com o worker, persistência
+src/ui/               barra superior, trilho de painéis e painéis
+scripts/od_recife/    pipeline da Pesquisa OD 2018
+scripts/semaforos_recife/  pipeline dos semáforos da CTTU e ajustes manuais
+data/                 saídas dos pipelines (CSVs, relatórios, metadados)
+public/data/          mapa do Recife, zonas e semáforos lidos pelo app
+docs/CONTEXT.md       decisões, medições e roadmap
 ```
 
-Contexto completo, decisões, medições de desempenho e limitações conhecidas em [`docs/CONTEXT.md`](docs/CONTEXT.md).
+O histórico completo das decisões, as medições de desempenho e as limitações conhecidas estão em [`docs/CONTEXT.md`](docs/CONTEXT.md).
 
-## Limitações atuais
+## Desenvolvimento
 
-- Só carros e ônibus; sem motos, caminhões nem pedestres (a fase de pedestres do semáforo só interrompe os carros).
-- Dentro de cada zona, o veículo nasce numa faixa sorteada pelo comprimento e termina num nó sorteado, sem dados de onde as pessoas moram ou trabalham. Em mapas grandes com muitas zonas, cada zona fica com um único nó de destino.
-- Com a Pesquisa OD, o tráfego que vem de fora do mapa nasce espalhado pela zona de borda, e não nas vias por onde de fato entraria.
-- Ainda não há linhas de ônibus com paradas.
-- Cada edição reconstrói a rede inteira (cerca de 200 ms no mapa de teste de 22 mil nós; a meta é 100 ms).
-- Um cenário só vale para o arquivo OSM com que foi criado.
+```bash
+npm run dev     # servidor de desenvolvimento
+npm run build   # núcleo + checagem de tipos + build de produção (dist/)
+npm test        # testes do núcleo (cargo test)
+npm run sample  # regenera o mapa sintético de exemplo em samples/
+```
 
-## Dados
+Alguns testes usam o mapa real e ficam desligados por padrão. Para rodá-los, passe o caminho de um `.osm` do Recife:
 
-O recorte do Recife vem do OpenStreetMap © contribuidores do OpenStreetMap, licença [ODbL](https://www.openstreetmap.org/copyright).
+```bash
+RECIFE_OSM=caminho/para/mapa-recife.osm cargo test --release --manifest-path core/Cargo.toml -- --ignored --nocapture
+```
 
-A Pesquisa Origem-Destino Metropolitana 2018 é do Instituto da Cidade Pelópidas Silveira (ICPS) e do Grande Recife Consórcio de Transporte, publicada pela Prefeitura do Recife no Portal de Dados Abertos. Os limites de bairros vêm do mesmo portal.
+Contribuições são bem-vindas: abra uma issue para discutir a mudança antes de um pull request grande.
+
+## Limitações
+
+- **Tipos de veículo:** só carros e ônibus; sem motos, caminhões nem pedestres. A fase de pedestres do semáforo apenas para os carros.
+- **Ônibus:** ainda não há linhas com paradas.
+- **Origem e destino dentro da zona:** são sorteados (faixa pelo comprimento, nó de destino ao acaso), sem dados de onde as pessoas moram ou trabalham.
+- **Semáforos:** os tempos são de tempo fixo e estimados, sem detecção nem plano real. Os ajustes manuais da CTTU usam ids de nós do OSM de 2026; num OSM muito diferente, volta o encaixe automático.
+- **Desempenho da edição:** cada edição reconstrói a rede inteira. Leva centenas de milissegundos num mapa do tamanho do Recife.
+- **Cenários:** um cenário só vale para o arquivo OSM em que foi criado.
+
+## Fontes dos dados
+
+- **Mapa:** © contribuidores do [OpenStreetMap](https://www.openstreetmap.org/copyright), licença ODbL.
+- **Pesquisa Origem-Destino Metropolitana 2018:** Instituto da Cidade Pelópidas Silveira (ICPS) e Grande Recife Consórcio de Transporte, no [Portal de Dados Abertos do Recife](https://dados.recife.pe.gov.br/dataset/pesquisa-origemdestino-metropolitana-2018).
+- **Semáforos:** base oficial da CTTU (Autarquia de Trânsito e Transporte Urbano do Recife), no [Portal de Dados Abertos do Recife](https://dados.recife.pe.gov.br/dataset/localizacao-dos-semaforos).
+- **Limites de bairros:** Portal de Dados Abertos do Recife.
+
+## Licença
+
+Copyright © 2026 [VitorMendonca62](https://github.com/VitorMendonca62) · [LinkedIn](https://www.linkedin.com/in/vitormendonca62/)
+
+O código é software livre sob a [GNU Affero General Public License v3.0](LICENSE) ou posterior (`AGPL-3.0-or-later`). Você pode usar, estudar, modificar e redistribuir, desde que as versões modificadas também sejam distribuídas sob a AGPL. Isso inclui oferecer o simulador como serviço pela rede: quem roda uma versão modificada para outras pessoas usarem precisa disponibilizar o código-fonte dela.
+
+Para uso comercial sem as obrigações da AGPL (por exemplo, incorporar o simulador num produto fechado), fale com o autor sobre uma licença comercial.
+
+Os dados em `public/data/` e `data/` não são cobertos por esta licença e seguem as licenças das fontes acima. O mapa do OpenStreetMap, por exemplo, segue a ODbL.
