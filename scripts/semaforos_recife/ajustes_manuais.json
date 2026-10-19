@@ -1,59 +1,332 @@
 {
-  "_sobre": "Semáforos da CTTU conferidos à mão (aplicar_ajustes.py mescla em public/data/semaforos_cttu.json). nos = nós OSM do controlador (substituem o encaixe automático; se nenhum existir no mapa, volta o automático). pontos = [lat, lon] onde criar o semáforo na via mais próxima. fases = ordem do ciclo; vias = partes do nome da via de chegada, \"*\" = o resto, [] = só pedestres. Tempos sintéticos (a CTTU não publica os planos). Nós conferidos no OSM de 2026-10 (mapa-recife-novo.osm).",
+  "_sobre": "Semáforos da CTTU conferidos à mão (aplicar_ajustes.py mescla em public/data/semaforos_cttu.json). nos = nós OSM do controlador (substituem o encaixe automático; se nenhum existir no mapa, volta o automático). pontos = [lat, lon] onde criar o semáforo na via mais próxima. fases = ordem do ciclo; vias = partes do nome da via de chegada (ou \"way:<id>\"), \"*\" = o resto, [] = só pedestres. proibir = conversões [way de origem, way de destino] proibidas nos nós. setas = turn:lanes conferido à mão {way, turn, lado?}. Tempos sintéticos (a CTTU não publica os planos). Nós conferidos no OSM de 2026-10 (mapa-recife-novo.osm).",
   "ajustes": [
     {
-      "id": 69,
-      "nota": "Agamenon x Rua do Paissandú / Rua Paissandú x Gen. Joaquim Inácio: as 4 pistas da Agamenon (auxiliar, central e as duas mãos) nas duas Paissandu, mais as convergências na central sentido sul",
-      "nos": [1462082581, 1462082586, 1462082583, 1002219328, 1422741505, 1422741506, 8945140461],
+      "id": 28,
+      "nota": "Rua Dom Bosco x Av. Manoel Borba / Rua Paissandú / Av. Lins Petit: Manoel Borba (com a alça da Rua Manoel Borba) e Dom Bosco em 2 fases, sem os nós de passagem; sem o retorno da Dom Bosco norte para a sul por dentro do cruzamento e sem a alça da Manoel Borba descendo a Dom Bosco (essa conversão já é feita na Lins Petit)",
+      "nos": [
+        2249784847,
+        7017307321,
+        1425842043
+      ],
       "fases": [
-        { "vias": ["Agamenon"], "verde": 40 },
-        { "vias": ["*"], "verde": 25 }
-      ]
-    },
-    {
-      "id": 68,
-      "nota": "Agamenon x Rua Henrique Dias: centrais e auxiliares nos dois sentidos",
-      "nos": [1036684678, 1430717732, 1430717734, 1430717737],
-      "fases": [
-        { "vias": ["Agamenon"], "verde": 40 },
-        { "vias": ["*"], "verde": 25 }
-      ]
-    },
-    {
-      "id": 174,
-      "nota": "Agamenon x Rua Dom Bosco / Rua Joaquim Nabuco: as 4 pistas e a convergência na auxiliar sentido sul",
-      "nos": [1443846306, 994519759, 1001388747, 8955309430, 1036684696, 8955309438],
-      "fases": [
-        { "vias": ["Agamenon"], "verde": 40 },
-        { "vias": ["*"], "verde": 25 }
-      ]
-    },
-    {
-      "id": 711,
-      "nota": "Agamenon x Rua José Luís da Silveira Barros / Pontilhão da Rua Amélia: auxiliar e central sentido sul e a entrada na central sentido norte",
-      "nos": [1441197045, 12412171623, 12412171622],
-      "fases": [
-        { "vias": ["Agamenon"], "verde": 40 },
-        { "vias": ["*"], "verde": 25 }
+        {
+          "vias": [
+            "Manoel Borba"
+          ],
+          "verde": 35
+        },
+        {
+          "vias": [
+            "Dom Bosco"
+          ],
+          "verde": 30
+        }
+      ],
+      "proibir": [
+        [
+          316707922,
+          215518885
+        ],
+        [
+          40447628,
+          215518885
+        ]
       ]
     },
     {
       "id": 37,
       "nota": "Agamenon x Av. Rui Barbosa / Ponte Raimundo Farias / Rua João Fernandes Vieira: as 4 pistas, a alça da Rui Barbosa na auxiliar sul e a auxiliar norte na João Fernandes Vieira",
-      "nos": [1418602355, 995388322, 324277769, 1036684695, 8958069534],
+      "nos": [
+        1418602355,
+        995388322,
+        324277769,
+        1036684695,
+        8958069534
+      ],
       "fases": [
-        { "vias": ["Agamenon"], "verde": 40 },
-        { "vias": ["*"], "verde": 25 }
+        {
+          "vias": [
+            "Agamenon"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 66,
+      "nota": "Av. Norte x Rua Vasco da Gama / Rua Padre Lemos: as duas pistas da Av. Norte e a alça da Padre Lemos num ciclo de 2 fases (a Rua Teixeira, a 6 m, ganhava fase própria e o ciclo tinha 3 fases)",
+      "nos": [
+        1586477273,
+        4083697221,
+        3125242387
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Avenida Norte"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "nota": "Agamenon x Rua Henrique Dias: centrais e auxiliares nos dois sentidos",
+      "nos": [
+        1036684678,
+        1430717732,
+        1430717734,
+        1430717737
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Agamenon"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "nota": "Agamenon x Rua do Paissandú / Rua Paissandú x Gen. Joaquim Inácio: as 4 pistas da Agamenon (auxiliar, central e as duas mãos) nas duas Paissandu, mais as convergências na central sentido sul; e o semáforo da Rua Paissandú antes da alça que entra na auxiliar sentido sul (a alça saía antes do semáforo e entrava na auxiliar sem controle)",
+      "nos": [
+        1462082581,
+        1462082586,
+        1462082583,
+        1002219328,
+        1422741505,
+        1422741506,
+        8945140461,
+        8945140459
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Agamenon"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "nota": "Av. Eng. Antônio de Góes x Rua Manoel de Brito: as duas pistas (mão única sentido ponte) e a alça da Manoel de Brito em 2 fases; a Manoel de Brito tinha 4 faixas e só a da esquerda convertia (as outras 3 iam para uma rua de 1 faixa)",
+      "nos": [
+        1639733295,
+        3243189550,
+        1639726764
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Antônio de Góes"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 30
+        }
+      ],
+      "setas": [
+        {
+          "way": 691289958,
+          "turn": "left|left|through|through"
+        },
+        {
+          "way": 151147818,
+          "turn": "left|left|left|through"
+        }
+      ]
+    },
+    {
+      "id": 132,
+      "nota": "Av. Eng. Abdias de Carvalho x Rua João Ivo da Silva: as duas pistas da Abdias e as duas da João Ivo; mais verde para a Abdias (3 faixas, via arterial)",
+      "nos": [
+        341712845,
+        341713007,
+        1431525168,
+        1431525170
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Abdias de Carvalho"
+          ],
+          "verde": 45
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 30
+        }
+      ]
+    },
+    {
+      "id": 174,
+      "nota": "Agamenon x Rua Dom Bosco / Rua Joaquim Nabuco: as 4 pistas e a convergência na auxiliar sentido sul",
+      "nos": [
+        1443846306,
+        994519759,
+        1001388747,
+        8955309430,
+        1036684696,
+        8955309438
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Agamenon"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 422,
+      "nota": "Av. Eng. Abdias de Carvalho x Rua 15 de Março / Rua Tijucas / Rua Serra da Canastra: Abdias, pista lateral e Serra da Canastra juntas; 15 de Março e Tijucas na outra fase (eram 3 fases de 30 s)",
+      "nos": [
+        2025941645,
+        2025941642,
+        2025942493,
+        2025942574
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Abdias de Carvalho",
+            "Serra da Canastra"
+          ],
+          "verde": 45
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
+      ]
+    },
+    {
+      "id": 653,
+      "nota": "Rua Estado de Israel x Av. Lins Petit x Rua Gen. Joaquim Inácio: uma fase por via que converge na Joaquim Inácio; sem o nó 13 m adiante, que fechava para quem acabava de passar no verde; Lins Petit e Estado de Israel entram nas 4 faixas da Joaquim Inácio com as 2 faixas (antes só 1 de cada)",
+      "nos": [
+        5376255138
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Lins Petit"
+          ],
+          "verde": 30
+        },
+        {
+          "vias": [
+            "Estado de Israel"
+          ],
+          "verde": 25
+        },
+        {
+          "vias": [
+            "Joaquim"
+          ],
+          "verde": 15
+        }
+      ],
+      "setas": [
+        {
+          "way": 129182728,
+          "turn": "left;right|right"
+        },
+        {
+          "way": 968290602,
+          "turn": "left|left;right"
+        }
       ]
     },
     {
       "id": 672,
       "nota": "Agamenon x Rua Dr. João Asfora: central e auxiliar sentido norte (na faixa de pedestres) e a entrada da João Asfora; fase de pedestres com tudo fechado",
-      "nos": [11643246225, 11643246224],
-      "pontos": [[-8.0637079, -34.8969417]],
+      "nos": [
+        11643246225,
+        11643246224
+      ],
+      "pontos": [
+        [
+          -8.0637079,
+          -34.8969417
+        ]
+      ],
       "fases": [
-        { "vias": ["Agamenon", "Asfora"], "verde": 40 },
-        { "vias": [], "verde": 15 }
+        {
+          "vias": [
+            "Agamenon",
+            "Asfora"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [],
+          "verde": 15
+        }
+      ]
+    },
+    {
+      "id": 711,
+      "nota": "Agamenon x Rua José Luís da Silveira Barros / Pontilhão da Rua Amélia: auxiliar e central sentido sul e a entrada na central sentido norte",
+      "nos": [
+        1441197045,
+        12412171623,
+        12412171622
+      ],
+      "fases": [
+        {
+          "vias": [
+            "Agamenon"
+          ],
+          "verde": 40
+        },
+        {
+          "vias": [
+            "*"
+          ],
+          "verde": 25
+        }
       ]
     }
   ]

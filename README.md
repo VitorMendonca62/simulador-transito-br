@@ -147,8 +147,9 @@ python scripts/semaforos_recife/gerar_semaforos.py
 
 O script baixa, audita e normaliza a base, agrupa os pontos por interseção e compara com o OSM. Os relatórios ficam em `data/semaforos_recife/`; o arquivo `public/data/semaforos_cttu.json` é o lido pelo simulador.
 
-- **Encaixe no mapa:** o núcleo (`core/src/extsig.rs`) encaixa cada ponto nos nós do mapa. Os nós de um mesmo código CTTU formam um controlador só, com o mesmo ciclo e a mesma defasagem.
-- **Ajustes manuais:** cruzamentos em que o encaixe automático erra, como as pistas centrais e auxiliares da Agamenon, são corrigidos à mão em [`scripts/semaforos_recife/ajustes_manuais.json`](scripts/semaforos_recife/ajustes_manuais.json). Lá ficam os nós do OSM e as fases pelo nome da via.
+- **Encaixe no mapa:** o núcleo (`core/src/extsig.rs`) encaixa cada ponto nos nós de cruzamento ao redor, inclusive nas pistas auxiliares, e ignora nós de passagem. Os nós de um mesmo código CTTU formam um controlador só, com o mesmo ciclo e a mesma defasagem.
+- **Fases automáticas:** a via principal (maior classe e mais faixas) fica numa fase e a transversal na outra. As alças e ruas laterais entram pela direção, e o verde se divide pela capacidade de cada lado.
+- **Ajustes manuais:** cruzamentos em que o encaixe automático erra, como as pistas centrais e auxiliares da Agamenon, são corrigidos à mão em [`scripts/semaforos_recife/ajustes_manuais.json`](scripts/semaforos_recife/ajustes_manuais.json). Lá ficam os nós do OSM, as fases pelo nome da via e, quando o cruzamento precisa, conversões proibidas e as setas de cada faixa.
 - **Reaplicar os ajustes:** para reaplicar sem baixar nada, rode `python scripts/semaforos_recife/aplicar_ajustes.py`.
 
 A CTTU não publica os planos semafóricos. Por isso, ciclos e tempos de verde são estimados e podem ser editados no painel **Semáforos**.

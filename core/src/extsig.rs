@@ -27,13 +27,30 @@ pub struct ExtSignal {
     /// fases conferidas à mão, na ordem do ciclo; vazio = uma fase por eixo de aproximação
     #[serde(default)]
     pub fases: Vec<ExtPhase>,
+    /// conversões proibidas `[via de origem, via de destino]` (ids de way do OSM) nos nós do ajuste,
+    /// como uma restrição `no_*` do OSM (ex.: retorno por dentro de um cruzamento de mãos separadas)
+    #[serde(default)]
+    pub proibir: Vec<[i64; 2]>,
+    /// setas por faixa conferidas à mão, no lugar do `turn:lanes` do OSM
+    #[serde(default)]
+    pub setas: Vec<ExtTurns>,
+}
+
+/// Setas das faixas de uma via (sintaxe do `turn:lanes` do OSM, da esquerda para a direita: `left|through;right`).
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct ExtTurns {
+    pub way: i64,
+    pub turn: String,
+    /// `forward` / `backward` para via de mão dupla; vazio = mão única
+    #[serde(default)]
+    pub lado: String,
 }
 
 /// Fase de um controlador externo. As aproximações entram pelo nome da via de chegada.
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct ExtPhase {
-    /// partes do nome da via (sem diferenciar maiúsculas); `"*"` = aproximações que nenhuma outra fase cita;
-    /// lista vazia = fase só de pedestres (todos os veículos no vermelho)
+    /// partes do nome da via (sem diferenciar maiúsculas) ou `"way:<id>"` (way do OSM, para separar mãos de mesmo
+    /// nome); `"*"` = aproximações que nenhuma outra fase cita; lista vazia = fase só de pedestres (todos no vermelho)
     #[serde(default)]
     pub vias: Vec<String>,
     #[serde(default = "d_green")]
@@ -55,10 +72,13 @@ fn d_all_red() -> f32 {
 }
 
 impl ExtPhase {
-    /// A via `name` é citada pela fase (sem contar o `"*"`).
-    pub fn cites(&self, name: &str) -> bool {
+    /// A via (nome e way do OSM) é citada pela fase (sem contar o `"*"`).
+    pub fn cites(&self, name: &str, way: i64) -> bool {
         let name = name.to_lowercase();
-        self.vias.iter().any(|v| v != "*" && !v.is_empty() && name.contains(&v.to_lowercase()))
+        self.vias.iter().any(|v| match v.strip_prefix("way:") {
+            Some(id) => id.parse::<i64>().ok() == Some(way),
+            None => v != "*" && !v.is_empty() && name.contains(&v.to_lowercase()),
+        })
     }
     pub fn rest(&self) -> bool {
         self.vias.iter().any(|v| v == "*")
@@ -78,6 +98,8 @@ pub struct ExtSignals {
 const R_JUNCTION: f64 = 30.0;
 /// Raio máximo para achar ao menos um nó de interseção
 const R_JUNCTION_MAX: f64 = 50.0;
+/// Pistas auxiliares e mãos afastadas: nó até esta distância que cruza as mesmas duas vias do cruzamento
+const R_AUX: f64 = 60.0;
 /// Distância máxima até a pista, na travessia em trecho
 const R_MIDBLOCK: f64 = 30.0;
 /// Vértice já existente a menos disto é reaproveitado em vez de criar nó
@@ -166,8 +188,44 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
             *uses.entry(r).or_default() += 1;
         }
     }
-    let junctions: Vec<(i64, [f64; 2])> =
-        uses.iter().filter(|e| *e.1 >= 2).filter_map(|(&id, _)| raw.coord(id).map(|(la, lo)| (id, xy(la, lo)))).collect();
+    // entradas (via, sentido) de cada nó: nó de passagem ou de bifurcação (uma entrada só) não tem conflito para o
+    // semáforo resolver e, marcado, só fecha para quem acabou de passar no verde
+    let mut ins: HashMap<i64, u8> = HashMap::new();
+    for &wi in &ways {
+        let w = &raw.ways[wi];
+        let get = |k: &str| w.tags.iter().find(|t| t.0 == k).map(|t| t.1.as_str());
+        let roundabout = matches!(get("junction"), Some("roundabout") | Some("circular"));
+        let (fwd, bwd) = match get("oneway") {
+            Some("yes") | Some("true") | Some("1") => (true, false),
+            Some("-1") | Some("reverse") => (false, true),
+            Some("no") | Some("false") | Some("0") => (true, true),
+            _ => (true, !roundabout && get("highway") != Some("motorway")),
+        };
+        for k in 0..w.refs.len() {
+            *ins.entry(w.refs[k]).or_default() += (fwd && k > 0) as u8 + (bwd && k + 1 < w.refs.len()) as u8;
+        }
+    }
+    // nomes (ids) das vias de carro de cada nó
+    let mut name_id: HashMap<String, u32> = HashMap::new();
+    let mut names: HashMap<i64, Vec<u32>> = HashMap::new();
+    for &wi in &ways {
+        let w = &raw.ways[wi];
+        if let Some(n) = w.tags.iter().find(|t| t.0 == "name").map(|t| t.1.clone()) {
+            let k = name_id.len() as u32;
+            let n = *name_id.entry(n).or_insert(k);
+            for &r in &w.refs {
+                let v = names.entry(r).or_default();
+                if !v.contains(&n) {
+                    v.push(n);
+                }
+            }
+        }
+    }
+    let junctions: Vec<(i64, [f64; 2])> = uses
+        .iter()
+        .filter(|e| *e.1 >= 2 && ins.get(e.0).copied().unwrap_or(0) >= 2)
+        .filter_map(|(&id, _)| raw.coord(id).map(|(la, lo)| (id, xy(la, lo))))
+        .collect();
 
     // trechos das vias de carro já projetados: (via, índice do trecho, a, b)
     let mut segs: Vec<(usize, usize, [f64; 2], [f64; 2])> = Vec::new();
@@ -182,6 +240,8 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
 
     let mut marked: HashMap<i64, u32> = HashMap::new();
     let mut phases: HashMap<u32, Vec<ExtPhase>> = HashMap::new();
+    // cruzamentos encaixados automaticamente: (id, posição, nós do núcleo), para achar as pistas auxiliares no fim
+    let mut aux: Vec<(u32, [f64; 2], Vec<i64>)> = Vec::new();
     let mut new_nodes: Vec<(i64, i32, i32)> = Vec::new();
     // (via, posição de inserção, t no trecho, id novo), aplicadas no fim de trás para frente
     let mut inserts: Vec<(usize, usize, f64, i64)> = Vec::new();
@@ -215,6 +275,9 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
                 if raw.coord(id).is_some() {
                     marked.entry(id).or_insert(s.id);
                     any = true;
+                    for &[from, to] in &s.proibir {
+                        raw.restrictions.push(crate::osm::RawRestriction { kind: "no_turn".into(), from, via: id, to });
+                    }
                 }
             }
             for (j, q) in s.pontos.iter().enumerate() {
@@ -225,6 +288,14 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
                 }
             }
             if any {
+                for t in &s.setas {
+                    let key = if t.lado.is_empty() { "turn:lanes".to_string() } else { format!("turn:lanes:{}", t.lado) };
+                    if let Some(w) = raw.ways.iter_mut().find(|w| w.id == t.way) {
+                        // a seta conferida vale sozinha naquele sentido
+                        w.tags.retain(|(k, _)| k != &key && !(t.lado.is_empty() && k == "turn:lanes:forward"));
+                        w.tags.push((key, t.turn.clone()));
+                    }
+                }
                 if !s.fases.is_empty() {
                     phases.insert(s.id, s.fases.clone());
                 }
@@ -237,11 +308,14 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
                 junctions.iter().map(|(id, q)| (d2(p, *q), *id)).filter(|e| e.0 <= R_JUNCTION_MAX * R_JUNCTION_MAX).collect();
             if !near.is_empty() {
                 near.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let mut core: Vec<i64> = Vec::new();
                 for (i, (d, id)) in near.iter().enumerate() {
                     if i == 0 || *d <= R_JUNCTION * R_JUNCTION {
                         marked.entry(*id).or_insert(s.id);
+                        core.push(*id);
                     }
                 }
+                aux.push((s.id, p, core));
                 continue;
             }
             // sem nó de interseção por perto: cai na regra de trecho
@@ -257,6 +331,20 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
             }
             let id = place(raw, wi, k, t, SYNTH_BASE + s.id as i64 * 64 + j as i64);
             marked.entry(id).or_insert(s.id);
+        }
+    }
+
+    // pistas auxiliares, depois que todo ponto pegou os nós dele: nó mais afastado que cruza duas das vias do
+    // cruzamento (a principal e a transversal)
+    for (id, p, core) in aux {
+        let core_names: Vec<u32> = core.iter().flat_map(|c| names.get(c).into_iter().flatten().copied()).collect();
+        for (j, q) in &junctions {
+            if marked.contains_key(j) || d2(p, *q) > R_AUX * R_AUX {
+                continue;
+            }
+            if names.get(j).map_or(0, |v| v.iter().filter(|n| core_names.contains(n)).count()) >= 2 {
+                marked.insert(*j, id);
+            }
         }
     }
 

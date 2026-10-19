@@ -458,6 +458,57 @@ fn axes_of<'a>(angles: impl Iterator<Item = &'a f64>) -> Vec<f64> {
     axes
 }
 
+/// Distância entre os eixos (direções módulo 180°) de dois ângulos, em radianos (0 a π/2).
+fn axis_gap(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(std::f64::consts::PI);
+    d.min(std::f64::consts::PI - d)
+}
+
+/// Controlador externo com duas vias que se cruzam: fase 0 = via principal (maior classe × faixas que chegam),
+/// fase 1 = transversal. Aproximação da principal ou da transversal vai pelo nome (as duas mãos de uma pista dupla
+/// ficam juntas); as demais (alças sem nome, ruas laterais) pelo eixo mais próximo. O verde (60 s) se divide pela
+/// capacidade de cada lado, com 30 a 40 s para a principal. `None` quando não há duas vias com eixos distintos.
+fn main_vs_cross(net: &Net, approaches: &[(u32, f64)]) -> Option<(HashMap<u32, usize>, [f32; 2])> {
+    let seg = |e: u32| &net.segs[(e >> 1) as usize];
+    let name = |e: u32| {
+        let s = seg(e);
+        if s.name == NO_NAME { None } else { Some(s.name) }
+    };
+    // peso de uma aproximação: classe da via × faixas que chegam ao nó
+    let weight = |e: u32| (8.0 - seg(e).hw.min(7) as f64).max(1.0) * net.approach_lanes(e).0.len() as f64;
+    let mut score: HashMap<u32, f64> = HashMap::new();
+    for &(e, _) in approaches {
+        if let (Some(n), false) = (name(e), seg(e).link) {
+            *score.entry(n).or_default() += weight(e);
+        }
+    }
+    let best = |skip: Option<u32>, axis: Option<f64>| {
+        let mut v: Vec<(u32, f64)> = score.iter().map(|(&n, &w)| (n, w)).filter(|(n, _)| Some(*n) != skip).collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
+        v.into_iter().find_map(|(n, _)| {
+            // eixo da via: o da aproximação mais pesada dela
+            let a = approaches.iter().filter(|x| name(x.0) == Some(n)).max_by(|x, y| weight(x.0).partial_cmp(&weight(y.0)).unwrap())?.1;
+            axis.map_or(true, |p| axis_gap(a, p) > 0.6).then_some((n, a))
+        })
+    };
+    let (main, a0) = best(None, None)?;
+    let (cross, a1) = best(Some(main), Some(a0))?;
+    let mut group = HashMap::new();
+    let mut w = [0.0f64; 2];
+    for &(e, a) in approaches {
+        let g = match name(e) {
+            Some(n) if n == main => 0,
+            Some(n) if n == cross => 1,
+            _ => (axis_gap(a, a1) < axis_gap(a, a0)) as usize,
+        };
+        group.insert(e, g);
+        w[g] = w[g].max(weight(e));
+    }
+    // a principal nunca fica com menos verde que a transversal
+    let g0 = (60.0 * w[0] / (w[0] + w[1]).max(1e-9)).round().clamp(30.0, 40.0) as f32;
+    Some((group, [g0, 60.0 - g0]))
+}
+
 /// Monta os semáforos. `ext` (nó OSM -> código externo) junta num só controlador os nós de mesmo código
 /// (cruzamento de pista dupla, travessia nas duas mãos): mesmo ciclo, mesma defasagem e fases alinhadas
 /// por eixo de aproximação, para que as mãos de um mesmo cruzamento não abram verde conflitante.
@@ -491,21 +542,28 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
     for (k, (ni, _)) in appr.iter().enumerate() {
         members.entry(ctrl_key(*ni)).or_default().push(k);
     }
-    // por controlador: eixos, se é travessia em trecho e a defasagem
-    let mut ctrls: HashMap<i64, (Vec<f64>, bool, f64)> = HashMap::new();
+    // por controlador: eixos, se é travessia em trecho, a defasagem e, nos externos, a divisão principal × transversal
+    let mut ctrls: HashMap<i64, (Vec<f64>, bool, f64, Option<(HashMap<u32, usize>, [f32; 2])>)> = HashMap::new();
     for (key, mut ms) in members {
         ms.sort_by_key(|&k| net.nodes[appr[k].0].osm_id);
         let axes = axes_of(ms.iter().flat_map(|&k| appr[k].1.iter().map(|a| &a.1)));
-        // travessia em trecho: um eixo só e os dois sentidos (mão dupla, ou as duas mãos de um mesmo controlador)
-        let midblock = axes.len() == 1 && ms.iter().map(|&k| appr[k].1.len()).sum::<usize>() >= 2;
+        // travessia em trecho: um eixo só (mão dupla, as duas mãos de um mesmo controlador ou rua de mão única);
+        // sem a fase de pedestres o semáforo ficaria verde o tempo todo
+        let midblock = axes.len() == 1;
         // defasagem do controlador: a do primeiro nó editado (a interface grava a mesma em todos)
         let offset = ms.iter().find_map(|&k| edits.sigs.get(&net.nodes[appr[k].0].osm_id)).map_or(0.0, |e| e.offset);
-        ctrls.insert(key, (axes, midblock, offset));
+        let split = if key >= 0 && !midblock && axes.len() >= 2 {
+            let all: Vec<(u32, f64)> = ms.iter().flat_map(|&k| appr[k].1.iter().copied()).collect();
+            main_vs_cross(net, &all)
+        } else {
+            None
+        };
+        ctrls.insert(key, (axes, midblock, offset, split));
     }
     for (ni, approaches) in &appr {
         let ni = *ni;
         let node = &net.nodes[ni];
-        let (axes, midblock, offset) = &ctrls[&ctrl_key(ni)];
+        let (axes, midblock, offset, split) = &ctrls[&ctrl_key(ni)];
         let edit = edits.sigs.get(&node.osm_id);
         // fases conferidas à mão para o controlador externo
         let fixed = u32::try_from(ctrl_key(ni)).ok().and_then(|c| ext.and_then(|m| m.phases.get(&c)));
@@ -533,14 +591,15 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
             None if fixed.is_some() => {
                 let list = fixed.unwrap();
                 let name = |e: u32| net.names.get(net.segs[(e >> 1) as usize].name as usize).map_or("", |s| s.as_str());
-                let cited = |e: u32| list.iter().any(|f| f.cites(name(e)));
+                let way = |e: u32| net.segs[(e >> 1) as usize].way_id;
+                let cited = |e: u32| list.iter().any(|f| f.cites(name(e), way(e)));
                 let mut ps: Vec<Phase> = list
                     .iter()
                     .map(|f| Phase {
                         green: f.verde.clamp(0.0, 600.0),
                         yellow: f.amarelo.clamp(0.0, 60.0),
                         all_red: f.vermelho.clamp(0.0, 60.0),
-                        ends: approaches.iter().map(|a| a.0).filter(|&e| f.cites(name(e)) || (f.rest() && !cited(e))).collect(),
+                        ends: approaches.iter().map(|a| a.0).filter(|&e| f.cites(name(e), way(e)) || (f.rest() && !cited(e))).collect(),
                     })
                     .collect();
                 let rest: Vec<u32> = approaches.iter().map(|a| a.0).filter(|e| !ps.iter().any(|p| p.ends.contains(e))).collect();
@@ -548,6 +607,11 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
                     ps.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: rest });
                 }
                 ps
+            }
+            // controlador externo de cruzamento: principal × transversal
+            None if split.is_some() => {
+                let (group, green) = split.as_ref().unwrap();
+                (0..2).map(|k| Phase { green: green[k], yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).filter(|e| group.get(e) == Some(&k)).collect() }).collect()
             }
             // uma fase por eixo do controlador; um nó sem aproximação naquele eixo fica todo vermelho nela
             None => (0..axes.len())

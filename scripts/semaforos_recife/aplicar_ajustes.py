@@ -13,11 +13,11 @@ import sys
 from pathlib import Path
 
 AJUSTES = Path(__file__).with_name("ajustes_manuais.json")
-CAMPOS = ("nos", "pontos", "fases")
+CAMPOS = ("nos", "pontos", "fases", "proibir", "setas")
 
 
 def aplicar(itens: list[dict], path: Path = AJUSTES) -> int:
-    """Grava `nos`, `pontos` e `fases` de cada ajuste no semáforo de mesmo id (troca os de uma aplicação anterior).
+    """Grava `nos`, `pontos`, `fases`, `proibir` e `setas` de cada ajuste no semáforo de mesmo id (troca os de uma aplicação anterior).
 
     Um ajuste com `lat`/`lon` e id que não está na base entra como semáforo novo.
     """
