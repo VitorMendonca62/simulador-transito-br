@@ -520,7 +520,7 @@ export const useStore = create<State>((set, get) => {
       const { data } = get()
       if (!data) return
       const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
-      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
+      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, boxBlockPct: paramsRecord.boxBlockPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
       const id = get().scenarios.reduce((m, x) => Math.max(m, x.id), 0) + 1
       const next = [...get().scenarios, { id, name: name || `Cenário ${id}`, edits: editPayload(), sim, minutes }]
       set({ scenarios: next })
@@ -565,7 +565,7 @@ export const useStore = create<State>((set, get) => {
         const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
         await simStart({
           zones: dp.zones,
-          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
+          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, boxBlockPct: paramsRecord.boxBlockPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
         })
         simHeatKind(get().sim.heat === 'off' ? -1 : get().sim.heat === 'speed' ? 0 : 1)
         simRun(true, get().sim.speed)

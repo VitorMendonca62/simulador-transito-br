@@ -69,6 +69,24 @@ export function SimPanel() {
             <dt>Cruzaram linha contínua</dt>
             <dd>{(st.solidCrossings ?? 0).toLocaleString('pt-BR')}</dd>
           </div>
+          <div title="Entradas no cruzamento sem espaço para sair do outro lado (CTB art. 45); entre parênteses, as de quem tem o perfil de fechar o cruzamento">
+            <dt>Fecharam o cruzamento</dt>
+            <dd>
+              {(st.boxEntries ?? 0).toLocaleString('pt-BR')}
+              {st.boxEntries ? ` (${(st.boxEntriesBlockers ?? 0).toLocaleString('pt-BR')})` : ''}
+            </dd>
+          </div>
+          <div title="Tempo somado de veículos parados na linha esperando alguém sair do meio do cruzamento">
+            <dt>Espera por cruzamento ocupado</dt>
+            <dd>{`${((st.boxWait ?? 0) / 60).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} veíc·min`}</dd>
+          </div>
+          <div title="Pares de veículos com as carrocerias sobrepostas dentro de um cruzamento (colisão na simulação). Entre parênteses, entre curvas que não se cruzam mas passam perto demais (geometria). O esperado é zero.">
+            <dt>Colisões no cruzamento</dt>
+            <dd>
+              {(st.junctionOverlaps ?? 0).toLocaleString('pt-BR')}
+              {st.junctionOverlapsGeom ? ` (+${st.junctionOverlapsGeom.toLocaleString('pt-BR')})` : ''}
+            </dd>
+          </div>
           <div title="Freadas acima de 5 m/s² (uma por episódio)">
             <dt>Freadas bruscas</dt>
             <dd>{(st.harshBrakes ?? 0).toLocaleString('pt-BR')}</dd>

@@ -20,6 +20,9 @@ const METRICS: Metric[] = [
   { label: 'Fila máxima num cruzamento (veíc.)', get: (r) => r.maxQueue, fmt: n0, better: 'down' },
   { label: 'Fila de entrada ao fim (veíc.)', get: (r) => r.queued, fmt: n0, better: 'down' },
   { label: 'Veículos na rede ao fim', get: (r) => r.alive, fmt: n0, better: 'none' },
+  { label: 'Entradas fechando o cruzamento', get: (r) => r.boxEntries ?? 0, fmt: n0, better: 'down' },
+  { label: 'Espera por cruzamento ocupado (veíc·h)', get: (r) => r.boxWaitVehH ?? 0, fmt: n2, better: 'down' },
+  { label: 'Colisões no cruzamento', get: (r) => r.junctionOverlaps ?? 0, fmt: n0, better: 'down' },
 ]
 
 function Delta({ a, b, better, fmt }: { a: number; b: number; better: Metric['better']; fmt: (v: number) => string }) {

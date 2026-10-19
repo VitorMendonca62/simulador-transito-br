@@ -45,10 +45,13 @@ pub struct SimParams {
     pub app_pct: f64,
     /// erro de percepção (fração do tempo da próxima faixa) que espalha motoristas entre caminhos parecidos
     pub perception: f64,
+    /// % de motoristas que entram no cruzamento sem espaço garantido na saída e podem ficar parados dentro dele
+    /// ("fechar o cruzamento", proibido pelo CTB art. 45); os demais só entram com espaço para sair
+    pub box_block_pct: f64,
 }
 impl Default for SimParams {
     fn default() -> Self {
-        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3 }
+        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0 }
     }
 }
 
@@ -182,6 +185,8 @@ struct Conflict {
     s_me: f32,
     s_other: f32,
     merge: bool,
+    /// meia extensão (m, ao longo das duas trajetórias) da área que um veículo ocupa ao passar pelo ponto
+    w: f32,
 }
 
 struct SigRt {
@@ -206,6 +211,20 @@ pub struct Stats {
     pub solid_crossings: u64,
     /// viagens da matriz que não nasceram: nenhuma faixa de origem da zona tem caminho até o destino
     pub skipped: u64,
+    /// pares de veículos com as carrocerias sobrepostas dentro de um cruzamento, em conversões cujas trajetórias se
+    /// cruzam (um por episódio): falha de comportamento, deve ser 0
+    pub junction_overlaps: u64,
+    /// idem, entre conversões que não se cruzam mas passam perto demais (geometria das curvas)
+    pub junction_overlaps_geom: u64,
+    /// veículos que ficaram parados (> 2 s) dentro de um cruzamento (um por episódio)
+    pub box_stops: u64,
+    /// entradas no cruzamento sem espaço para sair do outro lado (CTB art. 45), das quais por quem "fecha o cruzamento"
+    pub box_entries: u64,
+    pub box_entries_blockers: u64,
+    /// veículos-segundo parados à espera de um ponto de conflito ocupado por quem está dentro do cruzamento
+    pub box_wait_s: f64,
+    /// impasses dentro do cruzamento desfeitos ignorando a ocupação (após `OCC_DEADLOCK` s parado)
+    pub occ_deadlocks: u64,
 }
 
 /// floats por veículo no quadro enviado à interface (ver `Sim::snapshot`)
@@ -242,6 +261,13 @@ const LC_OCC_K: f32 = 4.0;
 
 /// desaceleração (m/s²) a partir da qual a freada conta como brusca
 const HARSH: f32 = 5.0;
+
+/// meia largura de um veículo mais folga (m): base da área ocupada num ponto de conflito
+const OCC_HALF_W: f32 = 1.2;
+/// curvas que não se cruzam mas passam a menos disto (m, entre os eixos) contam como conflito
+const NEAR_CONFLICT: f64 = 1.8;
+/// dentro do cruzamento, depois de tanto tempo parado o veículo deixa de respeitar a ocupação (sai do impasse)
+const OCC_DEADLOCK: f32 = 40.0;
 
 /// metros finais da faixa, antes do nó, em que não se troca de faixa (linha contínua)
 const LC_SOLID_ZONE: f32 = 12.0;
@@ -291,6 +317,12 @@ pub struct Sim {
     /// custo de trocar de faixa em cada faixa (s)
     lane_w: Vec<f32>,
     rule_breaker: Vec<bool>,
+    /// motorista que "fecha o cruzamento" (ver `SimParams::box_block_pct`)
+    box_blocker: Vec<bool>,
+    /// parado neste passo por um ponto de conflito ocupado (para `Stats::box_wait_s`)
+    held_box: Vec<bool>,
+    /// pares sobrepostos na última verificação (episódios de `Stats::junction_overlaps`)
+    overlap_prev: std::collections::HashSet<(u32, u32)>,
     app: Vec<bool>,
     pseed: Vec<u32>,
     /// instante em que o veículo chegaria ao fim da faixa atual em fluxo livre (base do atraso por conversão)
@@ -351,6 +383,7 @@ pub struct Sim {
     acc: Vec<f32>,
     /// decisão de entrada em cruzamento reaproveitada por 1 passo (reavaliada a cada 2)
     enter_ok: Vec<bool>,
+    /// pode passar pelo nó seguinte (sem semáforo) ao fim de uma faixa curta à frente?
     /// faixa (+1) em cuja linha de "Pare" o veículo já parou
     stop_ok: Vec<u32>,
     tick: u64,
@@ -363,6 +396,10 @@ pub struct Sim {
     /// tempo acumulado (ms) por fase do passo — só nativo, para os testes de desempenho
     pub prof: [f64; 7],
     pub red_log: Vec<(u32, f32, u32, f32, f32)>,
+    /// diagnóstico (testes): descrição de cada sobreposição nova, se ligado
+    pub overlap_log: Option<Vec<String>>,
+    /// diagnóstico (só com `overlap_log`): últimos estados (aresta, s, v, pode entrar) de cada veículo
+    hist: Vec<std::collections::VecDeque<(u32, f32, f32, bool)>>,
 }
 
 impl Sim {
@@ -572,6 +609,11 @@ impl Sim {
             tgt: Vec::new(),
             lane_w,
             rule_breaker: Vec::new(),
+            box_blocker: Vec::new(),
+            held_box: Vec::new(),
+            overlap_prev: Default::default(),
+            overlap_log: None,
+            hist: Vec::new(),
             app: Vec::new(),
             pseed: Vec::new(),
             t_due: Vec::new(),
@@ -968,6 +1010,8 @@ impl Sim {
                 self.t_free.push(0.0);
                 self.origin.push(0);
                 self.rule_breaker.push(false);
+                self.box_blocker.push(false);
+                self.held_box.push(false);
                 self.app.push(false);
                 self.pseed.push(0);
                 self.t_due.push(0.0);
@@ -991,6 +1035,9 @@ impl Sim {
         self.dest[id] = dest;
         self.origin[id] = origin;
         self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
+        // sorteio fora do PRNG da simulação: com 0 % o resto da simulação não muda
+        self.box_blocker[id] = ((noise(drv.seed, 0xB0C5) + 1.0) * 50.0) < self.params.box_block_pct as f32;
+        self.held_box[id] = false;
         self.tgt[id] = tree;
         self.app[id] = drv.app;
         self.pseed[id] = drv.seed;
@@ -1217,20 +1264,45 @@ impl Sim {
                 continue; // divergem da mesma faixa
             }
             if other.to == me.to {
-                out.push(Conflict { other: o, s_me: me.len, s_other: other.len, merge: true });
+                out.push(Conflict { other: o, s_me: me.len, s_other: other.len, merge: true, w: 0.0 });
                 continue;
             }
             let pts_o: Vec<V2> = (0..=12).map(|i| bez8(&other.curve, i as f32 / 12.0)).collect();
             let cum_o = cum(&pts_o);
             let scale_o = other.len as f64 / cum_o.last().copied().unwrap_or(1.0).max(1e-6);
+            let mut found = false;
             'search: for a in 0..pts_me.len() - 1 {
                 for b in 0..pts_o.len() - 1 {
                     if let Some((t, u)) = seg_cross_t(pts_me[a], pts_me[a + 1], pts_o[b], pts_o[b + 1]) {
                         let s_me = (cum_me[a] + t * (cum_me[a + 1] - cum_me[a])) * scale_me;
                         let s_o = (cum_o[b] + u * (cum_o[b + 1] - cum_o[b])) * scale_o;
-                        out.push(Conflict { other: o, s_me: s_me as f32, s_other: s_o as f32, merge: false });
+                        // quanto mais rasante o ângulo, mais longa a área comum às duas trajetórias
+                        let (da, db) = (sub(pts_me[a + 1], pts_me[a]), sub(pts_o[b + 1], pts_o[b]));
+                        let sin = (cross(da, db).abs() / (len_v(da) * len_v(db)).max(1e-9)) as f32;
+                        let w = (OCC_HALF_W / sin.max(0.2)).clamp(OCC_HALF_W, 5.5);
+                        out.push(Conflict { other: o, s_me: s_me as f32, s_other: s_o as f32, merge: false, w });
+                        found = true;
                         break 'search;
                     }
+                }
+            }
+            // não se cruzam, mas passam tão perto que as carrocerias se tocariam: conflito no ponto mais próximo
+            if !found {
+                let mut best = (f64::MAX, 0.0, 0.0);
+                for (a, &p) in pts_me.iter().enumerate() {
+                    for b in 0..pts_o.len() - 1 {
+                        let (q0, q1) = (pts_o[b], pts_o[b + 1]);
+                        let d = sub(q1, q0);
+                        let t = (dot(sub(p, q0), d) / dot(d, d).max(1e-9)).clamp(0.0, 1.0);
+                        let dd = len_v(sub(p, add(q0, mul(d, t))));
+                        if dd < best.0 {
+                            best = (dd, cum_me[a] * scale_me, (cum_o[b] + t * (cum_o[b + 1] - cum_o[b])) * scale_o);
+                        }
+                    }
+                }
+                // longe das pontas: perto do começo é o mesmo trecho de chegada; perto do fim, a mesma saída
+                if best.0 < NEAR_CONFLICT && best.1 > 0.5 && best.2 > 0.5 && best.1 < me.len as f64 - 0.5 && best.2 < other.len as f64 - 0.5 {
+                    out.push(Conflict { other: o, s_me: best.1 as f32, s_other: best.2 as f32, merge: false, w: OCC_HALF_W * 1.5 });
                 }
             }
         }
@@ -1238,6 +1310,87 @@ impl Sim {
         let rc = std::rc::Rc::new(out);
         self.conflicts[c as usize] = Some(rc.clone());
         rc
+    }
+
+    /// Veículo da conversão `cf.other` com a carroceria sobre a área do ponto de conflito que ainda não a terá
+    /// liberado daqui a `t_arr` s (quando quem pergunta chegaria lá). Inclui quem já passou à faixa de saída com a
+    /// traseira ainda na curva.
+    fn occ_by(&self, cf: &Conflict, t_arr: f32, me: usize) -> Option<usize> {
+        let other = cf.other as usize;
+        let (lo, hi) = (cf.s_other - cf.w, cf.s_other + cf.w);
+        let clear = |j: usize, rear: f32| (hi - rear) / self.v[j].max(0.05) > t_arr;
+        for &j in &self.edge_veh[other] {
+            let j = j as usize;
+            let (f, r) = (self.s[j], self.s[j] - self.vlen[j]);
+            if j != me && f >= lo && r <= hi && clear(j, r) {
+                return Some(j);
+            }
+        }
+        let olen = self.edge_len[other];
+        for &j in self.edge_veh[self.conns[other - self.nl].to as usize].iter().take(3) {
+            let j = j as usize;
+            let r = olen + self.s[j] - self.vlen[j];
+            if r > hi {
+                break;
+            }
+            if j != me && olen + self.s[j] >= lo && clear(j, r) {
+                return Some(j);
+            }
+        }
+        None
+    }
+
+    /// Ponto de conflito à frente ocupado na conversão `cc`, para o veículo `i` cuja frente está em `s_on` na
+    /// conversão (negativo = ainda na faixa, antes da linha): obstáculo parado antes da área (folga, 0).
+    fn occ_obstacle(&mut self, net: &Net, i: usize, cc: u32, s_on: f32) -> Option<(f32, f32)> {
+        // impasse dentro do cruzamento (ex.: quatro "fechando" uns aos outros): segue mesmo assim
+        if s_on >= 0.0 && self.wait[i] > OCC_DEADLOCK {
+            return None;
+        }
+        let cfs = self.conflicts_of(net, cc);
+        let v = self.v[i].max(1.0);
+        let mut best: Option<(f32, f32)> = None;
+        for cf in cfs.iter() {
+            if cf.merge {
+                continue;
+            }
+            let stop = cf.s_me - cf.w - 0.5;
+            if s_on > stop + 0.5 {
+                continue; // já está na área: parar ali só pioraria
+            }
+            if best.map_or(false, |b| stop - s_on >= b.0) {
+                continue;
+            }
+            let t_arr = (cf.s_me - cf.w - s_on).max(0.0) / v;
+            if self.occ_by(cf, t_arr, i).is_some() {
+                best = Some(((stop - s_on).max(0.0), 0.0));
+                continue;
+            }
+            // outro veículo já na curva concorrente vai chegar à área antes de mim e ocupá-la enquanto eu passo:
+            // freio se ainda dá (quem chega depois cede; empate pelo id). Última defesa contra a colisão quando a
+            // brecha foi mal avaliada na linha.
+            if s_on < 0.0 {
+                continue;
+            }
+            let d_stop = stop - s_on;
+            if d_stop < self.v[i] * self.v[i] / (2.0 * 7.0) {
+                continue; // não dá mais para parar antes: segue (o outro é quem cede)
+            }
+            let t_clear_me = (cf.s_me + cf.w + self.vlen[i] - s_on) / v;
+            let lo = cf.s_other - cf.w;
+            for &j in &self.edge_veh[cf.other as usize] {
+                let j = j as usize;
+                if self.s[j] >= lo {
+                    continue;
+                }
+                let t_j = (lo - self.s[j]) / self.v[j].max(0.5);
+                if t_j < t_clear_me && (t_j < t_arr || (t_j == t_arr && j < i)) {
+                    best = Some((d_stop.max(0.0), 0.0));
+                    break;
+                }
+            }
+        }
+        best
     }
 
     /// `o` tem preferência sobre `me`?
@@ -1256,8 +1409,51 @@ impl Sim {
         cross(me.u_me, o.u_me) < 0.0
     }
 
+    /// Faixas curtas à frente (comuns no OSM, em cruzamentos de vários nós): quem vai ter de ceder num nó sem semáforo
+    /// logo depois já decide daqui — senão só "vê" o cruzamento a poucos metros da linha, sem distância para parar.
+    /// Devolve a distância até a linha onde terá de parar, ou ∞.
+    fn ahead_stop_at(&mut self, net: &Net, i: usize, cc: u32, rest: f32) -> f32 {
+        let d_check = (self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) + 20.0).max(25.0);
+        let (mut c, mut dist) = (cc, rest);
+        // onde parar: na linha de uma faixa que comporte o veículo inteiro (senão a traseira fecha o nó anterior)
+        let mut last_ok = rest;
+        for _ in 0..3 {
+            let cn = &self.conns[c as usize - self.nl];
+            let f = cn.to as usize;
+            let d2 = dist + cn.len + self.lanes[f].len;
+            if self.lanes[f].len >= 30.0 || d2 > d_check || !self.edge_veh[f].is_empty() || !self.edge_veh[c as usize].is_empty() {
+                break;
+            }
+            if self.end_state[self.lanes[f].end_id as usize] != 0 {
+                break;
+            }
+            let c2 = self.stay_cost(self.drv(i), f).1;
+            if c2 == NONE || c2 == SINK {
+                break;
+            }
+            let fits = self.lanes[f].len >= self.vlen[i] + 1.0;
+            if !self.may_enter_from(net, i, c2, f, d2) {
+                return if fits { d2 } else { last_ok };
+            }
+            if fits {
+                last_ok = d2;
+            }
+            (c, dist) = (c2, d2);
+        }
+        f32::INFINITY
+    }
+
     /// Pode entrar na conversão `cc` agora? (semáforo, preferência por brecha, espaço de saída)
     fn may_enter(&mut self, net: &Net, id: usize, cc: u32) -> bool {
+        self.held_box[id] = false;
+        let lane_id = self.edge[id] as usize;
+        let d_end = self.lanes[lane_id].len - self.s[id];
+        self.may_enter_from(net, id, cc, lane_id, d_end)
+    }
+
+    /// `may_enter` como se o veículo estivesse na faixa `lane_id`, a `d_end` do fim dela (também para o nó seguinte,
+    /// ao fim de uma faixa curta à frente)
+    fn may_enter_from(&mut self, net: &Net, id: usize, cc: u32, lane_id: usize, d_end: f32) -> bool {
         REASON.with(|r| r.set(0));
         BLOCKER.with(|b| b.set(-1));
         if cc == NONE {
@@ -1266,11 +1462,9 @@ impl Sim {
         if cc == SINK {
             return true;
         }
-        let lane_id = self.edge[id] as usize;
         let end = self.lanes[lane_id].end_id as usize;
         let st = self.end_state[end];
         let v = self.v[id];
-        let d_end = self.lanes[lane_id].len - self.s[id];
         let b = self.bcomf[id];
         let signaled = st != 0;
         if st == 1 {
@@ -1314,6 +1508,8 @@ impl Sim {
         // espaço de saída (keep-clear): fim da faixa de destino e entrada da conversão
         // impasse prolongado (anel/entroncamento travado): aceita "bloquear o cruzamento", reduzindo a folga exigida
         let need = (self.vlen[id] + 2.0) * (1.0 - ((self.wait[id] - 30.0) / 50.0).clamp(0.0, 1.0)).max(0.1);
+        // quem "fecha o cruzamento" entra com qualquer brecha na saída e, se a fila parar, fica parado na curva
+        let need = if self.box_blocker[id] { need.min(1.0) } else { need };
         // quem já está andando na faixa de saída vai estar mais à frente quando eu chegar lá
         let t_enter = (d_end + self.conns[me_idx].len) / v.max(3.0);
         if let Some(&j) = self.edge_veh[to_lane as usize].first() {
@@ -1331,6 +1527,42 @@ impl Sim {
         }
         let relaxed = self.wait[id] > 10.0;
         let conflicts = self.conflicts_of(net, cc);
+        // ponto de conflito ocupado por quem está dentro do cruzamento (inclusive parado, "fechando" o cruzamento):
+        // ninguém entra, com qualquer sinal ou preferência
+        {
+            let a = (self.amax[id] * 0.6).max(0.5);
+            for cf in conflicts.iter() {
+                if cf.merge {
+                    continue;
+                }
+                let dist = (d_end + cf.s_me - cf.w).max(0.0);
+                let t_arr = (-v + (v * v + 2.0 * a * dist).sqrt()) / a;
+                if let Some(j) = self.occ_by(cf, t_arr, id) {
+                    if lane_id == self.edge[id] as usize {
+                        self.held_box[id] = true;
+                    }
+                    REASON.with(|r| r.set(11));
+                    BLOCKER.with(|b| b.set(j as i64));
+                    return false;
+                }
+                // quem já está na curva concorrente (andando) e chega à área antes de eu sair dela, mesmo sem ter
+                // preferência (ex.: duas esquerdas opostas no mesmo verde): não entro na frente dele
+                let lo = cf.s_other - cf.w;
+                let t_clear = t_arr + (2.0 * cf.w + self.vlen[id]) / v.max(2.0);
+                for &j in &self.edge_veh[cf.other as usize] {
+                    let j = j as usize;
+                    if self.s[j] >= lo || self.v[j] < 0.5 {
+                        continue;
+                    }
+                    let t_j = (lo - self.s[j]) / self.v[j];
+                    if t_j < t_clear && t_j <= t_arr + 1.0 {
+                        REASON.with(|r| r.set(7));
+                        BLOCKER.with(|b| b.set(j as i64));
+                        return false;
+                    }
+                }
+            }
+        }
         let t_gap = if relaxed { 1.0 } else { 2.2 };
         let v_me = v.max(2.0);
         // tempo para percorrer `dist` partindo da velocidade atual e acelerando (parado, não se cruza a 2 m/s constantes)
@@ -1467,6 +1699,9 @@ impl Sim {
             if cc == NONE {
                 return Some((rest.max(0.0), 0.0));
             }
+            // faixa seguinte curta terminando em nó sem semáforo: quem vai ter de ceder lá já decide daqui (senão só
+            // "vê" o cruzamento a poucos metros da linha, sem distância para parar)
+            let ahead = if front_decides && cc != SINK { Some((self.ahead_stop_at(net, i, cc, rest), 0.0)).filter(|a| a.0.is_finite()) } else { None };
             // dentro da conversão escolhida
             let to = self.conns[cc as usize - self.nl].to;
             let clen = self.edge_len[cc as usize];
@@ -1491,7 +1726,11 @@ impl Sim {
                     });
                 }
             }
-            other
+            match (other, ahead) {
+                (Some(o), Some(a)) if a.0 < o.0 => Some(a),
+                (None, a) => a,
+                (o, _) => o,
+            }
         } else {
             let to = self.conns[e - self.nl].to;
             if let Some(&j) = self.edge_veh[to as usize].first() {
@@ -1557,6 +1796,22 @@ impl Sim {
                 let i = self.edge_veh[e][k] as usize;
                 let front = k + 1 == len;
                 let mut lead = self.leader(net, i, e, k, front);
+                // dentro do cruzamento (ou chegando à linha já liberado): para antes de um ponto de conflito ocupado
+                let occ = if e >= self.nl {
+                    self.held_box[i] = false;
+                    self.occ_obstacle(net, i, e as u32, self.s[i])
+                } else if front && self.enter_ok[i] && self.choice[i] != NONE && self.choice[i] != SINK && self.edge_len[e] - self.s[i] < 40.0 {
+                    let rest = self.edge_len[e] - self.s[i];
+                    self.occ_obstacle(net, i, self.choice[i], -rest)
+                } else {
+                    None
+                };
+                if let Some(o) = occ {
+                    self.held_box[i] = true;
+                    if lead.map_or(true, |l| o.0 < l.0) {
+                        lead = Some(o);
+                    }
+                }
                 if e < self.nl && !self.wants.is_empty() {
                     if let Some(c) = self.courtesy(i, e, k) {
                         if lead.map_or(true, |l| c.0 < l.0) {
@@ -1618,7 +1873,19 @@ impl Sim {
                 self.metrics.sample(l.dirseg as usize, nv, dt, l.to_node as usize, l.len - self.s[i]);
             }
             if nv < 0.3 {
+                let w0 = self.wait[i];
                 self.wait[i] += dt;
+                if self.held_box[i] {
+                    self.stats.box_wait_s += dt as f64;
+                }
+                if self.edge[i] as usize >= self.nl {
+                    if w0 < 2.0 && self.wait[i] >= 2.0 {
+                        self.stats.box_stops += 1;
+                    }
+                    if self.held_box[i] && w0 <= OCC_DEADLOCK && self.wait[i] > OCC_DEADLOCK {
+                        self.stats.occ_deadlocks += 1;
+                    }
+                }
             } else {
                 self.wait[i] = 0.0;
             }
@@ -1651,6 +1918,23 @@ impl Sim {
         }
 
         self.enforce_gaps();
+        if self.overlap_log.is_some() {
+            self.hist.resize(self.alive.len(), Default::default());
+            for i in 0..self.alive.len() {
+                let h = &mut self.hist[i];
+                if !self.alive[i] {
+                    h.clear();
+                    continue;
+                }
+                if h.len() >= 30 {
+                    h.pop_front();
+                }
+                h.push_back((self.edge[i], self.s[i], self.v[i], self.enter_ok[i]));
+            }
+        }
+        if self.tick % 5 == 0 {
+            self.check_overlaps(net);
+        }
         lap!(5);
 
         // 5) trocas de faixa
@@ -1670,6 +1954,113 @@ impl Sim {
             let queued: u64 = self.pending.iter().map(|q| q.len() as u64).sum();
             self.metrics.end_tick(self.time, &fs, self.n_alive, queued);
         }
+    }
+
+    /// Conta pares de veículos com as carrocerias sobrepostas dentro de um mesmo cruzamento (retângulos orientados,
+    /// teste de eixos separados). Só entre conversões que não saem da mesma faixa nem chegam à mesma faixa (essas já
+    /// se ordenam como líder/seguidor). Cada par conta uma vez enquanto continuar sobreposto.
+    fn check_overlaps(&mut self, net: &Net) {
+        let mut inside: Vec<(u32, u32)> = Vec::new();
+        for i in 0..self.alive.len() {
+            if self.alive[i] && self.edge[i] as usize >= self.nl {
+                inside.push((self.conns[self.edge[i] as usize - self.nl].node, i as u32));
+            }
+        }
+        inside.sort_unstable();
+        // carroceria = 4 círculos ao longo da trajetória real (a traseira pode ainda estar na faixa de chegada)
+        let discs = |i: usize| -> ([[f32; 2]; 4], f32) {
+            let e = self.edge[i] as usize;
+            let mut p = [[0.0f32; 2]; 4];
+            let r = if self.kind[i] == 1 { 1.2 } else { 0.85 };
+            let span = (self.vlen[i] - 2.0 * r).max(0.0);
+            for k in 0..4 {
+                p[k] = self.path_pt(net, e, self.s[i] - r - span * k as f32 / 3.0);
+            }
+            (p, r - 0.05)
+        };
+        let hit = |a: &([[f32; 2]; 4], f32), b: &([[f32; 2]; 4], f32)| {
+            let rr = (a.1 + b.1) * (a.1 + b.1);
+            a.0.iter().any(|p| b.0.iter().any(|q| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) < rr))
+        };
+        let mut now: std::collections::HashSet<(u32, u32)> = Default::default();
+        let mut new_pairs = (0, 0);
+        let mut logs: Vec<(usize, usize)> = Vec::new();
+        let mut logs_kind: Vec<(usize, usize)> = Vec::new();
+        let mut g = 0;
+        while g < inside.len() {
+            let mut h = g + 1;
+            while h < inside.len() && inside[h].0 == inside[g].0 {
+                h += 1;
+            }
+            for a in g..h {
+                let ia = inside[a].1 as usize;
+                let ca = &self.conns[self.edge[ia] as usize - self.nl];
+                let ra = discs(ia);
+                for b in a + 1..h {
+                    let ib = inside[b].1 as usize;
+                    let cb = &self.conns[self.edge[ib] as usize - self.nl];
+                    if ca.from == cb.from || ca.to == cb.to {
+                        continue;
+                    }
+                    if hit(&ra, &discs(ib)) {
+                        let k = (ia.min(ib) as u32, ia.max(ib) as u32);
+                        if !self.overlap_prev.contains(&k) {
+                            logs_kind.push((ia, ib));
+                            if let Some(log) = &self.overlap_log {
+                                let _ = log;
+                                logs.push((ia, ib));
+                            }
+                        }
+                        now.insert(k);
+                    }
+                }
+            }
+            g = h;
+        }
+        for &(a, b) in &logs_kind {
+            let cfs = self.conflicts_of(net, self.edge[a]);
+            if cfs.iter().any(|c| c.other == self.edge[b] && !c.merge) {
+                new_pairs.0 += 1;
+            } else {
+                new_pairs.1 += 1;
+            }
+        }
+        self.stats.junction_overlaps += new_pairs.0;
+        self.stats.junction_overlaps_geom += new_pairs.1;
+        for (a, b) in logs {
+            let (ea, eb) = (self.edge[a], self.edge[b]);
+            let cfs = self.conflicts_of(net, ea);
+            let cf = cfs.iter().find(|c| c.other == eb).copied();
+            let (ca, cb) = (&self.conns[ea as usize - self.nl], &self.conns[eb as usize - self.nl]);
+            let st = |c: &ConnRt| self.end_state[self.lanes[c.from as usize].end_id as usize];
+            let line = format!(
+                "node={} osm={} kinds={}/{} sig={}/{} s={:.1}/{:.1} len={:.1}/{:.1} v={:.1}/{:.1} wait={:.1}/{:.1} box={}/{} conflict={}",
+                ca.node, net.nodes[ca.node as usize].osm_id, ca.kind, cb.kind, st(ca), st(cb), self.s[a], self.s[b], ca.len, cb.len,
+                self.v[a], self.v[b], self.wait[a], self.wait[b], self.box_blocker[a], self.box_blocker[b],
+                cf.map_or("nenhum".to_string(), |c| format!("s_me={:.1} s_o={:.1} w={:.1}", c.s_me, c.s_other, c.w))
+            );
+            let pa = self.has_priority(ca, cb, false);
+            let pb = self.has_priority(cb, ca, false);
+            let mut line = line + &format!(" prio(b sobre a)={pa} prio(a sobre b)={pb}");
+            for (tag, i) in [("a", a), ("b", b)] {
+                line += &format!("\n          {tag}:");
+                for (k, &(e, s, v, ok)) in self.hist.get(i).into_iter().flatten().enumerate() {
+                    if k % 3 != 0 {
+                        continue;
+                    }
+                    let ed = if (e as usize) < self.nl {
+                        format!("L{}({:.0}m)", e, self.lanes[e as usize].len)
+                    } else {
+                        let c = &self.conns[e as usize - self.nl];
+                        format!("C{}[{}>{} n{}]", e, c.from, c.to, c.node)
+                    };
+                    line += &format!(" {ed} s={s:.1} v={v:.1}{}", if ok { "+" } else { "" });
+                }
+            }
+            line += &format!("\n          a.conn from={} to={}  b.conn from={} to={}", ca.from, ca.to, cb.from, cb.to);
+            self.overlap_log.as_mut().unwrap().push(line);
+        }
+        self.overlap_prev = now;
     }
 
     /// Garante folga mínima entre veículos consecutivos nas arestas com 2+ veículos.
@@ -1724,6 +2115,16 @@ impl Sim {
                 if self.end_state[end] == 1 && self.red_age[end] > 1.5 {
                     self.stats.red_runs += 1;
                     if self.red_log.len() < 40 { self.red_log.push((e as u32, self.v[i], self.choice[i], self.wait[i], self.red_age[end])); }
+                }
+                {
+                    let to = self.conns[cc as usize - self.nl].to as usize;
+                    let room = self.edge_veh[to].first().map_or(self.edge_len[to], |&j| self.s[j as usize] - self.vlen[j as usize]);
+                    if room < self.vlen[i] + 1.0 && self.edge_veh[to].first().map_or(false, |&j| self.v[j as usize] < 1.0) {
+                        self.stats.box_entries += 1;
+                        if self.box_blocker[i] {
+                            self.stats.box_entries_blockers += 1;
+                        }
+                    }
                 }
                 let over = self.s[i] - self.edge_len[e];
                 let p = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
@@ -2120,6 +2521,25 @@ impl Sim {
 
     /// Posição (x, y, rumo) do veículo `i`.
     /// Posição da frente do veículo e direção unitária (dx, dy).
+    /// Ponto da trajetória na aresta `e` a `s` m do começo; negativo numa conversão = ainda na faixa de chegada.
+    fn path_pt(&self, net: &Net, e: usize, s: f32) -> [f32; 2] {
+        if e >= self.nl {
+            let c = &self.conns[e - self.nl];
+            if s < 0.0 {
+                let l = c.from as usize;
+                return self.path_pt(net, l, self.lanes[l].len + s);
+            }
+            let p = bez8(&c.curve, (s / c.len).clamp(0.0, 1.0));
+            return [p[0] as f32, p[1] as f32];
+        }
+        let l = &self.lanes[e];
+        let s = s.clamp(0.0, l.len);
+        let a = if l.dir == 0 { l.a0 as f64 + s as f64 } else { l.a0 as f64 - s as f64 };
+        let (p, t) = net.segs[l.seg as usize].poly.at(a);
+        let q = add(p, mul(right(t), l.off as f64));
+        [q[0] as f32, q[1] as f32]
+    }
+
     fn pose_dir(&self, net: &Net, i: usize) -> (f32, f32, f32, f32) {
         let e = self.edge[i] as usize;
         if e < self.nl {
@@ -2287,6 +2707,9 @@ impl Sim {
         r["totalDelayAllVehH"] = serde_json::json!(total_h);
         r["meanDelayAll"] = serde_json::json!(total_h * 3600.0 / gen);
         r["meanSpeedKmh"] = serde_json::json!(self.metrics.mean_speed_kmh());
+        r["boxEntries"] = serde_json::json!(self.stats.box_entries);
+        r["boxWaitVehH"] = serde_json::json!(self.stats.box_wait_s / 3600.0);
+        r["junctionOverlaps"] = serde_json::json!(self.stats.junction_overlaps + self.stats.junction_overlaps_geom);
         r
     }
     /// Razão média de velocidade por trecho direcionado em toda a execução (0..254; 255 = sem dados).
@@ -2338,6 +2761,7 @@ impl Sim {
             8 => "cede a quem tem preferência (brecha insuficiente)",
             9 => "fila justa: outro veículo espera há mais tempo pela mesma saída",
             10 => "placa Pare: ainda não parou na linha",
+            11 => "cruzamento ocupado: veículo parado ou passando no ponto de conflito",
             _ => "",
         }
     }
@@ -2443,6 +2867,8 @@ impl Sim {
             "costOwn": if own.is_finite() { json!(own) } else { json!(null) },
             "lanes": lanes_cost,
             "ruleBreaker": self.rule_breaker[i],
+            "boxBlocker": self.box_blocker[i],
+            "heldByBox": self.held_box[i],
             "elapsed": elapsed,
             "freeTime": self.t_free[i],
             "remainingFree": if remaining.is_finite() { json!(remaining) } else { json!(null) },

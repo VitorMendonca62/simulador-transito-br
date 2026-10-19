@@ -340,6 +340,13 @@ impl Network {
                 "harshBrakes": s.stats.harsh_brakes,
                 "solidCrossings": s.stats.solid_crossings,
                 "skipped": s.stats.skipped,
+                "boxEntries": s.stats.box_entries,
+                "boxEntriesBlockers": s.stats.box_entries_blockers,
+                "boxStops": s.stats.box_stops,
+                "boxWait": s.stats.box_wait_s,
+                "junctionOverlaps": s.stats.junction_overlaps,
+                "junctionOverlapsGeom": s.stats.junction_overlaps_geom,
+                "occDeadlocks": s.stats.occ_deadlocks,
             })
             .to_string(),
             None => "{}".to_string(),

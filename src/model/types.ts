@@ -161,6 +161,18 @@ export interface SimStats {
   harshBrakes?: number
   /** viagens da matriz que não nasceram (sem caminho da origem ao destino) */
   skipped?: number
+  /** entradas no cruzamento sem espaço para sair (CTB art. 45) e quantas foram de quem "fecha o cruzamento" */
+  boxEntries?: number
+  boxEntriesBlockers?: number
+  /** veículos que ficaram parados (> 2 s) dentro de um cruzamento */
+  boxStops?: number
+  /** veículos-segundo parados à espera de um cruzamento ocupado */
+  boxWait?: number
+  /** carrocerias sobrepostas dentro de cruzamentos: trajetórias que se cruzam / curvas próximas demais */
+  junctionOverlaps?: number
+  junctionOverlapsGeom?: number
+  /** impasses dentro do cruzamento desfeitos ignorando a ocupação */
+  occDeadlocks?: number
 }
 
 /** Resultado de uma execução headless de um cenário (comparação A/B). */
@@ -190,6 +202,9 @@ export interface SimReport {
   meanDelayAll: number
   meanSpeedKmh: number
   throughputPerH: number
+  boxEntries?: number
+  boxWaitVehH?: number
+  junctionOverlaps?: number
   maxQueue: number
   od: { from: number; to: number; n: number; meanTravel: number; meanDelay: number }[]
   junctions: { node: number; osm: number; delayVehH: number; queueMax: number }[]
@@ -226,6 +241,10 @@ export interface VehicleInfo {
   costOwn: number | null
   lanes: { idx: number; here: boolean; cost: number | null; conn: string | null }[]
   ruleBreaker: boolean
+  /** este motorista "fecha o cruzamento" */
+  boxBlocker?: boolean
+  /** parado esperando um ponto de conflito ocupado */
+  heldByBox?: boolean
   elapsed: number
   freeTime: number
   remainingFree: number | null

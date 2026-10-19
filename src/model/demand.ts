@@ -28,6 +28,8 @@ export interface DemandParams {
   busShare: number
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
+  /** % de motoristas que entram no cruzamento sem espaço para sair e podem ficar parados nele (CTB art. 45) */
+  boxBlockPct?: number
   seed: number
   /** recalcula as rotas com o tempo medido durante a simulação (estilo Waze) */
   reroute?: boolean

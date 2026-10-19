@@ -1040,14 +1040,19 @@ fn lane_changes_use_blinker_and_respect_solid_zone() {
 fn recife_behavior() {
     let data = std::fs::read(std::env::var("PERF_OSM").expect("defina PERF_OSM")).unwrap();
     let q = |id: i64, x0: f64, y0: f64, x1: f64, y1: f64, gen: f64| format!(r#"{{"id":{id},"gen":{gen},"attr":1,"poly":[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}]]}}"#);
-    let zones = [q(1, -3000.0, -3000.0, -1500.0, -1500.0, 2500.0), q(2, 1500.0, -3000.0, 3000.0, -1500.0, 2500.0), q(3, -3000.0, 1500.0, -1500.0, 3000.0, 2500.0), q(4, 1500.0, 1500.0, 3000.0, 3000.0, 2500.0)].join(",");
+    let gen = 2500.0 * std::env::var("SIM_GEN").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+    let zones = [q(1, -3000.0, -3000.0, -1500.0, -1500.0, gen), q(2, 1500.0, -3000.0, 3000.0, -1500.0, gen), q(3, -3000.0, 1500.0, -1500.0, 3000.0, gen), q(4, 1500.0, 1500.0, 3000.0, 3000.0, gen)].join(",");
     let extra = std::env::var("SIM_PARAMS").unwrap_or_default();
     let mut n = build_network_lazy_for_test(&data);
     n.ensure_conns();
     let mut sum = [0.0f64; 6];
-    for seed in 1..=3 {
+    let seed0 = std::env::var("SIM_SEED0").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    for seed in seed0 + 1..=seed0 + 3 {
         let json = format!(r#"{{"zones":[{zones}],"params":{{"seed":{seed},"hour":8,"busShare":0,"beta":0.0{extra}}}}}"#);
         n.start_sim(&json).unwrap();
+        if std::env::var("OVERLAP_LOG").is_ok() {
+            n.sim.as_mut().unwrap().overlap_log = Some(Vec::new());
+        }
         let t = std::time::Instant::now();
         for _ in 0..(15 * 60 * 5) {
             n.sim.as_mut().unwrap().step(&n.net);
@@ -1057,6 +1062,10 @@ fn recife_behavior() {
         let ms = t.elapsed().as_secs_f64() * 1e3 / 4500.0;
         let row = [s.stats.finished as f64, r["totalDelayAllVehH"].as_f64().unwrap(), s.stats.queued as f64, s.stats.illegal_moves as f64 + s.stats.solid_crossings as f64 * 1e-6, s.stats.harsh_brakes as f64, ms];
         eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], row[5], s.reroutes);
+        for l in s.overlap_log.iter().flatten() {
+            eprintln!("      OVL {l}");
+        }
+        eprintln!("   cruzamento: sobreposições {} (+{} geometria)  parados dentro {}  espera por ocupação {:.0} veíc·s  impasses {}", s.stats.junction_overlaps, s.stats.junction_overlaps_geom, s.stats.box_stops, s.stats.box_wait_s, s.stats.occ_deadlocks);
         for k in 0..6 {
             sum[k] += row[k] / 3.0;
         }
