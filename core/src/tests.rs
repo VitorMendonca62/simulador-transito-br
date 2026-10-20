@@ -1079,7 +1079,7 @@ fn recife_behavior() {
         let r = s.report(&n.net);
         let ms = t.elapsed().as_secs_f64() * 1e3 / 4500.0;
         let row = [s.stats.finished as f64, r["totalDelayAllVehH"].as_f64().unwrap(), s.stats.queued as f64, s.stats.illegal_moves as f64 + s.stats.solid_crossings as f64 * 1e-6, s.stats.harsh_brakes as f64, ms];
-        eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], row[5], s.reroutes);
+        eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  vermelho {}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], s.stats.red_runs, row[5], s.reroutes);
         for l in s.overlap_log.iter().flatten() {
             eprintln!("      OVL {l}");
         }

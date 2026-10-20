@@ -215,6 +215,45 @@ mais. Se 4 min for pouco realista, subir `ROUTE_BUDGET_MAX` ou partir para D3 (r
   171,2 → 165,9 veíc·h, concluídos 455 → 478. Sobreposições no cruzamento estáveis. Tudo dentro do ruído entre
   sementes (só a ordem de recálculo das zonas mudou).
 
+**2026-10-20: C1 testado e descartado** (código revertido; o `recife_behavior` passou a imprimir `vermelho`). Versão testada, em `leader`: O resultado de `ahead_stop_at` é guardado como distância além do fim da
+faixa (`ahead_off`) e reaproveitado no passo seguinte, se a faixa e a conversão escolhida forem as mesmas
+(`ahead_key`). Recalcula a cada 2 passos por veículo, na mesma paridade do `may_enter`.
+
+Desempenho (núcleo fixo, rodadas alternadas, média de 3; HEAD variou 8,2–9,3 ms entre rodadas):
+
+| Cenário | Antes | C1 |
+|---|---|---|
+| 4 zonas, ~10 mil veículos (min 6) | 6,32 ms | **5,02 ms** (−20 %) |
+| 4 zonas, ~19 mil veículos (min 12) | 8,67 ms | **7,72 ms** (−11 %) |
+| 256 zonas, ~13 mil veículos (min 12, 2 rodadas) | 7,56 ms | 7,56 ms (empate) |
+
+Comportamento (`recife_behavior`, 6 sementes, média [mín–máx]):
+
+| | Demanda 1×: antes | Demanda 1×: C1 | Demanda 2×: antes | Demanda 2×: C1 |
+|---|---|---|---|---|
+| Concluídos | 460 [445–480] | 454 [441–465] | 464 [443–486] | 467 [424–497] |
+| Atraso total (veíc·h) | 36,9 [32–41] | 38,7 [36–40] | 168,2 [162–173] | 168,7 [153–179] |
+| Freadas bruscas | 12.673 | 12.866 | 23.111 | 22.861 |
+| Furos de vermelho | 4,5 [2–7] | 5,5 [2–10] | 8,5 [4–12] | 9,7 [7–13] |
+| Colisões no cruzamento | 2,8 [1–4] | 2,3 [1–3] | 5,8 [2–10] | 4,0 [3–6] |
+| Parados dentro do cruzamento | 3,5 [0–7] | 6,0 [2–11] | 21,0 | 21,2 |
+| Impasses | 0 | 0 | 0 | 0 |
+
+Tudo dentro da faixa entre sementes.
+
+**Reteste com 24 sementes (comparação pareada, IC 95 %):**
+- Furos de vermelho: **não** subiram (1×: −0,4 ± 1,1; 2×: −0,1 ± 1,7). O aumento visto com 3 sementes era ruído.
+  Pelo código também não teria como: a antecipação só acrescenta paradas além da linha, e a decisão na linha
+  (`may_enter`) não mudou.
+- Parados dentro do cruzamento: **subiram** com demanda 1× (+1,5 ± 1,4, de 3,3 para 4,8). Mecanismo: quem ia cruzar
+  a linha usava a antecipação de 0,2 s atrás, entrava e travava no nó seguinte.
+- Correção (C1b): recalcula sempre quando o carro vai cruzar a linha nos próximos 2 passos
+  (`v > 0,5 && rest < 2·v·dt + 1`). Com ela, parados dentro voltam à base (+0,1 ± 1,2) e nenhuma métrica piora
+  (vermelho 1×: −1,2 ± 1,0; o resto é ruído).
+- **Mas o ganho quase some:** em A/B alternado com núcleo fixo, 4 zonas min 6: 5,77 → 5,34 ms (−7 %); min 12:
+  8,80 → 8,70 ms (−1 %); 256 zonas: inconclusivo (o próprio HEAD variou 7,2–10,2 ms). Quase todo o ganho da
+  versão inicial vinha justamente de quem estava cruzando a linha.
+
 ## 6. Como medir (para repetir antes e depois)
 
 - Passo e fases: `PERF_OSM=~/Downloads/mapa-recife-novo.osm cargo test --release perf_sim -- --ignored --nocapture`
