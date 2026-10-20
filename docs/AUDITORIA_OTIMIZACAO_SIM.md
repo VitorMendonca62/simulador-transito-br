@@ -113,7 +113,7 @@ fixo com a rede vazia.
 
 | Opção | Resolve | Ganho esperado | Risco | Esforço |
 |---|---|---|---|---|
-| B1. **Agrupar os campos "quentes"** do veículo num só registro (`struct Hot { s, v, vlen, wait }`, 16 B) em vez de 4 vetores. Assim, ler o vizinho custa 1 linha de cache em vez de 4. Fazer por acessores para limitar a mudança. | P5 | 15–25 % do laço de aceleração (−0,6 a −1 ms) | = | médio (muitos pontos de uso) |
+| B1. ~~Agrupar os campos "quentes"~~ do veículo num só registro (`struct Hot { s, v, vlen, wait }`). **Testado e descartado** (2026-10-20): resultado idêntico, mas sem ganho (empate com 10 mil veículos, ~4 % mais lento com 19 mil, em rodadas alternadas). Com 20 mil veículos os 4 vetores somam ~320 KB e cabem no L2, então não havia falta de cache para economizar. | P5 | nenhum | = | — |
 | B2. Acumuladores de `metrics` por trecho num só struct (`[f32; 6]` por trecho). | P8 | −0,1 a −0,2 ms | = | baixo |
 | B3. Conflitos num vetor plano (CSR: `conf_off[c]..conf_off[c+1]`) em vez de `Rc<Vec>` por conversão, preenchido sob demanda por nó. | P9/P10 | pequeno no passo; tira a indireção | = | baixo |
 
@@ -159,7 +159,7 @@ Por ordem (ganho ÷ risco):
    `recife_behavior` antes e depois, que devem bater exatamente. Ganho: 10–15 % e metade do custo fixo.
 2. **D1 + D2** (orçamento de rotas fixo e zonas priorizadas). É o maior ganho para quem usa a OD do Recife, com
    pouco código. Revalidar o atraso total do `recife_behavior` com rotas em tempo real.
-3. **B1** (campos quentes juntos). É o maior ganho que sobra no laço de aceleração sem tocar no modelo.
+3. ~~B1~~: testado, sem ganho (ver a tabela B). O custo do laço de aceleração é de cálculo (`leader`, `may_enter`, `ahead_stop_at`), não de acesso à memória.
 4. **C1** (antecipação a cada 2 passos). Revalidar colisões, freadas e furos de vermelho no `recife_behavior`.
 5. **D3** (roteador num 2º worker), se depois de 1–4 o roteamento ainda for > 15 % do passo com a OD.
 6. **E3** (multithread) só se a meta for 50 mil veículos a 10× ou mais. Deixar E1/E2 de fora enquanto o
@@ -188,7 +188,8 @@ zonas. Em 10× isso leva o indicador de ~50 % para ~30 %, e passa a acompanhar ~
 | `perf_sim`, 13 mil veículos (min 8) | 7,58 ms/passo | **6,21 ms** (−18 %) |
 
 O ganho é maior com a rede pouco carregada porque o que saiu era quase todo custo fixo, que não depende do número
-de veículos. Agora o laço de aceleração é ~55 % do passo, e o próximo alvo é B1 (campos quentes juntos).
+de veículos. Agora o laço de aceleração é ~55 % do passo. O B1 (campos quentes juntos) foi testado depois e não
+rendeu nada; o próximo alvo é reduzir chamadas (C1).
 
 **2026-10-20: D1 + D2 implementados** (`route_step`).
 - D1: teto de `ROUTE_BUDGET_MAX = 6.000` nós de Dijkstra por passo (antes 12.000). Com poucas zonas nada muda,
