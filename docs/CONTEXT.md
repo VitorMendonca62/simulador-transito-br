@@ -340,6 +340,23 @@ fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada 
 - Testado e descartado: (1) olhar as faixas/curvas **anteriores** da faixa concorrente curta (horizonte por tempo `vfree·(t_me + folga)`, só quem escolheu a curva que leva a ela): colisões ~1,5–3, mas atraso 45 veíc·h e concluídos ~465 — quem atravessa avenida movimentada passa a esperar brechas reais; só com os rápidos (≥ 6 m/s) ainda 40 veíc·h. (2) Chegada de quem já está na curva concorrente estimada com aceleração (não velocidade constante): impasses em uma semente. (3) Preferencial freando ao ver alguém já entrando na curva concorrente: sem ganho.
 - Pendências: as colisões que sobram são, em geral, de quem cede a um veículo ainda **antes** da faixa concorrente curta (invisível, item 1 acima); medidas substitutas de segurança (TTC, PET) e a marcação de área de conflito (grade amarela) por nó.
 
+## Furos de vermelho e colisões por causa (2026-10-20)
+- Diagnóstico: com `OVERLAP_LOG=1`, o `recife_behavior` agora também lista cada furo de vermelho (`RED`, com as últimas ~6 s do veículo e o estado do sinal no fim de cada faixa: 0 sem semáforo, 1 vermelho, 2 amarelo, 3 verde, 9 dentro da conversão) e cada parada > 2 s dentro do cruzamento (`BOX`). No teste, `illegalPct` = 0, então nenhum furo é intencional.
+- **Furos de vermelho (base: 15 em 3 sementes)**:
+  - 13 eram um defeito: semáforo no fim de uma faixa curta (5,7–9,2 m) logo depois de um nó sem semáforo ou de uma conversão longa (38 m). O veículo freava na faixa anterior, mas dentro da conversão o `leader` só olhava o veículo da frente. Ele voltava a acelerar e chegava à faixa curta sem distância para parar (três locais: osm 3242030568, 8190979104 e 3244477373).
+  - 2 eram dilema do amarelo, ambos a ~50 km/h: um veículo que segue no amarelo com freada confortável e chega à linha 1,6 s depois do vermelho, e um que cruza no amarelo o primeiro nó de um cruzamento de vários nós e encontra o vermelho no segundo.
+- **Correção** (`leader`, ramo da conversão): a retenção da faixa de destino curta (< 30 m, não `short_link`) com sinal vermelho, ou amarelo com espaço para parar, também vale para quem já está na conversão.
+  - Resultado em 12 sementes pareadas, IC 95 %: furos de vermelho 5,3 → 0,6 (−4,8 ± 1,6); parados dentro do cruzamento 3,3 → 5,8 (+2,6 ± 2,2, dos quais ~0,7 por execução são a fila que antes furava e agora para atrás da faixa curta); atraso, concluídos, colisões e freadas sem diferença.
+  - Os furos que restam são todos de dilema do amarelo: o veículo segue no amarelo e o vermelho chega antes da linha.
+- Testado e descartado: um keep-clear que considera parada a fila da faixa de saída curta com sinal fechado. Os parados dentro do cruzamento subiram +6,1 ± 2,8, por um efeito em cadeia no nó osm 2043349640.
+- **Colisões (3 sementes, 9 episódios)**:
+  - 5 de comportamento, todas do mesmo tipo: o veículo com preferência ainda estava na faixa **antes** da faixa concorrente curta (≤ 30 m), muitas vezes a 13–17 m/s. Quem cede não o vê, ou decidiu quando ele estava lá, e entra (osm 2140843632, 1541498330 ×2, 1499415233, 3106350845). É a pendência já registrada acima.
+  - 4 de geometria: curvas que não se cruzam mas passam perto, 3 delas com os dois no verde (osm 2043345969 ×2, 9281358133). É defeito de geometria ou de definição de fase, não de comportamento.
+- Pendências:
+  - Amarelo por velocidade da via: hoje é sempre 3 s. Pela minha lembrança do Manual Brasileiro de Sinalização de Trânsito (vol. V, semafórica), 3 s vale até 40 km/h e 4 s para 50–60 km/h; conferir no manual antes de implementar.
+  - Quem decidiu seguir no amarelo deveria manter a decisão, em vez de frear forte quando o sinal vira vermelho.
+  - Antecipar o veículo com preferência antes da faixa concorrente curta.
+
 ## Interface: trilho de ferramentas (2026-10-19)
 - **Barra superior** (`ui/Toolbar.tsx`): **Importar ▾** com duas opções explícitas (Mapa `.osm/.pbf` — substitui o mapa; Cenário `.json` — aplica sobre o mapa aberto), **Recife** (abre `public/data/mapa-recife.osm.gz`, recorte de out/2026, descomprimido no navegador com `DecompressionStream`), **Exportar cenário**, zoom e Ajustar. O alternador de modos saiu da barra.
 - **Recife** pergunta antes (`ui/RecifeDialog.tsx`, `<dialog>` modal) se entram as **zonas da Pesquisa OD 2018** (com portais na divisa) e os **semáforos da CTTU**; `store.loadRecife({zones, signals})` carrega o mapa e aplica os dois.

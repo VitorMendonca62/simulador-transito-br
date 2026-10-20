@@ -421,8 +421,8 @@ pub struct Sim {
     pub red_log: Vec<(u32, f32, u32, f32, f32)>,
     /// diagnóstico (testes): descrição de cada sobreposição nova, se ligado
     pub overlap_log: Option<Vec<String>>,
-    /// diagnóstico (só com `overlap_log`): últimos estados (aresta, s, v, pode entrar) de cada veículo
-    hist: Vec<std::collections::VecDeque<(u32, f32, f32, bool)>>,
+    /// diagnóstico (só com `overlap_log`): últimos estados (aresta, s, v, pode entrar, sinal no fim da faixa: 9 = na conversão) de cada veículo
+    hist: Vec<std::collections::VecDeque<(u32, f32, f32, bool, u8)>>,
 }
 
 impl Sim {
@@ -1842,11 +1842,24 @@ impl Sim {
             }
         } else {
             let to = self.conns[e - self.nl].to;
-            if let Some(&j) = self.edge_veh[to as usize].first() {
+            let other = self.edge_veh[to as usize].first().map(|&j| {
                 let j = j as usize;
-                return Some((rest + self.s[j] - self.vlen[j], self.v[j]));
+                (rest + self.s[j] - self.vlen[j], self.v[j])
+            });
+            // já dentro da conversão: a retenção da faixa de destino curta com semáforo fechado continua valendo
+            // (senão quem freou antes da conversão volta a acelerar nela e chega à faixa curta sem espaço para parar)
+            let tl = &self.lanes[to as usize];
+            if tl.len < 30.0 && !self.short_link(to as usize, i) {
+                let st = self.end_state[tl.end_id as usize];
+                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) < rest + tl.len - 1.0) {
+                    let stop = (rest + tl.len - 0.5, 0.0);
+                    return Some(match other {
+                        Some(o) if o.0 < stop.0 => o,
+                        _ => stop,
+                    });
+                }
             }
-            None
+            other
         }
     }
 
@@ -2007,6 +2020,17 @@ impl Sim {
                 if self.edge[i] as usize >= self.nl {
                     if w0 < 2.0 && self.wait[i] >= 2.0 {
                         self.stats.box_stops += 1;
+                        if self.overlap_log.is_some() {
+                            let c = &self.conns[self.edge[i] as usize - self.nl];
+                            let tl = &self.lanes[c.to as usize];
+                            let line = format!("BOX veh={i} node={} osm={} kind={} s={:.1}/{:.1} to_len={:.1} to_sig={} to_n={} held_box={}", c.node, net.nodes[c.node as usize].osm_id, c.kind, self.s[i], c.len, tl.len, self.end_state[tl.end_id as usize], self.edge_veh[c.to as usize].len(), self.held_box[i]);
+                            let mut line = line + &format!(" wait={:.0}\n          hist:", self.wait[i]);
+                            for &(he, hs, hv, ok, sig) in self.hist.get(i).into_iter().flatten() {
+                                let ed = if (he as usize) < self.nl { format!("L{he}") } else { format!("C{he}") };
+                                line += &format!(" {ed} s={hs:.1} v={hv:.1} sig={sig}{}", if ok { "+" } else { "" });
+                            }
+                            self.overlap_log.as_mut().unwrap().push(line);
+                        }
                     }
                     if self.held_box[i] && w0 <= OCC_DEADLOCK && self.wait[i] > OCC_DEADLOCK {
                         self.stats.occ_deadlocks += 1;
@@ -2057,7 +2081,9 @@ impl Sim {
                 if h.len() >= 30 {
                     h.pop_front();
                 }
-                h.push_back((self.edge[i], self.s[i], self.v[i], self.enter_ok[i]));
+                let e = self.edge[i] as usize;
+                let sig = if e < self.nl { self.end_state[self.lanes[e].end_id as usize] } else { 9 };
+                h.push_back((self.edge[i], self.s[i], self.v[i], self.enter_ok[i], sig));
             }
         }
         if self.tick % 5 == 0 {
@@ -2174,7 +2200,7 @@ impl Sim {
             let mut line = line + &format!(" prio(b sobre a)={pa} prio(a sobre b)={pb}");
             for (tag, i) in [("a", a), ("b", b)] {
                 line += &format!("\n          {tag}:");
-                for (k, &(e, s, v, ok)) in self.hist.get(i).into_iter().flatten().enumerate() {
+                for (k, &(e, s, v, ok, _)) in self.hist.get(i).into_iter().flatten().enumerate() {
                     if k % 3 != 0 {
                         continue;
                     }
@@ -2246,6 +2272,19 @@ impl Sim {
                 if self.end_state[end] == 1 && self.red_age[end] > 1.5 && !self.short_link(e, i) {
                     self.stats.red_runs += 1;
                     if self.red_log.len() < 40 { self.red_log.push((e as u32, self.v[i], self.choice[i], self.wait[i], self.red_age[end])); }
+                    if self.overlap_log.is_some() {
+                        let mut line = format!(
+                            "RED veh={i} lane={e} len={:.1} node={} osm={} v={:.1} wait={:.1} red_age={:.1} enter_ok={} breaker={} box={} kind={}",
+                            self.lanes[e].len, self.lanes[e].to_node, net.nodes[self.lanes[e].to_node as usize].osm_id, self.v[i], self.wait[i],
+                            self.red_age[end], self.enter_ok[i], self.rule_breaker[i], self.box_blocker[i], self.conns[cc as usize - self.nl].kind
+                        );
+                        line += "\n          hist:";
+                        for &(he, hs, hv, ok, sig) in self.hist.get(i).into_iter().flatten() {
+                            let ed = if (he as usize) < self.nl { format!("L{he}") } else { format!("C{he}") };
+                            line += &format!(" {ed} s={hs:.1} v={hv:.1} sig={sig}{}", if ok { "+" } else { "" });
+                        }
+                        self.overlap_log.as_mut().unwrap().push(line);
+                    }
                 }
                 {
                     let to = self.conns[cc as usize - self.nl].to as usize;
