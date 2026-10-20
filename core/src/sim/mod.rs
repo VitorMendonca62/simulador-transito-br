@@ -283,6 +283,10 @@ pub struct Sim {
     conns: Vec<ConnRt>,
     edge_len: Vec<f32>,
     edge_veh: Vec<Vec<u32>>,
+    /// 1 bit por aresta: ligada se `edge_veh` dela não está vazia (o passo só percorre as ocupadas, em ordem)
+    occ_bits: Vec<u64>,
+    /// arestas ocupadas no passo atual (buffer reaproveitado)
+    active: Vec<u32>,
     node_conns: Vec<Vec<u32>>,
     conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
     router: Router,
@@ -350,11 +354,17 @@ pub struct Sim {
     rate: Vec<Vec<f64>>,
     next_spawn: Vec<Vec<f64>>,
     pending: Vec<std::collections::VecDeque<(u32, u16, u8, f32)>>,
+    /// faixas com fila de entrada não vazia (para não varrer todas as faixas a cada passo)
+    pend_gates: Vec<u32>,
+    /// menor `next_spawn[i][j]` de cada zona de origem (linha sem nascimento devido é pulada)
+    row_next: Vec<f64>,
     rng: Rng,
     next_matrix_at: f64,
     sigs: Vec<SigRt>,
     end_state: Vec<u8>,
     red_age: Vec<f32>,
+    /// pontas controladas por algum semáforo (as demais ficam sempre em 0)
+    sig_ends: Vec<u32>,
     // veículos (SoA)
     alive: Vec<bool>,
     free: Vec<u32>,
@@ -382,6 +392,12 @@ pub struct Sim {
     mand: Vec<bool>,
     /// pedidos de passagem do passo: (faixa de destino, veículo com seta), ordenados
     wants: Vec<(u32, u32)>,
+    /// faixa com algum pedido de passagem em `wants`
+    want_lane: Vec<bool>,
+    /// buffers reaproveitados entre passos
+    movers: Vec<(u32, u32)>,
+    inside: Vec<(u32, u32)>,
+    overlap_now: std::collections::HashSet<(u32, u32)>,
     acc: Vec<f32>,
     /// decisão de entrada em cruzamento reaproveitada por 1 passo (reavaliada a cada 2)
     enter_ok: Vec<bool>,
@@ -586,6 +602,8 @@ impl Sim {
             conns,
             edge_len,
             edge_veh: vec![Vec::new(); ne],
+            occ_bits: vec![0; ne.div_ceil(64)],
+            active: Vec::new(),
             node_conns,
             conflicts: vec![None; ne],
             router,
@@ -637,11 +655,14 @@ impl Sim {
             rate: vec![vec![0.0; nz]; nz],
             next_spawn: vec![vec![f64::INFINITY; nz]; nz],
             pending: vec![Default::default(); net.lanes.len()],
+            pend_gates: Vec::new(),
+            row_next: vec![f64::INFINITY; nz],
             rng: Rng::new(init.params.seed),
             next_matrix_at: 0.0,
             sigs,
             end_state: vec![0; net.segs.len() * 2],
             red_age: vec![0.0; net.segs.len() * 2],
+            sig_ends: Vec::new(),
             alive: Vec::new(),
             free: Vec::new(),
             edge: Vec::new(),
@@ -664,6 +685,10 @@ impl Sim {
             lc_why: Vec::new(),
             mand: Vec::new(),
             wants: Vec::new(),
+            want_lane: vec![false; nl],
+            movers: Vec::new(),
+            inside: Vec::new(),
+            overlap_now: Default::default(),
             acc: Vec::new(),
             enter_ok: Vec::new(),
             stop_ok: Vec::new(),
@@ -682,6 +707,10 @@ impl Sim {
         sim.conn_delay = vec![0.0; nc];
         sim.conn_seen = vec![f32::NEG_INFINITY; nc];
         sim.live_pen = sim.conns.iter().map(|c| c.pen).collect();
+        let mut ends: Vec<u32> = sim.sigs.iter().flat_map(|sg| sg.phases.iter().flat_map(|p| p.3.iter().copied())).collect();
+        ends.sort_unstable();
+        ends.dedup();
+        sim.sig_ends = ends;
         sim.refresh_matrix(net);
         Ok(sim)
     }
@@ -757,6 +786,9 @@ impl Sim {
             }
         }
         self.next_matrix_at = self.time + 600.0;
+        for i in 0..nz {
+            self.row_next[i] = self.next_spawn[i].iter().copied().fold(f64::INFINITY, f64::min);
+        }
     }
 
     // ------------------------------------------------------------------ rotas em tempo real
@@ -879,10 +911,8 @@ impl Sim {
 
     fn update_signals(&mut self, net: &Net) {
         let _ = net;
-        for st in self.end_state.iter_mut() {
-            if *st != 0 {
-                *st = 0;
-            }
+        for &e in &self.sig_ends {
+            self.end_state[e as usize] = 0;
         }
         let dt = self.dt;
         for sg in &self.sigs {
@@ -917,8 +947,9 @@ impl Sim {
                 }
             }
         }
-        for (e, st) in self.end_state.iter().enumerate() {
-            if *st == 1 {
+        for &e in &self.sig_ends {
+            let e = e as usize;
+            if self.end_state[e] == 1 {
                 self.red_age[e] += dt;
             } else {
                 self.red_age[e] = 0.0;
@@ -1158,8 +1189,8 @@ impl Sim {
 
     fn remove_vehicle(&mut self, id: usize) {
         let e = self.edge[id] as usize;
-        if let Some(p) = self.edge_veh[e].iter().position(|&x| x as usize == id) {
-            self.edge_veh[e].remove(p);
+        if self.edge_veh[e].contains(&(id as u32)) {
+            self.unlink(e, id);
         }
         self.alive[id] = false;
         self.free.push(id as u32);
@@ -1171,6 +1202,17 @@ impl Sim {
         let list = &self.edge_veh[edge as usize];
         let pos = list.partition_point(|&j| self.s[j as usize] < s);
         self.edge_veh[edge as usize].insert(pos, id as u32);
+        self.occ_bits[edge as usize / 64] |= 1 << (edge % 64);
+    }
+
+    /// Tira o veículo `id` da lista da aresta `e` (ele precisa estar nela).
+    fn unlink(&mut self, e: usize, id: usize) {
+        let list = &mut self.edge_veh[e];
+        let p = list.iter().position(|&x| x as usize == id).unwrap();
+        list.remove(p);
+        if list.is_empty() {
+            self.occ_bits[e / 64] &= !(1 << (e % 64));
+        }
     }
 
     /// Melhor conversão da faixa `l` para o destino: (custo até a zona, conversão). Carros ignoram faixas de ônibus.
@@ -1819,6 +1861,9 @@ impl Sim {
         lap!(1);
 
         // pedidos de passagem: quem está com seta ligada para uma troca obrigatória
+        for &(l, _) in &self.wants {
+            self.want_lane[l as usize] = false;
+        }
         self.wants.clear();
         for i in 0..self.alive.len() {
             // seta ligada há muito sem nova tentativa (a cada tentativa ela é renovada) não é mais pedido
@@ -1827,10 +1872,22 @@ impl Sim {
             }
         }
         self.wants.sort_unstable();
-        // 1) acelerações (com o estado do início do passo), percorrendo as arestas
+        for &(l, _) in &self.wants {
+            self.want_lane[l as usize] = true;
+        }
+        // 1) acelerações (com o estado do início do passo), percorrendo as arestas ocupadas em ordem crescente
         let n = self.alive.len();
         self.multi.clear();
-        for e in 0..self.edge_veh.len() {
+        self.active.clear();
+        for (w, &bits) in self.occ_bits.iter().enumerate() {
+            let mut b = bits;
+            while b != 0 {
+                self.active.push((w * 64) as u32 + b.trailing_zeros());
+                b &= b - 1;
+            }
+        }
+        for ai in 0..self.active.len() {
+            let e = self.active[ai] as usize;
             let len = self.edge_veh[e].len();
             if len == 0 {
                 continue;
@@ -1858,7 +1915,7 @@ impl Sim {
                         lead = Some(o);
                     }
                 }
-                if e < self.nl && !self.wants.is_empty() {
+                if e < self.nl && self.want_lane[e] {
                     if let Some(c) = self.courtesy(i, e, k) {
                         if lead.map_or(true, |l| c.0 < l.0) {
                             lead = Some((c.0, c.1));
@@ -1905,6 +1962,7 @@ impl Sim {
                 self.acc[i] = a;
             }
         }
+        lap!(2);
         // 2) integração
         for i in 0..n {
             if !self.alive[i] {
@@ -1952,16 +2010,18 @@ impl Sim {
         lap!(4);
 
         // 4) mudanças de aresta
-        let mut movers: Vec<(u32, u32)> = Vec::new();
+        let mut movers = std::mem::take(&mut self.movers);
+        movers.clear();
         for i in 0..n {
             if self.alive[i] && self.s[i] >= self.edge_len[self.edge[i] as usize] {
                 movers.push((self.edge[i], i as u32));
             }
         }
         movers.sort_by(|a, b| a.0.cmp(&b.0).then(self.s[b.1 as usize].partial_cmp(&self.s[a.1 as usize]).unwrap()));
-        for (_, vid) in movers {
+        for &(_, vid) in &movers {
             self.advance(net, vid as usize);
         }
+        self.movers = movers;
 
         self.enforce_gaps();
         if self.overlap_log.is_some() {
@@ -1997,7 +2057,7 @@ impl Sim {
             let segs = &net.segs;
             let fs = |d: usize| free_speed(&segs[d / 2]) * 0.9;
             let _ = lanes;
-            let queued: u64 = self.pending.iter().map(|q| q.len() as u64).sum();
+            let queued: u64 = self.pend_gates.iter().map(|&g| self.pending[g as usize].len() as u64).sum();
             self.metrics.end_tick(self.time, &fs, self.n_alive, queued);
         }
     }
@@ -2006,7 +2066,10 @@ impl Sim {
     /// teste de eixos separados). Só entre conversões que não saem da mesma faixa nem chegam à mesma faixa (essas já
     /// se ordenam como líder/seguidor). Cada par conta uma vez enquanto continuar sobreposto.
     fn check_overlaps(&mut self, net: &Net) {
-        let mut inside: Vec<(u32, u32)> = Vec::new();
+        let mut inside = std::mem::take(&mut self.inside);
+        inside.clear();
+        let mut now = std::mem::take(&mut self.overlap_now);
+        now.clear();
         for i in 0..self.alive.len() {
             if self.alive[i] && self.edge[i] as usize >= self.nl {
                 inside.push((self.conns[self.edge[i] as usize - self.nl].node, i as u32));
@@ -2028,7 +2091,6 @@ impl Sim {
             let rr = (a.1 + b.1) * (a.1 + b.1);
             a.0.iter().any(|p| b.0.iter().any(|q| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) < rr))
         };
-        let mut now: std::collections::HashSet<(u32, u32)> = Default::default();
         let mut new_pairs = (0, 0);
         let mut logs: Vec<(usize, usize)> = Vec::new();
         let mut logs_kind: Vec<(usize, usize)> = Vec::new();
@@ -2106,7 +2168,8 @@ impl Sim {
             line += &format!("\n          a.conn from={} to={}  b.conn from={} to={}", ca.from, ca.to, cb.from, cb.to);
             self.overlap_log.as_mut().unwrap().push(line);
         }
-        self.overlap_prev = now;
+        self.overlap_now = std::mem::replace(&mut self.overlap_prev, now);
+        self.inside = inside;
     }
 
     /// Garante folga mínima entre veículos consecutivos nas arestas com 2+ veículos.
@@ -2173,8 +2236,7 @@ impl Sim {
                     }
                 }
                 let over = self.s[i] - self.edge_len[e];
-                let p = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
-                self.edge_veh[e].remove(p);
+                self.unlink(e, i);
                 self.edge[i] = cc;
                 self.s[i] = over;
                 self.insert_sorted(cc, i);
@@ -2192,8 +2254,7 @@ impl Sim {
                 let c = &self.conns[e - self.nl];
                 let to = c.to;
                 let over = self.s[i] - self.edge_len[e];
-                let p = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
-                self.edge_veh[e].remove(p);
+                self.unlink(e, i);
                 self.edge[i] = to;
                 self.s[i] = over;
                 self.insert_sorted(to, i);
@@ -2505,8 +2566,7 @@ impl Sim {
         // executa
         let old_off = self.lanes[e].off;
         let new_off = self.lanes[to].off;
-        let pos = self.edge_veh[e].iter().position(|&x| x as usize == i).unwrap();
-        self.edge_veh[e].remove(pos);
+        self.unlink(e, i);
         self.blink_to[i] = NONE;
         self.mand[i] = false;
         self.edge[i] = to as u32;
@@ -2523,7 +2583,9 @@ impl Sim {
         let _ = net;
         let nz = self.zone_ids.len();
         // filas de entrada (primeiro as pendentes)
-        for g in 0..self.pending.len() {
+        self.pend_gates.sort_unstable();
+        for gi in 0..self.pend_gates.len() {
+            let g = self.pend_gates[gi] as usize;
             while let Some(&(origin, dest, kind, t_req)) = self.pending[g].front() {
                 if self.spawn_vehicle(g as u32, origin as u16, dest, kind, t_req) {
                     self.pending[g].pop_front();
@@ -2533,7 +2595,12 @@ impl Sim {
                 }
             }
         }
+        let pending = &self.pending;
+        self.pend_gates.retain(|&g| !pending[g as usize].is_empty());
         for i in 0..nz {
+            if self.row_next[i] > self.time {
+                continue; // nenhum par desta origem tem nascimento devido
+            }
             for j in 0..nz {
                 while self.next_spawn[i][j] <= self.time {
                     let rate = self.rate[i][j];
@@ -2557,6 +2624,9 @@ impl Sim {
                     let kind = if (self.rng.f() as f64) < self.params.bus_share / 100.0 { 1 } else { 0 };
                     if !self.spawn_vehicle(gate, i as u16, j as u16, kind, self.time as f32) {
                         if self.pending[gate as usize].len() < 200 {
+                            if self.pending[gate as usize].is_empty() {
+                                self.pend_gates.push(gate);
+                            }
                             self.pending[gate as usize].push_back((i as u32, j as u16, kind, self.time as f32));
                             self.stats.queued += 1;
                         }
@@ -2564,6 +2634,7 @@ impl Sim {
                     self.next_spawn[i][j] += self.rng.exp(rate);
                 }
             }
+            self.row_next[i] = self.next_spawn[i].iter().copied().fold(f64::INFINITY, f64::min);
         }
     }
 
