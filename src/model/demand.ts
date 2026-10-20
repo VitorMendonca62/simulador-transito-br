@@ -47,7 +47,7 @@ export interface DemandParams {
  * - ignoram a sinalização 5 %; fecham o cruzamento 20 %: infrações comuns nos cruzamentos do centro e da Agamenon */
 export const TYPICAL_PARAMS = { beta: 0.08, intrazone: true, busShare: 3, illegalPct: 5, boxBlockPct: 20, reroute: true, appPct: 50, perception: 0.3 } satisfies Partial<DemandParams>
 
-export const DEFAULT_PARAMS: DemandParams = { ...TYPICAL_PARAMS, hour: 5, seed: 1 }
+export const DEFAULT_PARAMS: DemandParams = { ...TYPICAL_PARAMS, hour: 7, seed: 1 }
 
 export interface Profile {
   id: string
