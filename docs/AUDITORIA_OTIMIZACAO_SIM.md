@@ -113,7 +113,7 @@ fixo com a rede vazia.
 
 | Opção | Resolve | Ganho esperado | Risco | Esforço |
 |---|---|---|---|---|
-| B1. ~~Agrupar os campos "quentes"~~ do veículo num só registro (`struct Hot { s, v, vlen, wait }`). **Testado e descartado** (2026-10-20): resultado idêntico, mas sem ganho (empate com 10 mil veículos, ~4 % mais lento com 19 mil, em rodadas alternadas). Com 20 mil veículos os 4 vetores somam ~320 KB e cabem no L2, então não havia falta de cache para economizar. | P5 | nenhum | = | — |
+| B1. ~~Agrupar os campos "quentes"~~ do veículo num só registro (`struct Hot { s, v, vlen, wait }`). **Testado e descartado** (2026-10-20): resultado idêntico, mas o ganho ficou dentro do ruído. Na 1ª medição, ~4 % mais lento com 19 mil veículos. No reteste, com núcleo fixo (`taskset`) e rodadas alternadas: 4 zonas −7 % em média (o próprio HEAD variou 8,1–9,2 ms entre rodadas), 256 zonas e `recife_behavior` empatados. Não compensa trocar 282 acessos por isso. Com 20 mil veículos os 4 vetores somam ~320 KB e cabem no L2, então não havia falta de cache para economizar. | P5 | nenhum | = | — |
 | B2. Acumuladores de `metrics` por trecho num só struct (`[f32; 6]` por trecho). | P8 | −0,1 a −0,2 ms | = | baixo |
 | B3. Conflitos num vetor plano (CSR: `conf_off[c]..conf_off[c+1]`) em vez de `Rc<Vec>` por conversão, preenchido sob demanda por nó. | P9/P10 | pequeno no passo; tira a indireção | = | baixo |
 
