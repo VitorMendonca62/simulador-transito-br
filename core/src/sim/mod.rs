@@ -321,6 +321,8 @@ pub struct Sim {
     box_blocker: Vec<bool>,
     /// parado neste passo por um ponto de conflito ocupado (para `Stats::box_wait_s`)
     held_box: Vec<bool>,
+    /// primeiro da faixa retido na linha por um nó logo adiante (`ahead_stop_at`), mesmo com `enter_ok`
+    ahead_held: Vec<bool>,
     /// pares sobrepostos na última verificação (episódios de `Stats::junction_overlaps`)
     overlap_prev: std::collections::HashSet<(u32, u32)>,
     app: Vec<bool>,
@@ -611,6 +613,7 @@ impl Sim {
             rule_breaker: Vec::new(),
             box_blocker: Vec::new(),
             held_box: Vec::new(),
+            ahead_held: Vec::new(),
             overlap_prev: Default::default(),
             overlap_log: None,
             hist: Vec::new(),
@@ -1012,6 +1015,7 @@ impl Sim {
                 self.rule_breaker.push(false);
                 self.box_blocker.push(false);
                 self.held_box.push(false);
+                self.ahead_held.push(false);
                 self.app.push(false);
                 self.pseed.push(0);
                 self.t_due.push(0.0);
@@ -1038,6 +1042,7 @@ impl Sim {
         // sorteio fora do PRNG da simulação: com 0 % o resto da simulação não muda
         self.box_blocker[id] = ((noise(drv.seed, 0xB0C5) + 1.0) * 50.0) < self.params.box_block_pct as f32;
         self.held_box[id] = false;
+        self.ahead_held[id] = false;
         self.tgt[id] = tree;
         self.app[id] = drv.app;
         self.pseed[id] = drv.seed;
@@ -1270,21 +1275,31 @@ impl Sim {
             let pts_o: Vec<V2> = (0..=12).map(|i| bez8(&other.curve, i as f32 / 12.0)).collect();
             let cum_o = cum(&pts_o);
             let scale_o = other.len as f64 / cum_o.last().copied().unwrap_or(1.0).max(1e-6);
-            let mut found = false;
-            'search: for a in 0..pts_me.len() - 1 {
+            // todos os cruzamentos, não só o primeiro: duas curvas podem se cruzar duas vezes (ex.: esquerdas opostas,
+            // em "S"). Viram uma área só, que cobre os dois pontos — com um ponto só, um lado freava num e batia no
+            // outro; com dois separados, cada um podia ter a vez num deles e os dois ficavam se esperando
+            let mut xs: Vec<(f32, f32, f32)> = Vec::new();
+            for a in 0..pts_me.len() - 1 {
                 for b in 0..pts_o.len() - 1 {
                     if let Some((t, u)) = seg_cross_t(pts_me[a], pts_me[a + 1], pts_o[b], pts_o[b + 1]) {
-                        let s_me = (cum_me[a] + t * (cum_me[a + 1] - cum_me[a])) * scale_me;
-                        let s_o = (cum_o[b] + u * (cum_o[b + 1] - cum_o[b])) * scale_o;
+                        let s_me = ((cum_me[a] + t * (cum_me[a + 1] - cum_me[a])) * scale_me) as f32;
+                        let s_o = ((cum_o[b] + u * (cum_o[b + 1] - cum_o[b])) * scale_o) as f32;
                         // quanto mais rasante o ângulo, mais longa a área comum às duas trajetórias
                         let (da, db) = (sub(pts_me[a + 1], pts_me[a]), sub(pts_o[b + 1], pts_o[b]));
                         let sin = (cross(da, db).abs() / (len_v(da) * len_v(db)).max(1e-9)) as f32;
                         let w = (OCC_HALF_W / sin.max(0.2)).clamp(OCC_HALF_W, 5.5);
-                        out.push(Conflict { other: o, s_me: s_me as f32, s_other: s_o as f32, merge: false, w });
-                        found = true;
-                        break 'search;
+                        xs.push((s_me, s_o, w));
                     }
                 }
+            }
+            let found = !xs.is_empty();
+            if found {
+                let lo_me = xs.iter().map(|x| x.0).fold(f32::MAX, f32::min);
+                let hi_me = xs.iter().map(|x| x.0).fold(f32::MIN, f32::max);
+                let lo_o = xs.iter().map(|x| x.1).fold(f32::MAX, f32::min);
+                let hi_o = xs.iter().map(|x| x.1).fold(f32::MIN, f32::max);
+                let w = xs.iter().map(|x| x.2).fold(0.0, f32::max) + ((hi_me - lo_me).max(hi_o - lo_o)) / 2.0;
+                out.push(Conflict { other: o, s_me: (lo_me + hi_me) / 2.0, s_other: (lo_o + hi_o) / 2.0, merge: false, w });
             }
             // não se cruzam, mas passam tão perto que as carrocerias se tocariam: conflito no ponto mais próximo
             if !found {
@@ -1341,15 +1356,15 @@ impl Sim {
     }
 
     /// Ponto de conflito à frente ocupado na conversão `cc`, para o veículo `i` cuja frente está em `s_on` na
-    /// conversão (negativo = ainda na faixa, antes da linha): obstáculo parado antes da área (folga, 0).
-    fn occ_obstacle(&mut self, net: &Net, i: usize, cc: u32, s_on: f32) -> Option<(f32, f32)> {
+    /// conversão (negativo = ainda na faixa, antes da linha): obstáculo parado antes da área (folga, 0, quem ocupa).
+    fn occ_obstacle(&mut self, net: &Net, i: usize, cc: u32, s_on: f32) -> Option<(f32, f32, usize)> {
         // impasse dentro do cruzamento (ex.: quatro "fechando" uns aos outros): segue mesmo assim
         if s_on >= 0.0 && self.wait[i] > OCC_DEADLOCK {
             return None;
         }
         let cfs = self.conflicts_of(net, cc);
         let v = self.v[i].max(1.0);
-        let mut best: Option<(f32, f32)> = None;
+        let mut best: Option<(f32, f32, usize)> = None;
         for cf in cfs.iter() {
             if cf.merge {
                 continue;
@@ -1362,8 +1377,8 @@ impl Sim {
                 continue;
             }
             let t_arr = (cf.s_me - cf.w - s_on).max(0.0) / v;
-            if self.occ_by(cf, t_arr, i).is_some() {
-                best = Some(((stop - s_on).max(0.0), 0.0));
+            if let Some(j) = self.occ_by(cf, t_arr, i) {
+                best = Some(((stop - s_on).max(0.0), 0.0, j));
                 continue;
             }
             // outro veículo já na curva concorrente vai chegar à área antes de mim e ocupá-la enquanto eu passo:
@@ -1385,7 +1400,7 @@ impl Sim {
                 }
                 let t_j = (lo - self.s[j]) / self.v[j].max(0.5);
                 if t_j < t_clear_me && (t_j < t_arr || (t_j == t_arr && j < i)) {
-                    best = Some((d_stop.max(0.0), 0.0));
+                    best = Some((d_stop.max(0.0), 0.0, j));
                     break;
                 }
             }
@@ -1505,9 +1520,16 @@ impl Sim {
                 if self.end_state[self.lanes[oc.from as usize].end_id as usize] == 1 {
                     continue;
                 }
+                // a ordem de espera só desempata entre iguais: quem tem preferência (o anel da rotatória sobre quem
+                // entra, a via principal sobre a secundária) não cede a vez a quem não tem
+                if !signaled && self.conns[me_idx].rank < oc.rank {
+                    continue;
+                }
                 if let Some(&j) = self.edge_veh[oc.from as usize].last() {
                     let j = j as usize;
-                    if self.choice[j] == o && self.v[j] < 0.5 && self.enter_ok[j] && (self.wait[j] > my_wait + 2.0 || (self.wait[j] >= my_wait - 2.0 && j < id)) {
+                    // só cede a quem vai mesmo entrar: liberado no nó (`enter_ok`) e não retido por um nó logo adiante —
+                    // senão dois que se cedem a vez (direto ou em roda) ficam parados para sempre
+                    if self.choice[j] == o && self.v[j] < 0.5 && self.enter_ok[j] && !self.ahead_held[j] && (self.wait[j] > my_wait + 2.0 || (self.wait[j] >= my_wait - 2.0 && j < id)) {
                         REASON.with(|r| r.set(9));
                         BLOCKER.with(|b| b.set(j as i64));
                         return false;
@@ -1623,7 +1645,10 @@ impl Sim {
                         let slow = self.v[id] < MERGE_SLOW;
                         if let Some(&k) = self.edge_veh[o.from as usize].last() {
                             let k = k as usize;
-                            if self.choice[k] == cf.other && self.v[k] < 0.5 && self.wait[k] > self.wait[id] && ((slow && self.wait[k] > MERGE_WAIT) || self.wait[k] > MERGE_COURTESY) {
+                            // como na fila justa: quem tem preferência (anel, via principal) não cede, e ninguém cede a
+                            // quem está retido por um nó logo adiante (não vai entrar)
+                            let yields = signaled || me.rank >= o.rank;
+                            if yields && !self.ahead_held[k] && self.choice[k] == cf.other && self.v[k] < 0.5 && self.wait[k] > self.wait[id] && ((slow && self.wait[k] > MERGE_WAIT) || self.wait[k] > MERGE_COURTESY) {
                                 { REASON.with(|r| r.set(6)); BLOCKER.with(|b| b.set(k as i64)); return false; }
                             }
                         }
@@ -1647,8 +1672,9 @@ impl Sim {
             }
             // os que estão chegando pela faixa que alimenta a conversão
             let fl = o.from as usize;
-            // aproximação concorrente com sinal vermelho não disputa a brecha (só quem já está na conversão)
-            if signaled && self.end_state[self.lanes[fl].end_id as usize] == 1 {
+            // aproximação concorrente com sinal vermelho não disputa a brecha (só quem já está na conversão) — pelo sinal
+            // dela, não o meu: quem atravessa um trecho curto entre dois nós avalia o segundo sem semáforo (`clearing`)
+            if self.end_state[self.lanes[fl].end_id as usize] == 1 {
                 continue;
             }
             for &j in self.edge_veh[fl].iter().rev().take(2) {
@@ -1694,6 +1720,9 @@ impl Sim {
             if cc == SINK {
                 return None; // sai da rede ao fim da faixa; sem líder virtual
             }
+            if front_decides {
+                self.ahead_held[i] = false;
+            }
             // linha de retenção virtual quando não pode entrar
             if rest < LOOKAHEAD && front_decides {
                 let d_check = (self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) + 20.0).max(25.0);
@@ -1714,6 +1743,10 @@ impl Sim {
             // faixa seguinte curta terminando em nó sem semáforo: quem vai ter de ceder lá já decide daqui (senão só
             // "vê" o cruzamento a poucos metros da linha, sem distância para parar)
             let ahead = if front_decides && cc != SINK { Some((self.ahead_stop_at(net, i, cc, rest), 0.0)).filter(|a| a.0.is_finite()) } else { None };
+            // parar na própria linha (e não mais adiante, ao fim de uma faixa curta que o comporte) = não vai entrar agora
+            if front_decides {
+                self.ahead_held[i] = ahead.map_or(false, |a| a.0 <= rest + 0.5);
+            }
             // dentro da conversão escolhida
             let to = self.conns[cc as usize - self.nl].to;
             let clen = self.edge_len[cc as usize];
@@ -1819,7 +1852,7 @@ impl Sim {
                 } else {
                     None
                 };
-                if let Some(o) = occ {
+                if let Some(o) = occ.map(|o| (o.0, o.1)) {
                     self.held_box[i] = true;
                     if lead.map_or(true, |l| o.0 < l.0) {
                         lead = Some(o);
@@ -1828,7 +1861,7 @@ impl Sim {
                 if e < self.nl && !self.wants.is_empty() {
                     if let Some(c) = self.courtesy(i, e, k) {
                         if lead.map_or(true, |l| c.0 < l.0) {
-                            lead = Some(c);
+                            lead = Some((c.0, c.1));
                         }
                     }
                 }
@@ -2371,10 +2404,10 @@ impl Sim {
 
     /// Cortesia: o veículo `i` (posição `k` na faixa `e`) é o primeiro atrás de alguém que pede para entrar na faixa
     /// dele (seta, troca obrigatória) e, se for cortês, passa a tratá-lo como líder, abrindo o vão.
-    fn courtesy(&self, i: usize, e: usize, k: usize) -> Option<(f32, f32)> {
+    fn courtesy(&self, i: usize, e: usize, k: usize) -> Option<(f32, f32, usize)> {
         let lo = self.wants.partition_point(|w| (w.0 as usize) < e);
         let list = &self.edge_veh[e];
-        let mut best: Option<(f32, f32)> = None;
+        let mut best: Option<(f32, f32, usize)> = None;
         for &(lane, r) in &self.wants[lo..] {
             if lane as usize != e {
                 break;
@@ -2393,7 +2426,7 @@ impl Sim {
             }
             let gap = self.s[r] - self.vlen[r] - self.s[i];
             if gap > 1.0 && best.map_or(true, |b| gap < b.0) {
-                best = Some((gap, self.v[r]));
+                best = Some((gap, self.v[r], r));
             }
         }
         best
@@ -2783,6 +2816,51 @@ impl Sim {
         }
     }
 
+    /// Primeiro da faixa, liberado para entrar (`may_enter`) mas parado: o que faz de líder virtual dele (o mais perto
+    /// entre os obstáculos de `leader`, ocupação à frente e cortesia). (texto, quem segura ou -1)
+    fn hold_of(&mut self, net: &Net, i: usize) -> Option<(String, i64)> {
+        let e = self.edge[i] as usize;
+        let cc = self.choice[i];
+        if e >= self.nl || cc == NONE || cc == SINK || self.v[i] >= 0.5 {
+            return None;
+        }
+        let k = self.edge_veh[e].iter().position(|&x| x as usize == i)?;
+        let rest = self.edge_len[e] - self.s[i];
+        let mut best: Option<(f32, String, i64)> = None;
+        let mut offer = |gap: f32, txt: String, who: i64| {
+            if best.as_ref().map_or(true, |b| gap < b.0) {
+                best = Some((gap, txt, who));
+            }
+        };
+        let ahead = self.ahead_stop_at(net, i, cc, rest);
+        if ahead.is_finite() {
+            let (code, who) = (REASON.with(|r| r.get()), BLOCKER.with(|b| b.get()));
+            offer(ahead, format!("no nó seguinte, logo depois da faixa curta à frente: {}", Self::reason_text(code)), who);
+        }
+        let to = self.conns[cc as usize - self.nl].to as usize;
+        let clen = self.edge_len[cc as usize];
+        if let Some(&j) = self.edge_veh[cc as usize].first() {
+            let j = j as usize;
+            offer(rest + self.s[j] - self.vlen[j], "veículo à frente ainda na curva".into(), j as i64);
+        } else if let Some(&j) = self.edge_veh[to].first() {
+            let j = j as usize;
+            offer(rest + clen + self.s[j] - self.vlen[j], "fila logo depois do cruzamento".into(), j as i64);
+        }
+        let tl = &self.lanes[to];
+        if tl.len < 30.0 && !self.short_link(to, i) && self.end_state[tl.end_id as usize] == 1 {
+            offer(rest + clen + tl.len - 0.5, "faixa curta à frente com semáforo fechado".into(), -1);
+        }
+        if rest < 40.0 {
+            if let Some(o) = self.occ_obstacle(net, i, cc, -rest) {
+                offer(o.0, "ponto de conflito à frente ocupado".into(), o.2 as i64);
+            }
+        }
+        if let Some(c) = self.courtesy(i, e, k) {
+            offer(c.0, "dá passagem a quem sinaliza para entrar na faixa".into(), c.2 as i64);
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
     /// Estado detalhado de um veículo (JSON) para depuração.
     pub fn explain(&mut self, net: &Net, i: usize) -> serde_json::Value {
         use serde_json::json;
@@ -2827,7 +2905,11 @@ impl Sim {
             let ok = self.may_enter(net, i, cc);
             let code = REASON.with(|r| r.get());
             let blocker = BLOCKER.with(|b| b.get());
-            enter = json!({ "ok": ok, "code": code, "reason": Self::reason_text(code), "blocker": if ok { -1 } else { blocker } });
+            let held = if ok { self.hold_of(net, i) } else { None };
+            enter = json!({
+                "ok": ok, "code": code, "reason": Self::reason_text(code), "blocker": if ok { -1 } else { blocker },
+                "held": held.map(|(reason, by)| json!({ "reason": reason, "blocker": by })),
+            });
         }
         let choice = if cc == NONE {
             json!("nenhuma")
@@ -2999,9 +3081,12 @@ impl Sim {
                 let ok = self.may_enter(net, j, cc);
                 (ok, REASON.with(|r| r.get()), BLOCKER.with(|b| b.get()))
             };
+            // liberado mas parado: o que de fato o segura
+            let held = if ok { self.hold_of(net, j) } else { None };
             let sg = &net.segs[self.lanes[e].seg as usize];
             out.push(json!({
                 "id": j, "wait": w, "ok": ok, "reason": Self::reason_text(code), "code": code, "blocker": blocker,
+                "held": held.map(|(reason, by)| json!({ "reason": reason, "blocker": by })),
                 "street": net.names.get(sg.name as usize).cloned().unwrap_or_default(),
                 "signal": self.end_state[self.lanes[e].end_id as usize],
             }));

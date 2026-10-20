@@ -177,6 +177,8 @@ export interface StuckItem {
   blocker: number
   street: string
   signal: number
+  /** liberado para entrar mas parado: o que de fato o segura */
+  held?: { reason: string; blocker: number } | null
 }
 
 /** Veículos na frente de faixa parados há mais tempo, com o motivo. */

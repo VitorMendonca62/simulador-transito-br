@@ -75,10 +75,26 @@ export function VehicleCard() {
             {info.signal === 'vermelho' ? ` (há ${f(info.redAge, 0)} s)` : ''}
           </dd>
           <dt>Pode entrar?</dt>
-          <dd className={info.enter ? (info.enter.ok ? 'ok' : 'bad') : ''}>
+          <dd className={info.enter ? (info.enter.ok && !info.enter.held ? 'ok' : 'bad') : ''}>
             {info.enter ? (
               info.enter.ok ? (
-                'sim'
+                info.enter.held ? (
+                  <>
+                    sim, mas retido — {info.enter.held.reason}
+                    {info.enter.held.blocker >= 0 && (
+                      <>
+                        {' '}
+                        (por{' '}
+                        <button className="link" onClick={() => useStore.getState().pickVehicle(info.enter!.held!.blocker)}>
+                          #{info.enter.held.blocker}
+                        </button>
+                        )
+                      </>
+                    )}
+                  </>
+                ) : (
+                  'sim'
+                )
               ) : (
                 <>
                   não — {info.enter.reason}
@@ -170,7 +186,13 @@ export function StuckList() {
                 #{it.id}
               </button>{' '}
               {Math.round(it.wait)} s · {it.street || 'via sem nome'}
-              <div className="muted">{it.ok ? 'pode entrar agora' : it.reason || 'sem motivo'}{it.blocker >= 0 ? ` (por #${it.blocker})` : ''}</div>
+              <div className="muted">
+                {it.ok
+                  ? it.held
+                    ? `liberado, mas retido — ${it.held.reason}${it.held.blocker >= 0 ? ` (por #${it.held.blocker})` : ''}`
+                    : 'pode entrar agora'
+                  : `${it.reason || 'sem motivo'}${it.blocker >= 0 ? ` (por #${it.blocker})` : ''}`}
+              </div>
             </li>
           ))}
         </ul>

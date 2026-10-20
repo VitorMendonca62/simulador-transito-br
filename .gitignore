@@ -5,3 +5,4 @@ core/pkg
 *.log
 data/od_recife/_brutos/
 data/semaforos_recife/_brutos/
+.claude/settings.local.json

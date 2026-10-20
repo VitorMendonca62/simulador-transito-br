@@ -231,7 +231,8 @@ export interface VehicleInfo {
   wait: number
   leader: { id: number; gap: number; v: number; wait: number } | null
   choice: string | { conn: number; kind: string; len: number; pen: number; toLane: number; toIdx: number }
-  enter: { ok: boolean; code: number; reason: string; blocker: number } | null
+  /** `held`: liberado para entrar mas parado — o que de fato o segura (faixa curta à frente, cortesia, ocupação…) */
+  enter: { ok: boolean; code: number; reason: string; blocker: number; held?: { reason: string; blocker: number } | null } | null
   signal: string
   redAge: number
   rank: number
