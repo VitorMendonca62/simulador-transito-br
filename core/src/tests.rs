@@ -644,6 +644,16 @@ fn perf_sim() {
         q(4, 300.0, 300.0, 6000.0, 6000.0, 30000.0),
     ]
     .join(",");
+    // PERF_GRID=1: 256 zonas pequenas (grade 16×16), como a OD do Recife
+    let zones = if std::env::var("PERF_GRID").is_ok() {
+        let cells = (0..256).map(|k| {
+            let (x0, y0) = (-6000.0 + (k / 16) as f64 * 750.0, -6000.0 + (k % 16) as f64 * 750.0);
+            q(k as i64 + 1, x0 + 10.0, y0 + 10.0, x0 + 740.0, y0 + 740.0, 470.0)
+        });
+        cells.collect::<Vec<_>>().join(",")
+    } else {
+        zones
+    };
     let json = format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":3,"beta":0.02}}}}"#);
     let t = Instant::now();
     n.start_sim(&json).unwrap();
@@ -663,14 +673,15 @@ fn perf_sim() {
         let s = n.sim.as_ref().unwrap();
         worst = worst.max(peak);
         eprintln!(
-            "min {:>2}: vivos={:>6} gerados={:>6} concl.={:>6} fila={:>6}  passo médio {:>6.2} ms  pior {:>6.2} ms",
+            "min {:>2}: vivos={:>6} gerados={:>6} concl.={:>6} fila={:>6}  passo médio {:>6.2} ms  pior {:>6.2} ms  idade das rotas {:>4.0} s",
             block + 1,
             s.n_alive,
             s.stats.spawned,
             s.stats.finished,
             s.stats.queued,
             t.elapsed().as_secs_f64() * 1e3 / 250.0,
-            peak * 1e3
+            peak * 1e3,
+            s.route_age()
         );
     }
     let p = n.sim.as_ref().unwrap().prof;

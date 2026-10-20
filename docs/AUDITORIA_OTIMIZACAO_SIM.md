@@ -84,7 +84,7 @@ Instrumentação com `rdtsc` numa cópia do núcleo. `Instant::now()` custa caro
 | P7 | `update_signals` zera e percorre **todas** as pontas (`end_state`, `red_age`), não só as semaforizadas. | `update_signals` | 0,13 ms |
 | P8 | `metrics.sample` escreve em 6–8 vetores diferentes por veículo (`occ`, `spd`, `w_occ`, `w_spd`, `stop`, `w_stop`…), indexados por trecho. | integração | parte dos 0,66 ms |
 | P9 | Alocações por passo: `movers` (`Vec` novo), `HashSet` novo em `check_overlaps`, `Rc` clonado a cada `conflicts_of`. | `step`, `check_overlaps` | pequeno, mas evitável |
-| P10 | Os conflitos são calculados sob demanda: o 1º minuto tem picos de 17–23 ms ("pior" passo) enquanto os cruzamentos são vistos pela primeira vez, e o mesmo acontece em `make_target` (árvores locais de destino). | `conflicts_of`, `pick_target` | travadas no início |
+| P10 | Picos de 17–23 ms no 1º minuto. **Medido depois:** quase tudo vem de `make_target` (árvore local de cada ponto de destino sorteado: 1,7 s em 1.629 pontos só no 1º minuto, com as 4 zonas grandes do `perf_sim`). Os conflitos (`conflicts_of`) custam pouco: 84 ms em 3 min. | `pick_target`, `make_target` | travadas no início |
 | P11 | Com 256 zonas, `sim_init` leva 4,9 s, e `zone_dist` (f32) + `zone_free` (u16) ocupam **256 × 69.594 × 6 B ≈ 107 MB**, mais até 64 MB de árvores locais (`LOCAL_BUDGET`). | `Sim::new` | início lento e "RAM WASM" alta |
 | P12 | `wasm-opt = false` no `Cargo.toml` (o binaryen não está instalado). | build | 5–15 % (estimativa, a medir) |
 | P13 | Perfilador interno com bug: não há `lap!(2)`, então a aceleração é somada à "integração" (`prof[3]`) e `prof[2]` fica sempre 0. | `step` | medições enganosas |
@@ -123,7 +123,7 @@ fixo com a rede vazia.
 |---|---|---|---|---|
 | C1. **`ahead_stop_at` no mesmo ritmo do `may_enter`** (a cada 2 passos por veículo, resultado guardado). A decisão de entrada já é reaproveitada por 1 passo; a antecipação passa a seguir a mesma regra. | P2 | −0,3 ms | ≈ | baixo |
 | C2. `occ_obstacle` na faixa só quando a frente está a menos da distância de frenagem + margem (hoje: < 40 m fixos). | parte do laço | −0,1 a −0,2 ms | ≈ | baixo |
-| C3. Pré-aquecer os conflitos dos nós semaforizados e das vias principais no `Sim::new` (ou em fatias nos primeiros passos). | P10 | tira os picos do 1º minuto | = | baixo |
+| C3. ~~Pré-aquecer os conflitos~~: **descartado**, porque os conflitos não causam os picos (ver P10). A alternativa seria limitar quantos pontos de destino novos se criam por passo, reaproveitando os já criados, mas isso muda o sorteio de destinos. Prioridade baixa: em 1×, 1,7 s espalhados em 60 s de simulação dão ~3 % de CPU. | P10 | — | ≈ | baixo |
 
 ### D. Roteamento (o maior item com a OD do Recife)
 
@@ -189,6 +189,30 @@ zonas. Em 10× isso leva o indicador de ~50 % para ~30 %, e passa a acompanhar ~
 
 O ganho é maior com a rede pouco carregada porque o que saiu era quase todo custo fixo, que não depende do número
 de veículos. Agora o laço de aceleração é ~55 % do passo, e o próximo alvo é B1 (campos quentes juntos).
+
+**2026-10-20: D1 + D2 implementados** (`route_step`).
+- D1: teto de `ROUTE_BUDGET_MAX = 6.000` nós de Dijkstra por passo (antes 12.000). Com poucas zonas nada muda,
+  porque o piso continua 2.000.
+- D2: em vez de rodízio, recalcula a zona de maior `idade da árvore × √(1 + veículos rumo a ela)` (`tree_at`,
+  `to_zone`). Esse peso minimiza a idade média da árvore que os veículos de fato usam. Diagnóstico: `Sim::route_age()`,
+  impresso pelo `perf_sim`. `PERF_GRID=1` roda o `perf_sim` com 256 zonas.
+
+Medido com 256 zonas (`PERF_GRID=1`, min 12, ~13 mil veículos):
+
+| Variante | Rotas (ms/passo) | Passo | Idade média das rotas usadas |
+|---|---|---|---|
+| Antes: teto 12.000, rodízio | 1,88 | 8,60 ms | 147 s |
+| Teto 12.000 + prioridade | 1,78 | 8,66 ms | 132 s |
+| **Teto 6.000 + prioridade (adotado)** | **1,04** | **7,52 ms** (−13 %) | 250 s |
+| Teto 6.000, rodízio | 1,11 | 7,86 ms | 263 s |
+| Teto 4.000 + prioridade | 0,74 | 7,29 ms | 344 s |
+
+Custo: as árvores ficam ~1,7× mais velhas (≈2,5 → 4 min) com muitas zonas. Na grade uniforme, a prioridade ajuda
+pouco (−10 % de idade), porque as zonas têm demandas parecidas. Com a OD real, mais concentrada, ela deve ajudar
+mais. Se 4 min for pouco realista, subir `ROUTE_BUDGET_MAX` ou partir para D3 (roteador em outro worker).
+- `recife_behavior` (4 zonas, 3 sementes): demanda 1×, atraso 40,5 → 38,6 veíc·h, concluídos 461 → 452; demanda 2×,
+  171,2 → 165,9 veíc·h, concluídos 455 → 478. Sobreposições no cruzamento estáveis. Tudo dentro do ruído entre
+  sementes (só a ordem de recálculo das zonas mudou).
 
 ## 6. Como medir (para repetir antes e depois)
 

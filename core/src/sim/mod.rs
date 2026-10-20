@@ -22,6 +22,8 @@ thread_local! {
 }
 pub const SINK: u32 = u32::MAX - 1;
 const LOOKAHEAD: f32 = 150.0;
+/// teto de nós de Dijkstra por passo no recálculo das rotas em tempo real
+const ROUTE_BUDGET_MAX: usize = 6_000;
 const MIN_GAP: f32 = 0.3;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -298,7 +300,10 @@ pub struct Sim {
     zone_tl: Vec<Vec<u32>>,
     job: Option<route::TreeJob>,
     job_buf: Vec<f32>,
-    route_z: usize,
+    /// instante em que a árvore de cada zona foi recalculada pela última vez
+    tree_at: Vec<f64>,
+    /// veículos em circulação rumo a cada zona (prioridade do recálculo)
+    to_zone: Vec<u32>,
     pub reroutes: u64,
     /// atraso medido por conversão (s, média móvel de quem passou), instante da última amostra e penalidade viva
     conn_delay: Vec<f32>,
@@ -612,7 +617,8 @@ impl Sim {
             zone_tl,
             job: None,
             job_buf: Vec::new(),
-            route_z: 0,
+            tree_at: Vec::new(),
+            to_zone: vec![0; nz],
             reroutes: 0,
             conn_delay: Vec::new(),
             conn_seen: Vec::new(),
@@ -703,6 +709,7 @@ impl Sim {
             red_log: Vec::new(),
         };
         sim.start_time = sim.time;
+        sim.tree_at = vec![sim.time; nz];
         let nc = sim.conns.len();
         sim.conn_delay = vec![0.0; nc];
         sim.conn_seen = vec![f32::NEG_INFINITY; nc];
@@ -804,21 +811,34 @@ impl Sim {
             // pesos do momento: faixa em fluxo livre + atraso medido de cada conversão (o atraso já inclui a
             // lentidão no trecho de quem fez aquela manobra, então não se soma também a velocidade do trecho)
             self.refresh_live_pen();
-            let z = self.route_z % nz;
+            // a zona com a árvore mais velha, pesada pela raiz de quem está indo para lá: minimiza a idade média da
+            // árvore que os veículos usam (zona vazia também é recalculada, só com menos frequência)
+            let score = |z: usize| (self.time - self.tree_at[z]) * (1.0 + self.to_zone[z] as f64).sqrt();
+            let z = (0..nz).fold(0, |b, z| if score(z) > score(b) { z } else { b });
             let buf = std::mem::take(&mut self.job_buf);
             self.job = Some(self.lrouter.job_start(z, &self.zone_tl[z], buf));
         }
-        // volta completa em ~3 min simulados (900 passos), com teto de custo por passo
-        let budget = ((nz * self.nl) / 900).clamp(2_000, 12_000);
+        // volta completa em ~3 min simulados (900 passos), com teto de custo por passo: com muitas zonas a volta fica
+        // mais longa, e a prioridade acima mantém em dia as árvores mais usadas
+        let budget = ((nz * self.nl) / 900).clamp(2_000, ROUTE_BUDGET_MAX);
         let mut job = self.job.take().unwrap();
         if self.lrouter.job_run(&mut job, budget) {
             std::mem::swap(&mut self.zone_dist[job.zone], &mut job.dist);
             self.job_buf = job.dist;
-            self.route_z = job.zone + 1;
+            self.tree_at[job.zone] = self.time;
             self.reroutes += 1;
         } else {
             self.job = Some(job);
         }
+    }
+
+    /// Idade média (s) da árvore de rotas usada pelos veículos em circulação (cada um pesa a da sua zona de destino).
+    pub fn route_age(&self) -> f64 {
+        let n: u64 = self.to_zone.iter().map(|&k| k as u64).sum();
+        if n == 0 {
+            return 0.0;
+        }
+        self.to_zone.iter().zip(&self.tree_at).map(|(&k, &t)| k as f64 * (self.time - t)).sum::<f64>() / n as f64
     }
 
     /// Diagnóstico das entradas por zona: espera média na fila de entrada, tempo médio até sair da faixa de nascimento,
@@ -1068,6 +1088,7 @@ impl Sim {
         self.amax[id] = amax;
         self.bcomf[id] = bcomf;
         self.dest[id] = dest;
+        self.to_zone[dest as usize] += 1;
         self.origin[id] = origin;
         self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
         // sorteio fora do PRNG da simulação: com 0 % o resto da simulação não muda
@@ -1193,6 +1214,7 @@ impl Sim {
             self.unlink(e, id);
         }
         self.alive[id] = false;
+        self.to_zone[self.dest[id] as usize] -= 1;
         self.free.push(id as u32);
         self.n_alive -= 1;
     }
