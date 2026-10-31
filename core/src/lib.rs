@@ -369,14 +369,6 @@ impl Network {
     pub fn sim_series(&self) -> Vec<f32> {
         self.sim.as_ref().map_or(Vec::new(), |s| s.metrics.series_flat())
     }
-    /// Relatório consolidado (JSON): viagens, atrasos, vazão, OD, cruzamentos mais atrasados.
-    pub fn sim_report(&self) -> String {
-        self.sim.as_ref().map_or("{}".to_string(), |s| s.report(&self.net).to_string())
-    }
-    /// Razão média de velocidade por trecho direcionado em toda a execução.
-    pub fn sim_run_ratio(&self) -> Vec<u8> {
-        self.sim.as_ref().map_or(Vec::new(), |s| s.run_ratio(&self.net))
-    }
     pub fn sim_stop(&mut self) {
         self.sim = None;
     }

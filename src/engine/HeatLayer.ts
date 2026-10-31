@@ -3,9 +3,6 @@ import type { NetworkData } from '../model/types'
 
 /** Paleta do pior ao melhor (nível 0..4). */
 export const HEAT_PALETTE = [0xef4444, 0xfb923c, 0xfacc15, 0xa3e635, 0x34d399]
-/** Paleta da diferença entre cenários: muito pior, pior, (igual = oculto), melhor, muito melhor. */
-export const DIFF_PALETTE = [0xdc2626, 0xfb923c, 0x94a3b8, 0x7dd3fc, 0x2563eb]
-
 /** Nível 0..4 (ou -1 = sem dado) da razão de velocidade 0..254. */
 export function speedLevels(v: Uint8Array): Int8Array {
   const out = new Int8Array(v.length)
@@ -24,16 +21,6 @@ export function queueLevels(v: Uint8Array): Int8Array {
   }
   return out
 }
-/** Diferença de razão de velocidade (B − A) em [-1, 1] -> nível; NaN/pequena = oculto. */
-export function diffLevels(d: Float32Array): Int8Array {
-  const out = new Int8Array(d.length)
-  for (let i = 0; i < d.length; i++) {
-    const x = d[i]
-    out[i] = Number.isNaN(x) ? -1 : x < -0.3 ? 0 : x < -0.1 ? 1 : x > 0.3 ? 4 : x > 0.1 ? 3 : -1
-  }
-  return out
-}
-
 /**
  * Mapa de calor: uma fita por trecho direcionado (a metade da pista daquele sentido, sem os recuos
  * dos cruzamentos), pintada por nível. A geometria é única; a cada atualização só os índices mudam

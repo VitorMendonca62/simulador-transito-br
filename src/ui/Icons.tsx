@@ -51,14 +51,6 @@ export const IconSim = (p: P) => (
     <circle cx="16.5" cy="14.2" r=".6" fill="currentColor" />
   </Svg>
 )
-export const IconCompare = (p: P) => (
-  <Svg {...p}>
-    <rect x="3" y="5" width="7.5" height="14" rx="2" />
-    <rect x="13.5" y="5" width="7.5" height="14" rx="2" />
-    <path d="M5.2 15l1.55-6 1.55 6M5.8 12.8h1.9" strokeWidth={1.5} />
-    <path d="M15.8 9h1.8a1.5 1.5 0 0 1 0 3h-1.8zM15.8 12h2.1a1.5 1.5 0 0 1 0 3h-2.1z" strokeWidth={1.5} />
-  </Svg>
-)
 export const IconLayers = (p: P) => (
   <Svg {...p}>
     <path d="M12 3l9 4.8-9 4.8-9-4.8z" />

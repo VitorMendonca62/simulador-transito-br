@@ -4,11 +4,12 @@ import { viewRef } from '../engine/instance'
 import { DEFAULT_PARAMS, demandPayload, PROFILES, ZONE_COLORS, type DemandParams, type Zone } from './demand'
 import { applyOdImport, buildOdImport, OD2018_URL, type OdImport, type OdSource } from './odImport'
 
-import { DIFF_PALETTE, diffLevels, HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
+import { HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
 import type { VehicleInfo } from './types'
-import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, importMap, onSim, resolveDemand, runBench, sendConnEdits, sendPrioEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
+import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, importMap, onSim, resolveDemand, sendConnEdits, sendPrioEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
 import {
   clearAll,
+  dropLegacyScenarios,
   configFromDef,
   connKey,
   exportScenario,
@@ -17,7 +18,6 @@ import {
   loadDemand,
   loadRemoved,
   loadRoads,
-  loadScenarios,
   loadSigConfigs,
   loadSignalSource,
   loadMap,
@@ -26,7 +26,6 @@ import {
   savePrioEdits,
   saveDemand,
   saveRoads,
-  saveScenarios,
   saveSigConfigs,
   saveSignalSource,
   saveMap,
@@ -37,7 +36,6 @@ import {
   type NewPt,
   type NewRoad,
   type ScenarioFile,
-  type ScenarioRec,
   type SegKeyTuple,
   type SigConfigs,
   type SignalSource,
@@ -112,18 +110,9 @@ interface State {
   }
   setFollow: (on: boolean) => void
   pickVehicle: (id: number | null) => void
-  /** cenários salvos para comparar (A/B) e a execução em andamento */
-  scenarios: ScenarioRec[]
-  bench: { id: number | null; progress: number; error: string | null }
-  compare: { a: number | null; b: number | null; diff: boolean }
 
   setHeat: (h: 'off' | 'speed' | 'queue') => void
   setReplay: (bucket: number | null) => void
-  saveScenario: (name: string, minutes: number) => void
-  deleteScenario: (id: number) => void
-  runScenario: (id: number) => Promise<void>
-  cancelBench: () => void
-  setCompare: (patch: Partial<{ a: number | null; b: number | null; diff: boolean }>) => void
 
   simStart: () => Promise<void>
   simToggle: () => void
@@ -229,7 +218,6 @@ let sigSourceRecord: SignalSource = 'osm'
 let odHourly: Record<string, number>[] | undefined
 let demandTimer = 0
 let demandSave = 0
-let cancelBenchFn: (() => void) | null = null
 const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
 const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord, priorities: prioRecord, signalSource: sigSourceRecord })
 export const getSegRecord = () => segRecord
@@ -323,34 +311,6 @@ export const useStore = create<State>((set, get) => {
     if (sel != null) void loadNodeConns(sel)
   }
 
-  /** Mapa de calor da diferença B − A (razão de velocidade média) sobre a rede atual. */
-  const applyDiff = () => {
-    const { compare, scenarios, data } = get()
-    const view = viewRef.current
-    if (!compare.diff || !data || !view) return void (compare.diff ? null : get().sim.heat === 'off' && view?.setHeat(null))
-    const A = scenarios.find((x) => x.id === compare.a)?.result
-    const B = scenarios.find((x) => x.id === compare.b)?.result
-    if (!A || !B) return view.setHeat(null)
-    const index = (r: NonNullable<typeof A>) => {
-      const m = new Map<string, number>()
-      for (let i = 0; i < r.segKeys.length / 3; i++) for (const dir of [0, 1]) m.set(`${r.segKeys[i * 3]}:${r.segKeys[i * 3 + 1]}:${r.segKeys[i * 3 + 2]}:${dir}`, r.ratio[i * 2 + dir])
-      return m
-    }
-    const ia = index(A)
-    const ib = index(B)
-    const nd = (data.segKeys.length / 3) * 2
-    const diff = new Float32Array(nd).fill(NaN)
-    for (let i = 0; i < nd / 2; i++) {
-      for (const dir of [0, 1]) {
-        const k = `${data.segKeys[i * 3]}:${data.segKeys[i * 3 + 1]}:${data.segKeys[i * 3 + 2]}:${dir}`
-        const a = ia.get(k)
-        const b = ib.get(k)
-        if (a != null && b != null && a !== 255 && b !== 255) diff[i * 2 + dir] = (b - a) / 254
-      }
-    }
-    view.setHeat(diffLevels(diff), DIFF_PALETTE)
-  }
-
   /** Pede ao núcleo as conexões do nó (geradas só para ele) e entrega ao desenho e ao painel. */
   const loadNodeConns = async (node: number) => {
     try {
@@ -374,7 +334,6 @@ export const useStore = create<State>((set, get) => {
     try {
       if (persist) {
         await clearAll()
-        set({ scenarios: [] })
         connRecord = {}
         prioRecord = {}
         segRecord = {}
@@ -395,7 +354,7 @@ export const useStore = create<State>((set, get) => {
         segRecord = await loadSegEdits()
         sigRecord = await loadSigConfigs()
         sigSourceRecord = await loadSignalSource()
-        set({ scenarios: await loadScenarios() })
+        dropLegacyScenarios()
         roadRecord = await loadRoads()
         removedRecord = await loadRemoved()
         const dm = await loadDemand()
@@ -497,9 +456,6 @@ export const useStore = create<State>((set, get) => {
     selectedZone: null,
     demand: null,
     sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false },
-    scenarios: [],
-    bench: { id: null, progress: 0, error: null },
-    compare: { a: null, b: null, diff: false },
 
     setHeat: (h) => {
       set((s) => ({ sim: { ...s.sim, heat: h, replay: null } }))
@@ -522,44 +478,6 @@ export const useStore = create<State>((set, get) => {
       if (get().sim.replay !== bucket) return
       viewRef.current?.setHeat(v.length ? speedLevels(v) : null)
     },
-    saveScenario: (name, minutes) => {
-      const { data } = get()
-      if (!data) return
-      const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
-      const sim = JSON.stringify({ zones: dp.zones, params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, boxBlockPct: paramsRecord.boxBlockPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly } })
-      const id = get().scenarios.reduce((m, x) => Math.max(m, x.id), 0) + 1
-      const next = [...get().scenarios, { id, name: name || `Cenário ${id}`, edits: editPayload(), sim, minutes }]
-      set({ scenarios: next })
-      saveScenarios(next)
-    },
-    deleteScenario: (id) => {
-      const next = get().scenarios.filter((x) => x.id !== id)
-      const c = get().compare
-      set({ scenarios: next, compare: { ...c, a: c.a === id ? null : c.a, b: c.b === id ? null : c.b } })
-      saveScenarios(next)
-    },
-    runScenario: async (id) => {
-      const rec = get().scenarios.find((x) => x.id === id)
-      if (!rec || get().bench.id != null) return
-      if (!JSON.parse(rec.sim).zones?.length) return get().notify('O cenário não tem zonas de demanda.')
-      set({ bench: { id, progress: 0, error: null } })
-      try {
-        const { promise, cancel } = runBench(rec.edits, rec.sim, rec.minutes, (p) => set((s) => ({ bench: { ...s.bench, progress: p } })))
-        cancelBenchFn = cancel
-        const result = await promise
-        const next = get().scenarios.map((x) => (x.id === id ? { ...x, result } : x))
-        set({ scenarios: next, bench: { id: null, progress: 1, error: null } })
-        saveScenarios(next)
-      } catch (e) {
-        set({ bench: { id: null, progress: 0, error: e instanceof Error && e.message === 'cancelado' ? null : e instanceof Error ? e.message : String(e) } })
-      }
-    },
-    cancelBench: () => cancelBenchFn?.(),
-    setCompare: (patch) => {
-      set((s) => ({ compare: { ...s.compare, ...patch } }))
-      applyDiff()
-    },
-
     simStart: async () => {
       const { data } = get()
       if (!data) return

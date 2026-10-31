@@ -3,16 +3,15 @@ import { useShallow } from 'zustand/react/shallow'
 import { useStore, type EditMode } from '../model/store'
 import { BuildPanel, ErasePanel } from './BuildPanel'
 import { CttuSignalBox } from './CttuSignalBox'
-import { IconChevron, IconClose, IconCompare, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
+import { IconChevron, IconClose, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
 import { Inspector } from './Inspector'
 import { LayerPanel } from './LayerPanel'
-import { ScenarioPanel } from './ScenarioPanel'
 import { SegmentPanel } from './SegmentPanel'
 import { SignalPanel } from './SignalPanel'
 import { SimPanel } from './SimPanel'
 import { DemandParamsPanel, ZonePanel } from './ZonePanel'
 
-export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'scenarios' | 'layers'
+export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'layers'
 
 type Item = {
   id: DockId
@@ -76,12 +75,6 @@ const ITEMS: Item[] = [
     guide: <>Desenhe zonas de geração e atração de viagens no mapa (clique nos vértices) ou importe as da Pesquisa OD 2018.</>,
   },
   {
-    id: 'scenarios',
-    label: 'Cenários A/B',
-    icon: IconCompare,
-    guide: <>Salve o estado atual como cenário, altere o mapa, salve de novo e compare os dois com a mesma demanda e semente.</>,
-  },
-  {
     id: 'layers',
     label: 'Camadas',
     icon: IconLayers,
@@ -125,8 +118,6 @@ function Body({ id }: { id: DockId }) {
       )
     case 'zones':
       return <ZonePanel />
-    case 'scenarios':
-      return <ScenarioPanel />
     case 'layers':
       return <LayerPanel />
   }

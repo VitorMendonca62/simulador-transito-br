@@ -206,51 +206,6 @@ function simSlice() {
 }
 let lastStats: SimStats = { time: 0, alive: 0, spawned: 0, finished: 0, lost: 0, queued: 0, meanTravel: 0, redRuns: 0, laneChanges: 0 }
 
-let benchCancel = false
-
-/** Executa um cenário sem desenhar: rede nova a partir dos mesmos bytes + edições, simulação por N minutos. */
-async function runBench(msg: Extract<WorkerIn, { type: 'bench' }>) {
-  benchCancel = false
-  const send = (m: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(m, t)
-  let net: Network | null = null
-  try {
-    if (!sourceBytes) throw new Error('Nenhum mapa carregado')
-    await ready
-    net = await importNet(sourceBytes, sourceOf(msg.edits))
-    net.apply_edits(msg.edits)
-    net.sim_init(msg.sim)
-    const total = Math.round((msg.minutes * 60) / SIM_DT)
-    let done = 0
-    let lastPost = 0
-    while (done < total) {
-      if (benchCancel) throw new Error('cancelado')
-      const t0 = performance.now()
-      while (done < total && performance.now() - t0 < 30) {
-        net.sim_step(25)
-        done += 25
-      }
-      busyMs += performance.now() - t0
-      if (performance.now() - lastPost > 200) {
-        lastPost = performance.now()
-        send({ type: 'benchProgress', id: msg.id, done: Math.min(1, done / total) })
-      }
-      await new Promise((r) => setTimeout(r, 0)) // deixa passar outras mensagens (cancelar, simulação ao vivo)
-    }
-    const result = {
-      report: JSON.parse(net.sim_report()),
-      series: net.sim_series(),
-      ratio: net.sim_run_ratio(),
-      segKeys: net.seg_keys(),
-      minutes: msg.minutes,
-    }
-    send({ type: 'benchDone', id: msg.id, result }, [result.series.buffer as ArrayBuffer, result.ratio.buffer as ArrayBuffer, result.segKeys.buffer as ArrayBuffer])
-  } catch (e) {
-    send({ type: 'benchError', id: msg.id, message: e instanceof Error ? e.message : String(e) })
-  } finally {
-    net?.free()
-  }
-}
-
 self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data
   const post = (m: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(m, t)
@@ -342,14 +297,6 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       } catch (e) {
         post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
       }
-      return
-    }
-    if (msg.type === 'bench') {
-      void runBench(msg)
-      return
-    }
-    if (msg.type === 'benchCancel') {
-      benchCancel = true
       return
     }
     if (msg.type === 'simAck') {

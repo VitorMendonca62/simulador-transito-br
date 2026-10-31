@@ -93,6 +93,7 @@ const K_SEGS = 'seg-edits'
 const K_ROADS = 'new-roads'
 const K_REMOVED = 'removed-segs'
 const K_DEMAND = 'demand'
+/** chave antiga dos cenários A/B (removidos na versão 2) */
 const K_SCEN = 'scenarios'
 const K_SIGSRC = 'signal-source'
 
@@ -122,17 +123,7 @@ export const saveSignalSource = (s: SignalSource) => safe(() => set(K_SIGSRC, s)
 export const loadSignalSource = () => safe(async () => ((await get<SignalSource>(K_SIGSRC)) === 'cttu' ? 'cttu' : 'osm') as SignalSource, 'osm' as SignalSource)
 export const saveDemand = (d: DemandFile) => safe(() => set(K_DEMAND, d), undefined)
 export const loadDemand = () => safe(() => get<DemandFile>(K_DEMAND), undefined)
-/** Cenário salvo para comparação: as edições (JSON do núcleo) e a simulação (JSON), mais o resultado da última execução. */
-export interface ScenarioRec {
-  id: number
-  name: string
-  edits: string
-  sim: string
-  minutes: number
-  result?: import('./types').BenchResult
-}
-export const saveScenarios = (s: ScenarioRec[]) => safe(() => set(K_SCEN, s), undefined)
-export const loadScenarios = () => safe(async () => (await get<ScenarioRec[]>(K_SCEN)) ?? [], [] as ScenarioRec[])
+export const dropLegacyScenarios = () => safe(() => del(K_SCEN), undefined)
 export const clearAll = () =>
   safe(async () => {
     for (const k of [K_MAP, K_SIGSRC, K_SIGS, K_CONNS, K_PRIOS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)

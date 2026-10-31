@@ -1,6 +1,6 @@
 import { perf } from '../engine/perf'
 import type { Approach } from '../engine/SignLayer'
-import type { BenchResult, NetworkData, NodeConns, SimStats, WorkerIn, WorkerOut } from './types'
+import type { NetworkData, NodeConns, SimStats, WorkerIn, WorkerOut } from './types'
 
 let worker: Worker | null = null
 
@@ -195,30 +195,4 @@ export const simHeatKind = (kind: number) => getWorker().postMessage({ type: 'si
 /** Razão de velocidade por trecho direcionado no balde `bucket` (replay). */
 export async function fetchHist(bucket: number): Promise<Uint8Array> {
   return (await call({ type: 'simHist', bucket })).u8 ?? new Uint8Array(0)
-}
-
-let benchSeq = 0
-
-/** Executa um cenário sem desenhar; devolve progresso (0..1) e o resultado. */
-export function runBench(edits: string, sim: string, minutes: number, onProgress: (p: number) => void): { promise: Promise<BenchResult>; cancel: () => void } {
-  const w = getWorker()
-  const id = ++benchSeq
-  let off: () => void = () => {}
-  const promise = new Promise<BenchResult>((resolve, reject) => {
-    const onMsg = (ev: MessageEvent<WorkerOut>) => {
-      const m = ev.data
-      if (m.type === 'benchProgress' && m.id === id) onProgress(m.done)
-      else if (m.type === 'benchDone' && m.id === id) {
-        off()
-        resolve(m.result)
-      } else if (m.type === 'benchError' && m.id === id) {
-        off()
-        reject(new Error(m.message))
-      }
-    }
-    off = () => w.removeEventListener('message', onMsg)
-    w.addEventListener('message', onMsg)
-    w.postMessage({ type: 'bench', id, edits, sim, minutes } satisfies WorkerIn)
-  })
-  return { promise, cancel: () => w.postMessage({ type: 'benchCancel' } satisfies WorkerIn) }
 }

@@ -123,15 +123,10 @@ export type WorkerIn =
   | { type: 'simStepBy'; seconds: number }
   | { type: 'simStuck'; id: number; n: number }
   | { type: 'simHist'; id: number; bucket: number }
-  | { type: 'bench'; id: number; edits: string; sim: string; minutes: number }
-  | { type: 'benchCancel' }
 export type WorkerOut =
   | { type: 'done'; data: NetworkData; ms: number }
   | { type: 'error'; message: string }
   | { type: 'sim'; time: number; stats: SimStats; buf: Float32Array; heat?: Uint8Array; series?: Float32Array; histLen?: number; track?: string }
-  | { type: 'benchProgress'; id: number; done: number }
-  | { type: 'benchDone'; id: number; result: BenchResult }
-  | { type: 'benchError'; id: number; message: string }
   | { type: 'simEnded'; reason: string }
   | { type: 'simReady'; error?: string }
   /** uma vez por segundo: tempo acumulado calculando a simulação e memória do WASM */
@@ -173,41 +168,6 @@ export interface SimStats {
   junctionOverlapsGeom?: number
   /** impasses dentro do cruzamento desfeitos ignorando a ocupação */
   occDeadlocks?: number
-}
-
-/** Resultado de uma execução headless de um cenário (comparação A/B). */
-export interface BenchResult {
-  report: SimReport
-  /** por minuto: t, vivos, concluídos no minuto, velocidade média (km/h), fila de entrada, 0 */
-  series: Float32Array
-  /** razão média de velocidade por trecho direcionado (0..254, 255 sem dados) */
-  ratio: Uint8Array
-  /** [way, nóInicial, nóFinal] por trecho (para alinhar com outro cenário) */
-  segKeys: Float64Array
-  minutes: number
-}
-
-export interface SimReport {
-  elapsed: number
-  spawned: number
-  trips: number
-  alive: number
-  queued: number
-  meanTravel: number
-  meanDelay: number
-  totalDelayVehH: number
-  aliveDelayVehH: number
-  queueDelayVehH: number
-  totalDelayAllVehH: number
-  meanDelayAll: number
-  meanSpeedKmh: number
-  throughputPerH: number
-  boxEntries?: number
-  boxWaitVehH?: number
-  junctionOverlaps?: number
-  maxQueue: number
-  od: { from: number; to: number; n: number; meanTravel: number; meanDelay: number }[]
-  junctions: { node: number; osm: number; delayVehH: number; queueMax: number }[]
 }
 
 /** Estado detalhado de um veículo (depuração), vindo de `Sim::explain`. */
