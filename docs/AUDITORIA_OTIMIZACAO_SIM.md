@@ -171,6 +171,8 @@ zonas. Em 10× isso leva o indicador de ~50 % para ~30 %, e passa a acompanhar ~
 ## Status
 
 **2026-10-20: A1–A6 implementados** (`sim/mod.rs`). A7 (wasm-opt) está pendente porque depende de instalar o binaryen.
+(2026-10-31: A7 ligado com `-O3`; o wasm-pack baixa o binaryen sozinho. `.wasm` −17 %, passo sem ganho mensurável no
+navegador. Ver `docs/VERSAO_2.md`, fase 2.)
 - A1: `occ_bits` (1 bit por aresta, atualizado em `insert_sorted`/`unlink`). O laço de aceleração percorre só a
   lista `active`, em ordem crescente.
 - A2: `pend_gates` (faixas com fila de entrada) e `row_next` (próximo nascimento por zona de origem, recalculado em

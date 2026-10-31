@@ -40,14 +40,29 @@ exportar cenário `.json` continuam funcionando, `CONTEXT.md` atualizado (seçã
 ### 2.0 Linha de base (antes de mexer)
 Medir e registrar aqui, com o Recife completo (OD 2018 às 7h, escala 15 % e 100 %, semáforos da CTTU):
 
+Base medida em 2026-10-31 (commit `5f50e1b`). Navegador: Chromium do app, Recife com OD 2018 + portais + CTTU às 7h,
+130 zonas, medido por script no console (`useStore`/`perf`); o painel estava oculto, então fps e UI ficam para o passo 5.
+Nativo: `--release`, `taskset -c 2`, 2 rodadas (iguais).
+
 | Medida | Como | Base | Meta |
 |---|---|---|---|
-| ms/passo da simulação (WASM) | barra de desempenho (`PerfStats`) / `perf_sim` | | −30 % |
-| Velocidade que a simulação acompanha | maior N× com `sim %` < 90 % | | ≥ 20× com a OD a 100 % |
-| `sim_init` | tempo até o 1º passo | ~4,9 s com 256 zonas | < 1,5 s |
-| Editar faixas (clique → mapa atualizado) | `PerfStats` | ~210 ms | < 100 ms |
-| Abrir o Recife (clique → mapa pronto) | | | medir |
-| fps em pan/zoom com a simulação rodando | | | ≥ 55 fps |
+| ms/passo, OD 100 % (~9,8 mil veíc., 19 min) | WASM, `busyMs` ÷ passos a 30× | **10,0 ms** | −30 % |
+| ms/passo, OD 15 % (~1,2 mil veíc.) | idem | **4,0 ms** (custo fixo alto: rotas de 130 zonas) | −50 % |
+| Velocidade que acompanha, OD 100 % | velocidade efetiva pedindo 30× | **15,5×** | ≥ 20× |
+| Velocidade que acompanha, OD 15 % | idem | 30× (60 % de CPU) | — |
+| `sim_init` (Iniciar → 1º quadro), Recife | navegador | **3,0–4,5 s** | < 1,5 s |
+| `Sim::new` 256 zonas / 4 zonas | `perf_sim` nativo | 3,85–4,1 s / 0,16 s | < 1,5 s |
+| Passo nativo, 4 zonas (19 mil veíc., min 12) | `perf_sim` | 8,9–9,1 ms | — |
+| Passo nativo, 256 zonas (13 mil veíc., min 12) | `perf_sim PERF_GRID=1` | 9,2 ms (idade das rotas 249 s) | — |
+| `recife_behavior` (3 sementes) | nativo | concluídos 425, atraso 36,7 veíc·h, passo 1,18 ms | igual nos passos "=" |
+| Editar faixas (clique → mapa atualizado) | `PerfStats` | ~210 ms (medir no passo 4) | < 100 ms |
+| Abrir o Recife (clique → mapa pronto, com OD e CTTU) | navegador | **2,75 s** | medir partes |
+| fps em pan/zoom com a simulação rodando | painel visível | (passo 5) | ≥ 55 fps |
+
+### Progresso
+- **Passo 1 — wasm-opt -O3 (A7)**, feito: `.wasm` 1.076 → 896 KB (−17 %). Passo no navegador sem ganho mensurável
+  (OD 100 %: 10,0 → 10,1 ms; OD 15 %: 4,0 → 3,8 ms, dentro do ruído). Mantido pelo download menor. O deploy
+  (GitHub Actions) baixa o binaryen pelo wasm-pack.
 
 ### 2.1 Simulação (itens da `AUDITORIA_OTIMIZACAO_SIM.md` ainda pendentes)
 - **A7** — `wasm-opt -O3` (binaryen) no build. Ganho esperado 5–15 %, resultado idêntico.
