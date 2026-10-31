@@ -249,6 +249,9 @@ const MERGE_WAIT: f32 = 2.0;
 /// abaixo desta velocidade (m/s) a corrente está em fila e alterna um a um; acima, só cede após `MERGE_COURTESY` s de espera
 const MERGE_SLOW: f32 = 5.0;
 const MERGE_COURTESY: f32 = 20.0;
+/// Fusão cedendo à via preferencial: freada (m/s²) que o IDM do seguidor da preferencial pode pedir quando quem entra
+/// fica à frente dele (critério de segurança do MOBIL, `b_safe`).
+const MERGE_BRAKE: f32 = 2.0;
 
 /// MOBIL: polidez (peso do incômodo aos outros), limiar (m/s²), viés de manter a direita, freada máxima imposta ao novo seguidor
 const MOBIL_P: f32 = 0.3;
@@ -270,6 +273,14 @@ const OCC_HALF_W: f32 = 1.2;
 const NEAR_CONFLICT: f64 = 1.8;
 /// dentro do cruzamento, depois de tanto tempo parado o veículo deixa de respeitar a ocupação (sai do impasse)
 const OCC_DEADLOCK: f32 = 40.0;
+/// Freada que o motorista aceita para parar no amarelo (MBST vol. V, CONTRAN 2022: 3 m/s²).
+const AMBER_DECEL: f32 = 3.0;
+/// Quem seguiu no amarelo mantém a decisão até este tempo de vermelho (dentro do vermelho geral de 2 s).
+const AMBER_COMMIT: f32 = 1.5;
+/// Faixa concorrente mais curta que isto: a brecha também olha quem vem antes dela (`fast_before`).
+const SHORT_APPROACH: f32 = 30.0;
+/// Só quem vem rápido antes da faixa concorrente curta conta (os lentos ainda estão à vista dela a tempo).
+const FAST_BEFORE: f32 = 9.0;
 
 /// metros finais da faixa, antes do nó, em que não se troca de faixa (linha contínua)
 const LC_SOLID_ZONE: f32 = 12.0;
@@ -290,6 +301,8 @@ pub struct Sim {
     /// arestas ocupadas no passo atual (buffer reaproveitado)
     active: Vec<u32>,
     node_conns: Vec<Vec<u32>>,
+    /// conversões que chegam a cada faixa
+    lane_in: Vec<Vec<u32>>,
     conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
     router: Router,
     /// tempo até a zona de destino por faixa (até o primeiro nó dela): vale enquanto o veículo está fora da zona
@@ -406,6 +419,12 @@ pub struct Sim {
     acc: Vec<f32>,
     /// decisão de entrada em cruzamento reaproveitada por 1 passo (reavaliada a cada 2)
     enter_ok: Vec<bool>,
+    /// faixa (+1) em que o veículo decidiu seguir no amarelo por não conseguir parar; vale no início do vermelho
+    amber_go: Vec<u32>,
+    /// conversão (+1) em que o veículo saiu de um impasse por ocupação: mantém a decisão depois de arrancar
+    occ_go: Vec<u32>,
+    /// a última chamada de `occ_obstacle` deixou de respeitar alguma ocupação por impasse
+    occ_skipped: bool,
     /// pode passar pelo nó seguinte (sem semáforo) ao fim de uma faixa curta à frente?
     /// faixa (+1) em cuja linha de "Pare" o veículo já parou
     stop_ok: Vec<u32>,
@@ -476,6 +495,7 @@ impl Sim {
         // ---- conversões ligadas
         let mut conns: Vec<ConnRt> = Vec::new();
         let mut node_conns: Vec<Vec<u32>> = vec![Vec::new(); net.nodes.len()];
+        let mut lane_in: Vec<Vec<u32>> = vec![Vec::new(); lanes.len()];
         for c in &net.conns {
             if c.state != CONN_ALLOWED {
                 continue;
@@ -495,6 +515,7 @@ impl Sim {
             let eid = (nl + conns.len()) as u32;
             lanes[c.from_lane as usize].conns.push(eid);
             node_conns[c.node as usize].push(eid);
+            lane_in[c.to_lane as usize].push(eid);
             conns.push(ConnRt {
                 node: c.node,
                 from: c.from_lane,
@@ -610,6 +631,7 @@ impl Sim {
             occ_bits: vec![0; ne.div_ceil(64)],
             active: Vec::new(),
             node_conns,
+            lane_in,
             conflicts: vec![None; ne],
             router,
             zone_free: if init.params.reroute { zone_dist.iter().map(|d| d.iter().map(|&x| enc_t(x)).collect()).collect() } else { Vec::new() },
@@ -697,6 +719,9 @@ impl Sim {
             overlap_now: Default::default(),
             acc: Vec::new(),
             enter_ok: Vec::new(),
+            amber_go: Vec::new(),
+            occ_go: Vec::new(),
+            occ_skipped: false,
             stop_ok: Vec::new(),
             tick: 0,
             multi: Vec::new(),
@@ -1060,6 +1085,8 @@ impl Sim {
                 self.mand.push(false);
                 self.acc.push(0.0);
                 self.enter_ok.push(false);
+                self.amber_go.push(0);
+                self.occ_go.push(0);
                 self.stop_ok.push(0);
                 self.t_free.push(0.0);
                 self.origin.push(0);
@@ -1087,6 +1114,8 @@ impl Sim {
         self.tgap[id] = tgap;
         self.amax[id] = amax;
         self.bcomf[id] = bcomf;
+        self.amber_go[id] = 0;
+        self.occ_go[id] = 0;
         self.dest[id] = dest;
         self.to_zone[dest as usize] += 1;
         self.origin[id] = origin;
@@ -1394,10 +1423,17 @@ impl Sim {
     /// Veículo da conversão `cf.other` com a carroceria sobre a área do ponto de conflito que ainda não a terá
     /// liberado daqui a `t_arr` s (quando quem pergunta chegaria lá). Inclui quem já passou à faixa de saída com a
     /// traseira ainda na curva.
-    fn occ_by(&self, cf: &Conflict, t_arr: f32, me: usize) -> Option<usize> {
+    ///
+    /// `strict` (decisão antecipada, para o nó seguinte a uma faixa curta): quem segue para uma faixa de saída mais
+    /// curta que ele não conta como "vai liberar a tempo" — parado nela, a traseira fica na área até ele passar pelo
+    /// nó seguinte, e passar pode depender justamente de eu não entrar (ex.: retorno curto de mão dupla, cada um
+    /// esperando na ponta da sua faixa com a traseira no caminho do outro). Conta também quem vai entrar na conversão
+    /// concorrente rumo a essa faixa curta e já não consegue parar antes da linha.
+    fn occ_by(&self, cf: &Conflict, t_arr: f32, me: usize, strict: bool) -> Option<usize> {
         let other = cf.other as usize;
         let (lo, hi) = (cf.s_other - cf.w, cf.s_other + cf.w);
-        let clear = |j: usize, rear: f32| (hi - rear) / self.v[j].max(0.05) > t_arr;
+        let to = self.conns[other - self.nl].to as usize;
+        let clear = |j: usize, rear: f32| !(strict && self.short_link(to, j)) && (hi - rear) / self.v[j].max(0.05) > t_arr;
         for &j in &self.edge_veh[other] {
             let j = j as usize;
             let (f, r) = (self.s[j], self.s[j] - self.vlen[j]);
@@ -1406,7 +1442,7 @@ impl Sim {
             }
         }
         let olen = self.edge_len[other];
-        for &j in self.edge_veh[self.conns[other - self.nl].to as usize].iter().take(3) {
+        for &j in self.edge_veh[to].iter().take(3) {
             let j = j as usize;
             let r = olen + self.s[j] - self.vlen[j];
             if r > hi {
@@ -1416,16 +1452,30 @@ impl Sim {
                 return Some(j);
             }
         }
+        if strict {
+            let fl = self.conns[other - self.nl].from as usize;
+            if let Some(&j) = self.edge_veh[fl].last() {
+                let j = j as usize;
+                let d = self.lanes[fl].len - self.s[j];
+                if j != me && self.choice[j] == other as u32 && self.enter_ok[j] && !self.ahead_held[j] && self.short_link(to, j) && self.v[j] * self.v[j] / (2.0 * self.bcomf[j]) + 1.0 > d {
+                    return Some(j);
+                }
+            }
+        }
         None
     }
 
     /// Ponto de conflito à frente ocupado na conversão `cc`, para o veículo `i` cuja frente está em `s_on` na
     /// conversão (negativo = ainda na faixa, antes da linha): obstáculo parado antes da área (folga, 0, quem ocupa).
     fn occ_obstacle(&mut self, net: &Net, i: usize, cc: u32, s_on: f32) -> Option<(f32, f32, usize)> {
-        // impasse dentro do cruzamento (ex.: quatro "fechando" uns aos outros): segue mesmo assim
-        if s_on >= 0.0 && self.wait[i] > OCC_DEADLOCK {
-            return None;
-        }
+        // impasse dentro do cruzamento (ex.: quatro "fechando" uns aos outros), na curva ou num trecho mais curto que o
+        // veículo entre dois nós (como `inside_stuck` em `may_enter`): segue mesmo assim, e mantém a decisão depois de
+        // arrancar (`occ_go`) — menos diante de quem já está saindo do mesmo jeito, para sair um de cada vez
+        let stuck = self.occ_go[i] == cc + 1 || self.wait[i] > OCC_DEADLOCK && {
+            let e = self.edge[i] as usize;
+            e >= self.nl || self.short_link(e, i)
+        };
+        self.occ_skipped = false;
         let cfs = self.conflicts_of(net, cc);
         let v = self.v[i].max(1.0);
         let mut best: Option<(f32, f32, usize)> = None;
@@ -1441,14 +1491,18 @@ impl Sim {
                 continue;
             }
             let t_arr = (cf.s_me - cf.w - s_on).max(0.0) / v;
-            if let Some(j) = self.occ_by(cf, t_arr, i) {
-                best = Some(((stop - s_on).max(0.0), 0.0, j));
+            if let Some(j) = self.occ_by(cf, t_arr, i, false) {
+                if !stuck || self.occ_going(j) {
+                    best = Some(((stop - s_on).max(0.0), 0.0, j));
+                } else {
+                    self.occ_skipped = true;
+                }
                 continue;
             }
             // outro veículo já na curva concorrente vai chegar à área antes de mim e ocupá-la enquanto eu passo:
             // freio se ainda dá (quem chega depois cede; empate pelo id). Última defesa contra a colisão quando a
             // brecha foi mal avaliada na linha.
-            if s_on < 0.0 {
+            if s_on < 0.0 || stuck {
                 continue;
             }
             let d_stop = stop - s_on;
@@ -1470,6 +1524,13 @@ impl Sim {
             }
         }
         best
+    }
+
+    /// `j` já está saindo de um impasse por ocupação pela conversão em que está (ou que vai pegar)?
+    fn occ_going(&self, j: usize) -> bool {
+        let e = self.edge[j] as usize;
+        let cj = if e >= self.nl { e as u32 } else { self.choice[j] };
+        self.occ_go[j] != 0 && self.occ_go[j] - 1 == cj
     }
 
     /// Faixa `l` curta demais para o veículo `i` parar inteiro nela (só a de um nó a outro do mesmo cruzamento).
@@ -1508,14 +1569,21 @@ impl Sim {
             if self.lanes[f].len >= 30.0 || d2 > d_check || !self.edge_veh[f].is_empty() || !self.edge_veh[c as usize].is_empty() {
                 break;
             }
-            if self.end_state[self.lanes[f].end_id as usize] != 0 && !self.short_link(f, i) {
+            let fits = self.lanes[f].len >= self.vlen[i] + 1.0;
+            let st = self.end_state[self.lanes[f].end_id as usize];
+            if st != 0 && !self.short_link(f, i) {
+                // semáforo ao fim de uma faixa curta mais adiante: fechado (vermelho, ou amarelo com espaço para parar) já
+                // segura daqui; aberto, o nó dele não é avaliado de longe
+                let v = self.v[i];
+                if st == 1 || (st == 2 && v * v / (2.0 * self.bcomf[i].max(AMBER_DECEL)) < d2 - 1.0) {
+                    return if fits { d2 } else { last_ok };
+                }
                 break;
             }
             let c2 = self.stay_cost(self.drv(i), f).1;
             if c2 == NONE || c2 == SINK {
                 break;
             }
-            let fits = self.lanes[f].len >= self.vlen[i] + 1.0;
             if !self.may_enter_from(net, i, c2, f, d2) {
                 return if fits { d2 } else { last_ok };
             }
@@ -1556,11 +1624,19 @@ impl Sim {
         let clearing = st != 0 && self.short_link(lane_id, id);
         let st = if clearing { 0 } else { st };
         let signaled = st != 0;
-        if st == 1 {
+        // quem decidiu seguir no amarelo (sem distância para parar) mantém a decisão no começo do vermelho (vermelho geral)
+        let committed = st == 1 && self.amber_go[id] == lane_id as u32 + 1 && self.red_age[end] + d_end.max(0.0) / v.max(1.0) < AMBER_COMMIT;
+        if st == 1 && !committed {
             { REASON.with(|r| r.set(2)); return false; }
         }
-        if st == 2 && v * v / (2.0 * b) < d_end - 1.0 {
-            { REASON.with(|r| r.set(3)); return false; } // amarelo e dá para parar
+        if st == 2 {
+            // dá para parar freando a até 3 m/s² (taxa usual do MBST vol. V para o amarelo)?
+            if v * v / (2.0 * b.max(AMBER_DECEL)) < d_end - 1.0 {
+                { REASON.with(|r| r.set(3)); return false; }
+            }
+            if lane_id == self.edge[id] as usize {
+                self.amber_go[id] = lane_id as u32 + 1;
+            }
         }
         // placa "Pare": para na linha por ~1,5 s antes de avaliar a brecha
         if !signaled && self.lanes[lane_id].stop && self.stop_ok[id] != lane_id as u32 + 1 {
@@ -1617,7 +1693,8 @@ impl Sim {
         }
         if let Some(&j) = self.edge_veh[cc as usize].first() {
             let j = j as usize;
-            if self.s[j] - self.vlen[j] < 2.0 {
+            // ainda no começo da curva e quase parado (fila); andando, é só o líder de quem vem atrás (IDM)
+            if self.s[j] - self.vlen[j] < 2.0 && self.v[j] < 3.0 {
                 { REASON.with(|r| r.set(5)); BLOCKER.with(|b| b.set(j as i64)); return false; }
             }
         }
@@ -1626,7 +1703,9 @@ impl Sim {
         // ponto de conflito ocupado por quem está dentro do cruzamento (inclusive parado, "fechando" o cruzamento):
         // ninguém entra, com qualquer sinal ou preferência — exceto quem já está dentro dele, num trecho mais curto que
         // o veículo, parado há muito tempo (impasse, como em `occ_obstacle`)
-        let inside_stuck = lane_id == self.edge[id] as usize && self.short_link(lane_id, id) && self.wait[id] > OCC_DEADLOCK;
+        let inside_stuck = lane_id == self.edge[id] as usize && self.short_link(lane_id, id) && (self.wait[id] > OCC_DEADLOCK || self.occ_go[id] == cc + 1);
+        // avaliando de longe o nó seguinte a uma faixa curta (`ahead_stop_at`): ocupação sem crédito de "vai liberar"
+        let ahead = lane_id != self.edge[id] as usize;
         if !inside_stuck {
             let a = (self.amax[id] * 0.6).max(0.5);
             for cf in conflicts.iter() {
@@ -1635,7 +1714,7 @@ impl Sim {
                 }
                 let dist = (d_end + cf.s_me - cf.w).max(0.0);
                 let t_arr = (-v + (v * v + 2.0 * a * dist).sqrt()) / a;
-                if let Some(j) = self.occ_by(cf, t_arr, id) {
+                if let Some(j) = self.occ_by(cf, t_arr, id, ahead) {
                     if lane_id == self.edge[id] as usize {
                         self.held_box[id] = true;
                     }
@@ -1674,6 +1753,11 @@ impl Sim {
             // fusão sem placa nem semáforo e de mesma hierarquia: zíper (quem chega primeiro entra), sem prioridade fixa à direita
             let zip = cf.merge && !signaled && me.rank == o.rank;
             if !clearing && (zip || !self.has_priority(me, o, signaled)) {
+                // fusão sem semáforo em que eu tenho a preferência: não paro na linha por quem vem da via secundária
+                // (ele é que cede); quem já está na conversão dele e chega antes ao ponto vira meu líder (`merge_ghost`)
+                if cf.merge && !signaled && !zip {
+                    continue;
+                }
                 // convergência na mesma faixa sem preferência (zíper): em movimento, entra quem chega primeiro ao ponto,
                 // com uma folga; quem já está parado esperando entra quando o próximo da outra corrente ainda consegue
                 // frear com conforto — esse cede (senão, num fluxo contínuo, quem espera nunca entraria)
@@ -1685,7 +1769,9 @@ impl Sim {
                         if self.s[j] - self.vlen[j] > cf.s_other + 1.0 {
                             return false; // já passou do ponto
                         }
-                        let t_j = ((cf.s_other - self.s[j]).max(0.0)) / self.v[j].max(2.0);
+                        // quem saiu parado da linha agora há pouco acelera como eu (a 2 m/s constantes parecia longe)
+                        let (vj, aj) = (self.v[j], (self.amax[j] * 0.6).max(0.5));
+                        let t_j = (-vj + (vj * vj + 2.0 * aj * (cf.s_other - self.s[j]).max(0.0)).sqrt()) / aj;
                         t_j < t_me + MERGE_GAP || (t_j == t_me && cf.other < cc)
                     }).or_else(|| self.edge_veh[o.from as usize].iter().rev().take(2).find(|&&j| {
                         let j = j as usize;
@@ -1722,6 +1808,28 @@ impl Sim {
             }
             // chegada minha ao ponto de conflito
             let t_me = t_reach(d_end + cf.s_me).min((d_end + cf.s_me) / v_me);
+            // fusão cedendo à preferencial (alça, rua que desemboca numa avenida): não é cruzamento. Quem entra acelera de
+            // verdade pela conversão e só precisa que, quando chegar ao ponto, o seguidor da preferencial esteja longe o
+            // bastante para o IDM dele não pedir mais que `MERGE_BRAKE` (como o `b_safe` do MOBIL); quem passa antes,
+            // com folga, fica à frente
+            let ins = if cf.merge { Some(self.merge_arrival(id, me_idx, d_end + cf.s_me)) } else { None };
+            let vlen_me = self.vlen[id];
+            let blocks = |t_j: f32, j: usize| -> bool {
+                let Some((t_m, v_m)) = ins else { return !(t_me + t_gap < t_j) };
+                let vj = self.v[j].max(2.0);
+                if t_j + (self.vlen[j] + 2.0) / vj + 1.0 < t_m {
+                    return false;
+                }
+                let gap = vj * (t_j - t_m) - vlen_me;
+                if gap <= 0.5 {
+                    return true;
+                }
+                let (aj, bj) = (self.amax[j], self.bcomf[j]);
+                let s_star = 2.0 + (vj * self.tgap[j] + vj * (vj - v_m) / (2.0 * (aj * bj).sqrt())).max(0.0);
+                let free = 1.0 - (vj / self.desired_speed(j).max(0.5)).powi(4);
+                let need = if relaxed { MERGE_BRAKE * 1.25 } else { MERGE_BRAKE };
+                aj * (free - (s_star / gap).powi(2)) < -need
+            };
             // veículos já na conversão concorrente
             for &j in &self.edge_veh[cf.other as usize] {
                 let j = j as usize;
@@ -1730,7 +1838,7 @@ impl Sim {
                     continue; // já liberou o ponto
                 }
                 let t_j = if sj >= cf.s_other { 0.0 } else { (cf.s_other - sj) / self.v[j].max(2.0) };
-                if !(t_me + t_gap < t_j) {
+                if blocks(t_j, j) {
                     { REASON.with(|r| r.set(7)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                 }
             }
@@ -1747,8 +1855,8 @@ impl Sim {
                 if !signaled && self.v[j] < 0.5 && self.wait[j] + 3.0 < self.wait[id] {
                     continue;
                 }
-                // parado na linha e sem poder entrar (fila, saída cheia): não vai ocupar o cruzamento agora
-                if self.v[j] < 0.5 && !self.enter_ok[j] {
+                // parado na linha e sem poder entrar (fila, saída cheia, nó logo adiante): não vai ocupar o cruzamento agora
+                if self.v[j] < 0.5 && (!self.enter_ok[j] || self.ahead_held[j]) {
                     continue;
                 }
                 // quem está parado na linha há tempo está bloqueado (não vai ocupar o cruzamento já): não prende quem espera muito
@@ -1760,12 +1868,65 @@ impl Sim {
                 if patient && t_j > 4.0 {
                     continue;
                 }
-                if !(t_me + t_gap < t_j) {
+                if blocks(t_j, j) {
+                    { REASON.with(|r| r.set(8)); BLOCKER.with(|b| b.set(j as i64)); return false; }
+                }
+            }
+            // faixa concorrente curta (comum no OSM: cruzamentos de vários nós): quem vem rápido antes dela, na conversão
+            // ou na faixa anterior rumo a ela, chega ao ponto de conflito em poucos segundos sem estar à vista
+            let fl_len = self.lanes[fl].len;
+            if fl_len < SHORT_APPROACH && !patient {
+                let horizon = ins.map_or(t_me + t_gap, |(t_m, _)| t_m + 3.0);
+                if let Some(j) = self.fast_before(fl, fl_len + cf.s_other, horizon) {
                     { REASON.with(|r| r.set(8)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                 }
             }
         }
         true
+    }
+
+    /// Chegada de `id` ao ponto de fusão a `dist` m, acelerando firme (0,8 × a máx.) até a velocidade da conversão
+    /// `me_idx`: (tempo, velocidade ao chegar).
+    fn merge_arrival(&self, id: usize, me_idx: usize, dist: f32) -> (f32, f32) {
+        let v = self.v[id];
+        let a = (self.amax[id] * 0.8).max(0.5);
+        let vc = self.conns[me_idx].vturn.max(v).max(1.0);
+        let dist = dist.max(0.0);
+        let d_acc = (vc * vc - v * v) / (2.0 * a);
+        if dist <= d_acc {
+            let vm = (v * v + 2.0 * a * dist).sqrt();
+            ((vm - v) / a, vm)
+        } else {
+            ((vc - v) / a + (dist - d_acc) / vc, vc)
+        }
+    }
+
+    /// Veículo rápido (≥ `FAST_BEFORE` m/s) que vai entrar na faixa `fl` vindo de uma conversão que chega a ela (já na
+    /// conversão ou na faixa anterior, com essa conversão escolhida e liberado) e percorre `extra` metros a partir do
+    /// início de `fl` em menos de `t_max` s.
+    fn fast_before(&self, fl: usize, extra: f32, t_max: f32) -> Option<usize> {
+        for &p in &self.lane_in[fl] {
+            let pc = &self.conns[p as usize - self.nl];
+            let plen = self.edge_len[p as usize];
+            for &j in &self.edge_veh[p as usize] {
+                let j = j as usize;
+                if self.v[j] >= FAST_BEFORE && (plen - self.s[j] + extra) / self.v[j] < t_max {
+                    return Some(j);
+                }
+            }
+            let pl = pc.from as usize;
+            // aproximação anterior fechada: quem está nela vai parar
+            if self.end_state[self.lanes[pl].end_id as usize] == 1 {
+                continue;
+            }
+            if let Some(&j) = self.edge_veh[pl].last() {
+                let j = j as usize;
+                if self.choice[j] == p && self.enter_ok[j] && self.v[j] >= FAST_BEFORE && (self.lanes[pl].len - self.s[j] + plen + extra) / self.v[j] < t_max {
+                    return Some(j);
+                }
+            }
+        }
+        None
     }
 
     // ---- passo
@@ -1823,11 +1984,12 @@ impl Sim {
             } else {
                 None
             };
+            let other = if rest < LOOKAHEAD { min_lead(other, self.merge_ghost(net, i, cc, rest)) } else { other };
             // faixa de destino curta que termina em semáforo fechado: a retenção dela também vale para quem ainda está antes
             let tl = &self.lanes[to as usize];
             if tl.len < 30.0 && !self.short_link(to as usize, i) {
                 let st = self.end_state[tl.end_id as usize];
-                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) < rest + clen + tl.len - 1.0) {
+                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i].max(AMBER_DECEL)) < rest + clen + tl.len - 1.0) {
                     let stop = (rest + clen + tl.len - 0.5, 0.0);
                     return Some(match other {
                         Some(o) if o.0 < stop.0 => o,
@@ -1846,12 +2008,13 @@ impl Sim {
                 let j = j as usize;
                 (rest + self.s[j] - self.vlen[j], self.v[j])
             });
+            let other = min_lead(other, self.merge_ghost(net, i, e as u32, -self.s[i]));
             // já dentro da conversão: a retenção da faixa de destino curta com semáforo fechado continua valendo
             // (senão quem freou antes da conversão volta a acelerar nela e chega à faixa curta sem espaço para parar)
             let tl = &self.lanes[to as usize];
             if tl.len < 30.0 && !self.short_link(to as usize, i) {
                 let st = self.end_state[tl.end_id as usize];
-                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i]) < rest + tl.len - 1.0) {
+                if st == 1 || (st == 2 && self.v[i] * self.v[i] / (2.0 * self.bcomf[i].max(AMBER_DECEL)) < rest + tl.len - 1.0) {
                     let stop = (rest + tl.len - 0.5, 0.0);
                     return Some(match other {
                         Some(o) if o.0 < stop.0 => o,
@@ -1861,6 +2024,37 @@ impl Sim {
             }
             other
         }
+    }
+
+    /// Líder projetado numa fusão: quem está numa conversão que converge com a minha (`cc`, cuja linha está a `d0` m da
+    /// minha frente; negativo = já estou nela) e chega antes ao ponto de fusão é seguido como se já estivesse à frente,
+    /// a (minha distância ao ponto − a dele − o comprimento dele). Antes ele só virava líder ao chegar à faixa de saída.
+    fn merge_ghost(&mut self, net: &Net, i: usize, cc: u32, d0: f32) -> Option<(f32, f32)> {
+        let mut best: Option<(f32, f32)> = None;
+        for cf in self.conflicts_of(net, cc).iter() {
+            if !cf.merge {
+                continue;
+            }
+            let d_me = d0 + cf.s_me;
+            for &j in &self.edge_veh[cf.other as usize] {
+                let j = j as usize;
+                let dj = cf.s_other - self.s[j];
+                if j == i || dj >= d_me {
+                    continue;
+                }
+                let gap = d_me - dj - self.vlen[j];
+                // ainda antes da linha, lado a lado com ele na projeção: quem decide é a entrada (`may_enter`), não o líder
+                if d0 > 0.0 && gap < 1.0 {
+                    continue;
+                }
+                // ele (mais rápido) libera o ponto antes de eu chegar: vai estar à frente e se afastando, não freio já
+                if self.v[j] > self.v[i] && (dj + self.vlen[j]) / self.v[j].max(0.5) + 0.5 < d_me / self.v[i].max(2.0) {
+                    continue;
+                }
+                best = min_lead(best, Some((gap, self.v[j])));
+            }
+        }
+        best
     }
 
     fn desired_speed(&self, i: usize) -> f32 {
@@ -1937,10 +2131,18 @@ impl Sim {
                 // dentro do cruzamento (ou chegando à linha já liberado): para antes de um ponto de conflito ocupado
                 let occ = if e >= self.nl {
                     self.held_box[i] = false;
-                    self.occ_obstacle(net, i, e as u32, self.s[i])
+                    let o = self.occ_obstacle(net, i, e as u32, self.s[i]);
+                    if o.is_none() && self.occ_skipped {
+                        self.occ_go[i] = e as u32 + 1;
+                    }
+                    o
                 } else if front && self.enter_ok[i] && self.choice[i] != NONE && self.choice[i] != SINK && self.edge_len[e] - self.s[i] < 40.0 {
                     let rest = self.edge_len[e] - self.s[i];
-                    self.occ_obstacle(net, i, self.choice[i], -rest)
+                    let o = self.occ_obstacle(net, i, self.choice[i], -rest);
+                    if o.is_none() && self.occ_skipped {
+                        self.occ_go[i] = self.choice[i] + 1;
+                    }
+                    o
                 } else {
                     None
                 };
@@ -3184,7 +3386,7 @@ impl Sim {
             if cf.merge || self.s[i] > cf.s_me - cf.w {
                 continue;
             }
-            if let Some(j) = self.occ_by(cf, 0.0, i) {
+            if let Some(j) = self.occ_by(cf, 0.0, i, false) {
                 return (format!("{base} -> ocupação (conflito conv {})", cf.other), j as i64);
             }
         }
@@ -3253,6 +3455,15 @@ impl Sim {
 }
 
 /// Em fase verde, correntes que não são esquerda-contra-oposto não precisam disputar (a convergência continua sendo tratada pelo espaço de saída).
+/// O mais próximo de dois líderes (folga, velocidade).
+fn min_lead(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.0 < x.0 { y } else { x }),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
 fn signaled_green_streams(signaled: bool, _me: &ConnRt, _o: &ConnRt) -> bool {
     let _ = signaled;
     false

@@ -1075,9 +1075,24 @@ fn recife_behavior() {
         for _ in 0..(15 * 60 * 5) {
             n.sim.as_mut().unwrap().step(&n.net);
         }
+        // STUCK=n: quem está parado há mais de n s no fim (gargalos), com o motivo
+        if let Some(t) = std::env::var("STUCK").ok().and_then(|v| v.parse::<f32>().ok()) {
+            for l in n.sim.as_mut().unwrap().stuck_report(&n.net, t) {
+                eprintln!("      STK {l}");
+            }
+        }
         let s = n.sim.as_ref().unwrap();
         let r = s.report(&n.net);
         let ms = t.elapsed().as_secs_f64() * 1e3 / 4500.0;
+        // JUNC=osm1,osm2: atraso e fila máxima desses cruzamentos (e os 5 piores)
+        if let Ok(list) = std::env::var("JUNC") {
+            for (k, j) in r["junctions"].as_array().into_iter().flatten().enumerate() {
+                let osm = j["osm"].as_f64().unwrap_or(0.0) as i64;
+                if k < 5 || list.split(',').any(|x| x.trim().parse::<i64>().ok() == Some(osm)) {
+                    eprintln!("      JUNC #{} osm {osm}: atraso {:.2} veíc·h  fila máx {}", k + 1, j["delayVehH"].as_f64().unwrap_or(0.0), j["queueMax"]);
+                }
+            }
+        }
         let row = [s.stats.finished as f64, r["totalDelayAllVehH"].as_f64().unwrap(), s.stats.queued as f64, s.stats.illegal_moves as f64 + s.stats.solid_crossings as f64 * 1e-6, s.stats.harsh_brakes as f64, ms];
         eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  vermelho {}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], s.stats.red_runs, row[5], s.reroutes);
         for l in s.overlap_log.iter().flatten() {
@@ -1936,4 +1951,171 @@ fn recife_occ_chains() {
             }
         }
     }
+}
+
+/// Um controlador da CTTU com demanda local: 8 zonas de 200 m a `LOCAL_R` m (padrão 450) do centro dos nós, gravitacional.
+/// `RECIFE_OSM=mapa CTTU_ID=103 cargo test --release cttu_local -- --ignored --nocapture`. Variantes do ajuste:
+/// `CTTU_NOS=osm1,osm2` troca os nós, `CTTU_FASES='[{"vias":["Góes"],"verde":40}, ...]'` troca as fases;
+/// `LOCAL_GEN` = veíc./h por zona (padrão 500), `LOCAL_MIN` = minutos (padrão 20), 4 sementes.
+#[test]
+#[ignore]
+fn cttu_local() {
+    let Ok(path) = std::env::var("RECIFE_OSM") else { return };
+    let data = std::fs::read(path).unwrap();
+    let id: u32 = std::env::var("CTTU_ID").ok().and_then(|v| v.parse().ok()).unwrap_or(103);
+    let mut pts: Vec<crate::extsig::ExtSignal> = serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap();
+    let p = pts.iter_mut().find(|p| p.id == id).expect("CTTU_ID");
+    if let Ok(v) = std::env::var("CTTU_NOS") {
+        p.nos = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    }
+    if let Ok(v) = std::env::var("CTTU_FASES") {
+        p.fases = serde_json::from_str(&v).unwrap();
+    }
+    let mut n = build_network_ext(&data, &pts).unwrap();
+    n.ensure_conns();
+    let ext = n.ext_signals.as_ref().unwrap();
+    let mine: Vec<usize> = n.net.signals.iter().map(|s| s.node as usize).filter(|&ni| ext.nodes.get(&n.net.nodes[ni].osm_id) == Some(&id)).collect();
+    assert!(!mine.is_empty(), "controlador {id} sem nós no mapa");
+    let osm: Vec<i64> = mine.iter().map(|&ni| n.net.nodes[ni].osm_id).collect();
+    let c = mine.iter().fold([0.0, 0.0], |a, &ni| [a[0] + n.net.nodes[ni].pos[0] / mine.len() as f64, a[1] + n.net.nodes[ni].pos[1] / mine.len() as f64]);
+    for s in n.net.signals.iter().filter(|s| mine.contains(&(s.node as usize))) {
+        let fs: Vec<String> = s.phases.iter().map(|f| format!("{}+{}+{} ({} aprox.)", f.green, f.yellow, f.all_red, f.ends.len())).collect();
+        eprintln!("nó {}: {}", n.net.nodes[s.node as usize].osm_id, fs.join(" | "));
+    }
+    let r: f64 = std::env::var("LOCAL_R").ok().and_then(|v| v.parse().ok()).unwrap_or(450.0);
+    let gen: f64 = std::env::var("LOCAL_GEN").ok().and_then(|v| v.parse().ok()).unwrap_or(500.0);
+    let mins: u32 = std::env::var("LOCAL_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let zones: Vec<String> = (0..8)
+        .map(|k| {
+            let a = k as f64 * std::f64::consts::PI / 4.0;
+            let (x, y) = (c[0] + r * a.cos(), c[1] + r * a.sin());
+            format!(r#"{{"id":{},"gen":{gen},"attr":1,"poly":[[{},{}],[{},{}],[{},{}],[{},{}]]}}"#, k + 1, x - 100.0, y - 100.0, x + 100.0, y - 100.0, x + 100.0, y + 100.0, x - 100.0, y + 100.0)
+        })
+        .collect();
+    let mut sum = [0.0f64; 6];
+    for seed in 1..=4u64 {
+        let json = format!(r#"{{"zones":[{}],"params":{{"seed":{seed},"hour":8,"busShare":0,"beta":0.0}}}}"#, zones.join(","));
+        n.start_sim(&json).unwrap();
+        if std::env::var("OVERLAP_LOG").is_ok() {
+            n.sim.as_mut().unwrap().overlap_log = Some(Vec::new());
+        }
+        for _ in 0..(mins * 60 * 5) {
+            n.sim.as_mut().unwrap().step(&n.net);
+        }
+        let s = n.sim.as_ref().unwrap();
+        let rep = s.report(&n.net);
+        let mut jd = 0.0;
+        let mut jq = 0u64;
+        for j in rep["junctions"].as_array().into_iter().flatten() {
+            if osm.contains(&(j["osm"].as_f64().unwrap_or(0.0) as i64)) {
+                jd += j["delayVehH"].as_f64().unwrap_or(0.0);
+                jq = jq.max(j["queueMax"].as_u64().unwrap_or(0));
+            }
+        }
+        let row = [s.stats.finished as f64, rep["totalDelayAllVehH"].as_f64().unwrap(), jd, jq as f64, s.stats.box_stops as f64, s.stats.red_runs as f64];
+        eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  atraso nos nós {:.2} veíc·h  fila máx {:.0}  parados dentro {:.0}  vermelho {:.0}", row[0], row[1], row[2], row[3], row[4], row[5]);
+        for l in s.overlap_log.iter().flatten() {
+            eprintln!("      LOG {l}");
+        }
+        for k in 0..6 {
+            sum[k] += row[k] / 4.0;
+        }
+    }
+    eprintln!("MÉDIA: concluídos {:.0}  atraso total {:.1} veíc·h  atraso nos nós {:.2} veíc·h  fila máx {:.1}  parados dentro {:.1}  vermelho {:.1}", sum[0], sum[1], sum[2], sum[3], sum[4], sum[5]);
+}
+
+/// Retorno curto de mão dupla entre as duas pistas de uma avenida (geometria do Cais do Apolo, no Recife): o trecho do
+/// canteiro (3,4 m) é mais curto que um carro, então quem espera numa ponta fica com a traseira no caminho de quem sai
+/// pela outra. Antes os dois sentidos se travavam para sempre, cada um "ocupando" o ponto de conflito do outro.
+const RETORNO: &str = r#"<?xml version="1.0"?><osm version="0.6">
+ <node id="1" lat="-8.0562804" lon="-34.8722389"/><node id="2" lat="-8.0576219" lon="-34.8724038"/><node id="3" lat="-8.0587419" lon="-34.8725612"/>
+ <node id="4" lat="-8.0591967" lon="-34.8726277"/><node id="5" lat="-8.0595184" lon="-34.8726734"/><node id="6" lat="-8.0602985" lon="-34.8727873"/>
+ <node id="11" lat="-8.0603112" lon="-34.8726881"/><node id="12" lat="-8.0595009" lon="-34.8725750"/><node id="13" lat="-8.0592204" lon="-34.8725319"/>
+ <node id="14" lat="-8.0588227" lon="-34.8724654"/><node id="15" lat="-8.0583579" lon="-34.8724063"/><node id="16" lat="-8.0563000" lon="-34.8721400"/>
+ <way id="100"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="6"/><tag k="highway" v="secondary"/><tag k="oneway" v="yes"/><tag k="lanes" v="2"/><tag k="maxspeed" v="60"/><tag k="name" v="Av. Oeste"/></way>
+ <way id="101"><nd ref="11"/><nd ref="12"/><nd ref="13"/><nd ref="14"/><nd ref="15"/><nd ref="16"/><tag k="highway" v="secondary"/><tag k="oneway" v="yes"/><tag k="lanes" v="2"/><tag k="maxspeed" v="60"/><tag k="name" v="Av. Leste"/></way>
+ <way id="102"><nd ref="4"/><nd ref="13"/><tag k="highway" v="secondary_link"/><tag k="lanes" v="2"/><tag k="oneway" v="no"/></way>
+</osm>"#;
+
+#[test]
+fn short_two_way_u_turn_does_not_deadlock() {
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let mut stuck = 0;
+    for seed in 1..=3 {
+        let mut n = build_network(RETORNO.as_bytes()).unwrap();
+        let json = format!(
+            r#"{{"zones":[{{"id":1,"gen":0,"attr":1,"poly":{}}},{{"id":2,"gen":0,"attr":1,"poly":{}}},{{"id":3,"gen":0,"attr":1,"poly":{}}},{{"id":4,"gen":0,"attr":1,"poly":{}}}],
+              "params":{{"seed":{seed},"hour":8,"busShare":0,"beta":0,"boxBlockPct":20,"odManual":{{"1>2":250,"4>3":250,"1>3":800,"4>2":800}}}}}}"#,
+            square(at(&n, 1), 4.0), square(at(&n, 16), 4.0), square(at(&n, 6), 4.0), square(at(&n, 11), 4.0)
+        );
+        n.start_sim(&json).unwrap();
+        run(&mut n, 1800.0);
+        let s = n.sim.as_mut().unwrap();
+        let st: Vec<String> = s.stuck_report(&n.net, 120.0).into_iter().filter(|l| l.starts_with("veh")).collect();
+        eprintln!("semente {seed}: concluídos {}  presos {}  colisões {}  impasses {}  {st:?}", s.stats.finished, st.len(), s.stats.junction_overlaps, s.stats.occ_deadlocks);
+        assert!(s.stats.finished > 350, "viagens concluídas: {}", s.stats.finished);
+        stuck += st.len();
+    }
+    assert_eq!(stuck, 0, "ninguém fica preso (> 120 s) no retorno");
+}
+
+/// Rua de duas faixas que desemboca numa rodovia de duas faixas sem faixa a mais na saída (coordenadas da Rua Rio Tapado
+/// na Rodovia Governador Mário Covas): as faixas da rua se juntam na faixa da direita da rodovia, sem a de dentro cruzar
+/// a faixa da direita da rodovia para chegar à da esquerda; a rodovia mantém as suas.
+const MERGE_RAMP: &str = r#"<?xml version="1.0"?><osm version="0.6">
+ <node id="1" lat="-8.1226900" lon="-34.9416100"/><node id="2" lat="-8.1190824" lon="-34.9429983"/><node id="3" lat="-8.1176233" lon="-34.9435455"/>
+ <node id="4" lat="-8.1162439" lon="-34.9440886"/><node id="5" lat="-8.1154702" lon="-34.9443912"/><node id="6" lat="-8.1149979" lon="-34.9445728"/>
+ <node id="7" lat="-8.1114000" lon="-34.9459600"/>
+ <node id="10" lat="-8.1184200" lon="-34.9419000"/><node id="11" lat="-8.1174400" lon="-34.9427300"/><node id="12" lat="-8.1164570" lon="-34.9435575"/>
+ <node id="13" lat="-8.1160607" lon="-34.9439552"/><node id="14" lat="-8.1158887" lon="-34.9440846"/>
+ <way id="100"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="5"/><tag k="highway" v="trunk"/><tag k="oneway" v="yes"/><tag k="lanes" v="2"/><tag k="maxspeed" v="80"/><tag k="name" v="Rodovia"/></way>
+ <way id="101"><nd ref="5"/><nd ref="6"/><nd ref="7"/><tag k="highway" v="trunk"/><tag k="oneway" v="yes"/><tag k="lanes" v="2"/><tag k="maxspeed" v="80"/><tag k="name" v="Rodovia"/></way>
+ <way id="102"><nd ref="10"/><nd ref="11"/><nd ref="12"/><nd ref="13"/><nd ref="14"/><nd ref="5"/><tag k="highway" v="secondary"/><tag k="oneway" v="yes"/><tag k="lanes" v="2"/><tag k="name" v="Rua"/></way>
+</osm>"#;
+
+#[test]
+fn merging_street_lanes_join_the_near_lane_without_crossing() {
+    let mut n = build_network(MERGE_RAMP.as_bytes()).unwrap();
+    n.ensure_conns();
+    let net = &n.net;
+    let ni = net.nodes.iter().position(|x| x.osm_id == 5).unwrap();
+    let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+    let way = |l: u32| net.segs[net.lanes[l as usize].seg as usize].way_id;
+    let mut street = Vec::new();
+    let mut road = Vec::new();
+    for c in net.conns[lo..hi].iter().filter(|c| c.state == CONN_ALLOWED) {
+        let p = (net.lanes[c.from_lane as usize].idx, net.lanes[c.to_lane as usize].idx);
+        if way(c.from_lane) == 102 { street.push(p) } else { road.push(p) }
+    }
+    street.sort();
+    road.sort();
+    assert_eq!(road, vec![(0, 0), (1, 1)], "a rodovia mantém as suas faixas");
+    // a rua chega pela direita (sul): as duas faixas vão para a faixa da direita da rodovia (índice 1)
+    assert_eq!(street, vec![(0, 1), (1, 1)], "a rua se junta na faixa da borda, sem cruzar a rodovia");
+}
+
+/// Quem desemboca na rodovia cede com uma brecha de fusão (o seguidor da rodovia chega com folga para segui-lo), não com
+/// a brecha de um cruzamento. Geometria da Rua Rio Tapado × Rodovia Governador Mário Covas: com 1150 veíc./h na rodovia
+/// e 550 na rua, antes a rua acumulava ~140 veículos na fila de entrada em 30 min (3 sementes); agora quase nenhum.
+#[test]
+fn merging_street_gets_realistic_gaps() {
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let mut queued = 0;
+    for seed in 1..=3 {
+        let mut n = build_network(MERGE_RAMP.as_bytes()).unwrap();
+        let json = format!(
+            r#"{{"zones":[{{"id":1,"gen":1150,"attr":0,"gateway":true,"poly":{}}},{{"id":2,"gen":550,"attr":0,"poly":{}}},{{"id":3,"gen":0,"attr":1,"poly":{}}}],
+              "params":{{"seed":{seed},"hour":8,"busShare":0,"beta":0,"odManual":{{"1>3":1150,"2>3":550}}}}}}"#,
+            square(at(&n, 1), 8.0), square(at(&n, 10), 8.0), square(at(&n, 7), 8.0)
+        );
+        n.start_sim(&json).unwrap();
+        run(&mut n, 1800.0);
+        let s = n.sim.as_ref().unwrap();
+        eprintln!("semente {seed}: gerados {}  concluídos {}  na rede {}  fila de entrada {}  freadas {}", s.stats.spawned, s.stats.finished, s.n_alive, s.stats.queued, s.stats.harsh_brakes);
+        assert!(s.stats.finished > 650, "viagens concluídas: {}", s.stats.finished);
+        queued += s.stats.queued;
+    }
+    assert!(queued < 40, "a rua não acumula fila de entrada: {queued}");
 }

@@ -236,6 +236,9 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
     // lado; o ramal "em frente" entra pela ponta desse lado e a principal encosta no lado oposto quando sobra faixa,
     // para cada fluxo ter a sua faixa em vez de dois disputarem as mesmas.
     let mut merge_side = vec![vec![0i8; n]; n];
+    // faixas de saída que o ramal "em frente" que converge pode usar sem cruzar a principal: as que sobram mais a da
+    // borda dela, que os dois dividem (fusão)
+    let mut merge_room = vec![vec![usize::MAX; n]; n];
     for b in 0..n {
         if ap[b].1.is_empty() {
             continue;
@@ -260,6 +263,7 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
             sides.push(sd);
             if straight.contains(&a) {
                 merge_side[a][b] = sd;
+                merge_room[a][b] = (ap[b].1.len() + 1).saturating_sub(ap[main].0.len()).max(1);
             }
         }
         if !sides.is_empty() && sides.iter().all(|&x| x == sides[0]) {
@@ -343,9 +347,18 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
                 } else {
                     merge_side[a][b]
                 };
+                // ramal que converge sem faixa sobrando para todas as suas: elas se juntam na(s) faixa(s) da ponta do
+                // seu lado, sem atravessar a corrente principal (senão a faixa de dentro do ramal cruzaria as da
+                // principal para chegar à faixa do outro lado)
+                let room = if kind == K_STRAIGHT && tg.len() == 1 && side != 0 { merge_room[a][b] } else { usize::MAX };
                 for (t, &li) in sub.iter().enumerate() {
                     let outs = &ap[b].1;
-                    let oi = target_index(kind, t, sub.len(), sub[0], outs.len(), side);
+                    let oi = if room < sub.len() && room < outs.len() {
+                        let k = target_index(K_STRAIGHT, t, sub.len(), 0, room, 0);
+                        if side < 0 { outs.len() - room + k } else { k }
+                    } else {
+                        target_index(kind, t, sub.len(), sub[0], outs.len(), side)
+                    };
                     let (fl, tl) = (ins[li], outs[oi]);
                     let (l0, l1) = (&net.lanes[fl as usize], &net.lanes[tl as usize]);
                     out.push(Conn { node: ni as u32, from_lane: fl, to_lane: tl, kind, state: CONN_ALLOWED, base: CONN_ALLOWED, curve: bezier(l0.end, l0.edir, l1.start, l1.sdir, kind) });
@@ -543,7 +556,7 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
         members.entry(ctrl_key(*ni)).or_default().push(k);
     }
     // por controlador: eixos, se é travessia em trecho, a defasagem e, nos externos, a divisão principal × transversal
-    let mut ctrls: HashMap<i64, (Vec<f64>, bool, f64, Option<(HashMap<u32, usize>, [f32; 2])>)> = HashMap::new();
+    let mut ctrls: HashMap<i64, (Vec<f64>, bool, f64, Option<(HashMap<u32, usize>, [f32; 2])>, f32)> = HashMap::new();
     for (key, mut ms) in members {
         ms.sort_by_key(|&k| net.nodes[appr[k].0].osm_id);
         let axes = axes_of(ms.iter().flat_map(|&k| appr[k].1.iter().map(|a| &a.1)));
@@ -558,12 +571,15 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
         } else {
             None
         };
-        ctrls.insert(key, (axes, midblock, offset, split));
+        // amarelo pela velocidade (MBST vol. V, CONTRAN 2022, 5.7.1): o da aproximação mais rápida do controlador,
+        // para todos os nós dele manterem o mesmo ciclo
+        let vmax = ms.iter().flat_map(|&k| appr[k].1.iter()).map(|a| crate::sim::route::free_speed(&net.segs[(a.0 >> 1) as usize])).fold(0.0f32, f32::max);
+        ctrls.insert(key, (axes, midblock, offset, split, yellow_for(vmax)));
     }
     for (ni, approaches) in &appr {
         let ni = *ni;
         let node = &net.nodes[ni];
-        let (axes, midblock, offset, split) = &ctrls[&ctrl_key(ni)];
+        let (axes, midblock, offset, split, yellow) = &ctrls[&ctrl_key(ni)];
         let edit = edits.sigs.get(&node.osm_id);
         // fases conferidas à mão para o controlador externo
         let fixed = u32::try_from(ctrl_key(ni)).ok().and_then(|c| ext.and_then(|m| m.phases.get(&c)));
@@ -621,6 +637,12 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
         if phases.is_empty() {
             phases.push(Phase { green: 30.0, yellow: 3.0, all_red: 2.0, ends: approaches.iter().map(|a| a.0).collect() });
         }
+        // amarelo pela velocidade, salvo tempos editados
+        if edit.map_or(true, |e| e.phases.is_none()) {
+            for p in phases.iter_mut().filter(|p| p.yellow > 0.0) {
+                p.yellow = p.yellow.max(*yellow);
+            }
+        }
         // semáforo em trecho (sem cruzamento): fase própria para a travessia de pedestres, que para os dois sentidos
         if edit.map_or(true, |e| e.phases.is_none()) && fixed.is_none() && *midblock {
             phases.push(Phase { green: 12.0, yellow: 0.0, all_red: 0.0, ends: Vec::new() });
@@ -644,9 +666,29 @@ pub fn build_signals(net: &mut Net, edits: &Edits, ext: Option<&crate::extsig::E
     net.signals = signals;
 }
 
+/// Amarelo (s) para a velocidade regulamentada `v` (m/s), pelo MBST vol. V (CONTRAN 2022, 5.7.1):
+/// t = 1 s de percepção e reação + v / (2 × 3 m/s²), com mínimo de 3 s até 40 km/h, 4 s em 50–60 km/h e 5 s a partir
+/// de 70 km/h, e máximo de 5 s (o resto do entreverdes iria para o vermelho geral).
+pub fn yellow_for(v: f32) -> f32 {
+    let kmh = v * 3.6;
+    let min = if kmh <= 40.5 { 3.0 } else if kmh <= 60.5 { 4.0 } else { 5.0 };
+    (1.0 + v / 6.0).max(min).min(5.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::lane_group;
+
+    #[test]
+    fn yellow_by_speed_follows_mbst() {
+        use super::yellow_for;
+        assert_eq!(yellow_for(30.0 / 3.6), 3.0);
+        assert_eq!(yellow_for(40.0 / 3.6), 3.0);
+        assert_eq!(yellow_for(50.0 / 3.6), 4.0);
+        assert_eq!(yellow_for(60.0 / 3.6), 4.0);
+        assert_eq!(yellow_for(70.0 / 3.6), 5.0);
+        assert_eq!(yellow_for(110.0 / 3.6), 5.0);
+    }
 
     #[test]
     fn fork_splits_lanes_left_to_right() {

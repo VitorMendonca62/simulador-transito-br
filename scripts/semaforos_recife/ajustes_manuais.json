@@ -136,11 +136,10 @@
     },
     {
       "id": 103,
-      "nota": "Av. Eng. Antônio de Góes x Rua Manoel de Brito: as duas pistas (mão única sentido ponte) e a alça da Manoel de Brito em 2 fases; a Manoel de Brito tinha 4 faixas e só a da esquerda convertia (as outras 3 iam para uma rua de 1 faixa)",
+      "nota": "Av. Eng. Antônio de Góes x Rua Manoel de Brito: as duas pistas (mão única sentido ponte) em 2 fases; a Manoel de Brito tinha 4 faixas e só a da esquerda convertia (as outras 3 iam para uma rua de 1 faixa). A alça da Manoel de Brito (nó 1639726764, 23 m depois da 1ª pista) fica sem semáforo e cede a vez: com ela no controlador, quem virava à esquerda da Manoel de Brito parava dentro do cruzamento (a faixa de saída tem 5,8 m e terminava no vermelho da alça)",
       "nos": [
         1639733295,
-        3243189550,
-        1639726764
+        3243189550
       ],
       "fases": [
         {
@@ -193,7 +192,7 @@
     },
     {
       "id": 174,
-      "nota": "Agamenon x Rua Dom Bosco / Rua Joaquim Nabuco: as 4 pistas e a convergência na auxiliar sentido sul",
+      "nota": "Agamenon x Rua Dom Bosco / Rua Joaquim Nabuco: as 4 pistas e a convergência na auxiliar sentido sul; a pista central da Agamenon (way 315073870) não converte para a Rua Joaquim Nabuco (o acesso é pela via sem nome que cruza a Agamenon; a auxiliar já é só em frente no OSM)",
       "nos": [
         1443846306,
         994519759,
@@ -215,6 +214,12 @@
           ],
           "verde": 25
         }
+      ],
+      "proibir": [
+        [
+          315073870,
+          86264126
+        ]
       ]
     },
     {
