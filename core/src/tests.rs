@@ -581,6 +581,52 @@ fn sim_is_deterministic() {
     assert_ne!(a.0, c.0, "semente diferente => resultado diferente");
 }
 
+/// Árvores de rotas calculadas "em outro worker" (cópia do roteador a partir dos bytes, pesos de cada lote) dão
+/// exatamente a mesma simulação que o cálculo local.
+#[test]
+fn external_route_trees_match_local() {
+    let json = SIM_ZONES.replace("\"beta\":0.02", "\"beta\":0.02,\"reroute\":true");
+    let mut a = sample();
+    a.start_sim(&json).unwrap();
+    run(&mut a, 900.0);
+
+    let mut b = sample();
+    b.start_sim_ext(&json, true).unwrap();
+    let s = b.sim.as_mut().unwrap();
+    assert!(crate::sim::route::LaneRouter::from_bytes(&s.router_bytes()[..10]).is_none(), "bytes truncados");
+    let mut copy = crate::sim::route::LaneRouter::from_bytes(&s.router_bytes()).expect("roteador da cópia");
+    assert_eq!(s.init_missing(), s.zone_count());
+    for z in 0..s.zone_count() {
+        let mut d = Vec::new();
+        copy.tree(s.zone_targets(z), &mut d);
+        s.init_put(&b.net, z, d);
+    }
+    assert_eq!(s.init_missing(), 0);
+    let mut batches = 0;
+    for _ in 0..(900.0 / 0.2) as u32 {
+        let s = b.sim.as_mut().unwrap();
+        assert!(!s.route_wait(), "a cópia responde antes do passo de instalação");
+        s.step(&b.net);
+        if let Some((zones, pen, cm)) = s.route_take() {
+            copy.set_weights(pen, cm);
+            batches += 1;
+            for z in zones {
+                let mut d = Vec::new();
+                copy.tree(s.zone_targets(z as usize), &mut d);
+                s.route_put(z, d);
+            }
+        }
+    }
+    assert!(batches >= 2, "lotes pedidos: {batches}");
+    let (sa, sb) = (a.sim.as_ref().unwrap(), b.sim.as_ref().unwrap());
+    let (mut va, mut vb) = (Vec::new(), Vec::new());
+    sa.snapshot(&a.net, &mut va);
+    sb.snapshot(&b.net, &mut vb);
+    assert_eq!(sa.reroutes, sb.reroutes);
+    assert_eq!((sa.stats.spawned, sa.stats.finished), (sb.stats.spawned, sb.stats.finished));
+    assert_eq!(va, vb, "mesmo estado dos veículos");
+}
+
 #[test]
 fn sim_respects_signals_in_red() {
     let mut n = sim_net();

@@ -133,6 +133,14 @@ export type WorkerOut =
   | { type: 'perf'; busyMs: number; wasmBytes: number }
   | { type: 'result'; id: number; json?: string; u32?: Uint32Array; f32?: Float32Array; u8?: Uint8Array; error?: string }
 
+/** Worker da simulação -> worker de rotas (`router.worker.ts`). `gen` descarta respostas de uma simulação anterior. */
+export type RouterIn =
+  | { type: 'graph'; gen: number; bytes: Uint8Array }
+  | { type: 'trees'; gen: number; init: boolean; pen?: Float32Array; cm?: Float32Array; zones: { zone: number; targets: Uint32Array }[] }
+export type RouterOut =
+  | { type: 'tree'; gen: number; init: boolean; zone: number; dist: Float32Array }
+  | { type: 'error'; gen: number; message: string }
+
 /** Estado de uma conexão de faixa (connU32[c*5+4]). */
 export const CONN_BLOCKED = 0 // proibida por restrição OSM (vermelho)
 export const CONN_ALLOWED = 1 // ligada

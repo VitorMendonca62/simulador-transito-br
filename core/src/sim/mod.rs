@@ -22,8 +22,14 @@ thread_local! {
 }
 pub const SINK: u32 = u32::MAX - 1;
 const LOOKAHEAD: f32 = 150.0;
-/// teto de nós de Dijkstra por passo no recálculo das rotas em tempo real
+/// rotas em tempo real: um lote de árvores pedido no passo k é instalado exatamente no passo k + `ROUTE_LAG`
+/// (3 s), calculado aqui ou em outro worker; o resultado não depende de quem calculou nem da velocidade da máquina
+const ROUTE_LAG: u64 = 15;
+/// ritmo do recálculo em nós de Dijkstra por passo (o mesmo de quando a árvore era feita em fatias no passo):
+/// nz·faixas/900 (volta em ~3 min), entre estes limites; vira tantas árvores por lote ou um lote a cada tantos passos
+const ROUTE_BUDGET_MIN: usize = 2_000;
 const ROUTE_BUDGET_MAX: usize = 6_000;
+const ROUTE_BATCH_MAX: usize = 8;
 const MIN_GAP: f32 = 0.3;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -287,6 +293,13 @@ const LC_SOLID_ZONE: f32 = 12.0;
 /// tempo mínimo de seta ligada antes de mudar de faixa (s)
 const LC_BLINK: f32 = 1.0;
 
+struct RouteBatch {
+    zones: Vec<u32>,
+    trees: Vec<Option<Vec<f32>>>,
+    /// passo em que o lote é instalado
+    due: u64,
+}
+
 pub struct Sim {
     pub time: f64,
     pub dt: f32,
@@ -304,15 +317,18 @@ pub struct Sim {
     /// conversões que chegam a cada faixa
     lane_in: Vec<Vec<u32>>,
     conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
-    router: Router,
     /// tempo até a zona de destino por faixa (até o primeiro nó dela): vale enquanto o veículo está fora da zona
     zone_dist: Vec<Vec<f32>>,
     /// cópia de fluxo livre de `zone_dist` (meio segundo), para quem não usa app e para o tempo livre da viagem
     zone_free: Vec<Vec<u16>>,
     /// faixas-alvo de cada zona (as que terminam num nó dela) e árvore em recálculo
     zone_tl: Vec<Vec<u32>>,
-    job: Option<route::TreeJob>,
-    job_buf: Vec<f32>,
+    /// lote de árvores pedido e ainda não instalado
+    route_batch: Option<RouteBatch>,
+    /// árvores calculadas fora da simulação (outro worker): o lote pedido espera a ponte buscar (`route_take`);
+    /// sem isso (ou se a resposta não chegar a tempo), são calculadas aqui no passo de instalação
+    route_ext: bool,
+    route_out: bool,
     /// instante em que a árvore de cada zona foi recalculada pela última vez
     tree_at: Vec<f64>,
     /// veículos em circulação rumo a cada zona (prioridade do recálculo)
@@ -356,7 +372,6 @@ pub struct Sim {
     left_gate: Vec<bool>,
     /// por zona de origem: (espera na fila de entrada, tempo na faixa de nascimento, veículos) — diagnóstico das divisas
     pub entry_stats: Vec<(f64, f64, u32)>,
-    dists: Vec<Vec<f32>>,
     zone_ids: Vec<i64>,
     zone_poly: Vec<Vec<[f64; 2]>>,
     zone_gateway: Vec<bool>,
@@ -446,6 +461,12 @@ pub struct Sim {
 
 impl Sim {
     pub fn new(net: &Net, init: &SimInit) -> Result<Sim, String> {
+        Sim::new_ext(net, init, false)
+    }
+
+    /// Com `route_ext`, as árvores iniciais das zonas ficam vazias para outro worker calcular (`init_put`); o que
+    /// faltar no 1º passo é calculado aqui. Sem, é igual a `new`.
+    pub fn new_ext(net: &Net, init: &SimInit, route_ext: bool) -> Result<Sim, String> {
         if net.conns.is_empty() {
             return Err("conexões não construídas".into());
         }
@@ -540,7 +561,8 @@ impl Sim {
         let mut sink = Vec::with_capacity(nz);
         let mut gates = Vec::with_capacity(nz);
         for z in &init.zones {
-            let inside: Vec<bool> = net.nodes.iter().map(|n| z.poly.len() >= 3 && demand::point_in_poly(n.pos, &z.poly)).collect();
+            let ip = demand::InPoly::new(&z.poly);
+            let inside: Vec<bool> = net.nodes.iter().map(|n| z.poly.len() >= 3 && ip.contains(n.pos)).collect();
             let mut g = Vec::new();
             for (li, l) in net.lanes.iter().enumerate() {
                 let s = &net.segs[l.seg as usize];
@@ -553,16 +575,7 @@ impl Sim {
             gates.push(g);
         }
 
-        // ---- roteamento
-        let router = Router::new(net);
-        let mut dists = Vec::with_capacity(nz);
-        for sk in &sink {
-            let targets: Vec<u32> = (0..net.segs.len() as u32 * 2).filter(|&d| router.time[d as usize].is_finite() && sk[dirseg_end_node(net, d) as usize]).collect();
-            let (mut h, mut dd) = (Vec::new(), Vec::new());
-            router.tree(&targets, &mut h, &mut dd);
-            dists.push(dd);
-        }
-        // por faixa: conversões ligadas + trocas de faixa
+        // ---- roteamento por faixa: conversões ligadas + trocas de faixa
         let lane_len: Vec<f32> = lanes.iter().map(|l| l.len).collect();
         let lane_speed: Vec<f32> = lanes.iter().map(|l| l.vfree).collect();
         let conn_list: Vec<(u32, u32, f32)> = conns.iter().map(|c| (c.from, c.to, c.pen)).collect();
@@ -590,7 +603,9 @@ impl Sim {
         for (z, sk) in sink.iter().enumerate() {
             let targets: Vec<u32> = (0..nl as u32).filter(|&l| sk[lanes[l as usize].to_node as usize] && !lanes[l as usize].bus).collect();
             let mut dd = Vec::new();
-            lrouter.tree(&targets, &mut dd);
+            if !route_ext {
+                lrouter.tree(&targets, &mut dd);
+            }
             zone_dist.push(dd);
             zone_tl.push(targets);
             // candidatos: nós onde chega alguma faixa interna da zona (dá para alcançá-los por dentro); senão, qualquer nó dela com entrada
@@ -633,12 +648,12 @@ impl Sim {
             node_conns,
             lane_in,
             conflicts: vec![None; ne],
-            router,
-            zone_free: if init.params.reroute { zone_dist.iter().map(|d| d.iter().map(|&x| enc_t(x)).collect()).collect() } else { Vec::new() },
+            zone_free: Vec::new(),
             zone_dist,
             zone_tl,
-            job: None,
-            job_buf: Vec::new(),
+            route_batch: None,
+            route_ext,
+            route_out: false,
             tree_at: Vec::new(),
             to_zone: vec![0; nz],
             reroutes: 0,
@@ -669,7 +684,6 @@ impl Sim {
             t_req: Vec::new(),
             left_gate: Vec::new(),
             entry_stats: vec![(0.0, 0.0, 0); nz],
-            dists,
             zone_ids: init.zones.iter().map(|z| z.id).collect(),
             zone_poly: init.zones.iter().map(|z| z.poly.clone()).collect(),
             zone_gateway: init.zones.iter().map(|z| z.gateway).collect(),
@@ -743,8 +757,60 @@ impl Sim {
         ends.sort_unstable();
         ends.dedup();
         sim.sig_ends = ends;
-        sim.refresh_matrix(net);
+        if !route_ext || sim.init_missing() == 0 {
+            sim.finish_init(net);
+        }
         Ok(sim)
+    }
+
+    /// Árvores iniciais prontas: cópia de fluxo livre e matriz OD (que usa o tempo livre entre zonas).
+    fn finish_init(&mut self, net: &Net) {
+        if self.params.reroute {
+            self.zone_free = self.zone_dist.iter().map(|d| d.iter().map(|&x| enc_t(x)).collect()).collect();
+        }
+        self.refresh_matrix(net);
+    }
+
+    /// Zonas cuja árvore inicial ainda falta (só com `route_ext`).
+    pub fn init_missing(&self) -> usize {
+        self.zone_dist.iter().filter(|d| d.is_empty()).count()
+    }
+
+    pub fn zone_count(&self) -> usize {
+        self.zone_ids.len()
+    }
+
+    /// Faixas-alvo da zona `z` (onde a árvore começa).
+    pub fn zone_targets(&self, z: usize) -> &[u32] {
+        &self.zone_tl[z]
+    }
+
+    /// Grafo do roteador por faixa, para uma cópia em outro worker (`LaneRouter::from_bytes`).
+    pub fn router_bytes(&self) -> Vec<u8> {
+        self.lrouter.to_bytes()
+    }
+
+    /// Árvore inicial da zona `z` calculada fora. A última que chega fecha a inicialização.
+    pub fn init_put(&mut self, net: &Net, z: usize, tree: Vec<f32>) {
+        if z >= self.zone_dist.len() || !self.zone_dist[z].is_empty() || tree.len() != self.nl {
+            return;
+        }
+        self.zone_dist[z] = tree;
+        if self.init_missing() == 0 {
+            self.finish_init(net);
+        }
+    }
+
+    /// Calcula aqui as árvores iniciais que não chegaram.
+    fn init_fill(&mut self, net: &Net) {
+        for z in 0..self.zone_dist.len() {
+            if self.zone_dist[z].is_empty() {
+                let mut d = Vec::new();
+                self.lrouter.tree(&self.zone_tl[z], &mut d);
+                self.zone_dist[z] = d;
+            }
+        }
+        self.finish_init(net);
     }
 
     // ------------------------------------------------------------------ demanda
@@ -758,7 +824,8 @@ impl Sim {
         let step = (g.len() / 8).max(1);
         let (mut sum, mut n) = (0.0, 0.0);
         for &l in g.iter().step_by(step) {
-            let d = self.dists[j][self.lanes[l as usize].dirseg as usize];
+            // tempo livre (a árvore inicial, antes do trânsito medido)
+            let d = if self.zone_free.is_empty() { self.zone_dist[j][l as usize] } else { dec_t(self.zone_free[j][l as usize]) };
             if d.is_finite() {
                 sum += d as f64;
                 n += 1.0;
@@ -825,36 +892,95 @@ impl Sim {
 
     // ------------------------------------------------------------------ rotas em tempo real
 
-    /// Recalcula, em fatias, a árvore de uma zona por vez com o tempo medido em cada trecho (média móvel do mapa de
-    /// calor). Como o veículo escolhe a conversão a cada faixa olhando a árvore atual, quem usa app desvia no caminho.
+    /// Recalcula, em lotes, as árvores das zonas com o tempo medido em cada trecho (atraso por conversão e ocupação
+    /// das faixas). Como o veículo escolhe a conversão a cada faixa olhando a árvore atual, quem usa app desvia no
+    /// caminho. O lote pedido num passo é instalado `ROUTE_LAG` passos depois; enquanto isso pode ser calculado em
+    /// outro worker (`route_take`/`route_put`).
     fn route_step(&mut self) {
         let nz = self.zone_dist.len();
         if !self.params.reroute || nz == 0 {
             return;
         }
-        if self.job.is_none() {
+        if self.route_batch.as_ref().is_some_and(|b| self.tick >= b.due) {
+            let mut b = self.route_batch.take().unwrap();
+            for (k, &z) in b.zones.iter().enumerate() {
+                // sem resposta de fora: calcula aqui, com os mesmos pesos (só mudam no próximo pedido)
+                let tree = b.trees[k].take().unwrap_or_else(|| {
+                    let mut d = Vec::new();
+                    self.lrouter.tree(&self.zone_tl[z as usize], &mut d);
+                    d
+                });
+                self.zone_dist[z as usize] = tree;
+                self.tree_at[z as usize] = self.time;
+                self.reroutes += 1;
+            }
+            self.route_out = false;
+        }
+        // árvores por janela de `ROUTE_LAG` passos (cada árvore percorre ~todas as faixas)
+        let budget = (nz * self.nl / 900).clamp(ROUTE_BUDGET_MIN, ROUTE_BUDGET_MAX) as f64;
+        let per_lag = ROUTE_LAG as f64 * budget / self.nl.max(1) as f64;
+        let (every, n) = if per_lag >= 1.0 {
+            (ROUTE_LAG, (per_lag.round() as usize).clamp(1, nz.min(ROUTE_BATCH_MAX)))
+        } else {
+            ((ROUTE_LAG as f64 / per_lag).round() as u64, 1)
+        };
+        if self.route_batch.is_none() && self.tick > 0 && self.tick % every == 0 {
             // pesos do momento: faixa em fluxo livre + atraso medido de cada conversão (o atraso já inclui a
             // lentidão no trecho de quem fez aquela manobra, então não se soma também a velocidade do trecho)
             self.refresh_live_pen();
-            // a zona com a árvore mais velha, pesada pela raiz de quem está indo para lá: minimiza a idade média da
-            // árvore que os veículos usam (zona vazia também é recalculada, só com menos frequência)
+            // as zonas com a árvore mais velha, pesadas pela raiz de quem está indo para lá: minimiza a idade média
+            // da árvore que os veículos usam (zona vazia também é recalculada, só com menos frequência)
             let score = |z: usize| (self.time - self.tree_at[z]) * (1.0 + self.to_zone[z] as f64).sqrt();
-            let z = (0..nz).fold(0, |b, z| if score(z) > score(b) { z } else { b });
-            let buf = std::mem::take(&mut self.job_buf);
-            self.job = Some(self.lrouter.job_start(z, &self.zone_tl[z], buf));
+            let mut order: Vec<usize> = (0..nz).collect();
+            order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+            let zones: Vec<u32> = order[..n].iter().map(|&z| z as u32).collect();
+            let trees = if self.route_ext {
+                vec![None; n]
+            } else {
+                zones
+                    .iter()
+                    .map(|&z| {
+                        let mut d = Vec::new();
+                        self.lrouter.tree(&self.zone_tl[z as usize], &mut d);
+                        Some(d)
+                    })
+                    .collect()
+            };
+            self.route_out = self.route_ext;
+            self.route_batch = Some(RouteBatch { zones, trees, due: self.tick + ROUTE_LAG });
         }
-        // volta completa em ~3 min simulados (900 passos), com teto de custo por passo: com muitas zonas a volta fica
-        // mais longa, e a prioridade acima mantém em dia as árvores mais usadas
-        let budget = ((nz * self.nl) / 900).clamp(2_000, ROUTE_BUDGET_MAX);
-        let mut job = self.job.take().unwrap();
-        if self.lrouter.job_run(&mut job, budget) {
-            std::mem::swap(&mut self.zone_dist[job.zone], &mut job.dist);
-            self.job_buf = job.dist;
-            self.tree_at[job.zone] = self.time;
-            self.reroutes += 1;
-        } else {
-            self.job = Some(job);
+    }
+
+    /// Lote recém-pedido para calcular fora (uma vez): zonas, penalidade de cada conversão e multiplicador de troca
+    /// de faixa. Vazio se não há pedido novo.
+    pub fn route_take(&mut self) -> Option<(Vec<u32>, &[f32], &[f32])> {
+        if !self.route_out {
+            return None;
         }
+        self.route_out = false;
+        let zones = self.route_batch.as_ref()?.zones.clone();
+        Some((zones, &self.live_pen, &self.lrouter.change_mul))
+    }
+
+    /// Árvore de uma zona do lote pendente, calculada fora.
+    pub fn route_put(&mut self, z: u32, tree: Vec<f32>) {
+        if tree.len() != self.nl {
+            return;
+        }
+        if let Some(b) = self.route_batch.as_mut() {
+            if let Some(k) = b.zones.iter().position(|&x| x == z) {
+                b.trees[k] = Some(tree);
+            }
+        }
+    }
+
+    /// O próximo passo instala um lote que ainda não chegou inteiro (quem calcula fora deve esperar antes de chamar
+    /// `step`, senão as que faltam são calculadas aqui) ou ainda faltam árvores iniciais.
+    pub fn route_wait(&self) -> bool {
+        if self.zone_dist.iter().any(|d| d.is_empty()) {
+            return true;
+        }
+        self.route_batch.as_ref().is_some_and(|b| self.tick >= b.due && b.trees.iter().any(|t| t.is_none()))
     }
 
     /// Idade média (s) da árvore de rotas usada pelos veículos em circulação (cada um pesa a da sua zona de destino).
@@ -2078,6 +2204,9 @@ impl Sim {
                     _t = std::time::Instant::now();
                 }
             };
+        }
+        if self.init_missing() > 0 {
+            self.init_fill(net);
         }
         let dt = self.dt;
         if self.time >= self.next_matrix_at {

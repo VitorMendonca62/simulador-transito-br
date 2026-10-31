@@ -86,6 +86,26 @@ pub fn point_in_poly(p: V2, poly: &[[f64; 2]]) -> bool {
     inside
 }
 
+/// Teste de ponto no polígono com o retângulo envolvente na frente: com centenas de zonas e dezenas de milhares
+/// de nós, quase todo ponto cai fora do retângulo e não percorre as arestas. Mesmo resultado de `point_in_poly`.
+pub struct InPoly<'a> {
+    poly: &'a [[f64; 2]],
+    bb: [f64; 4],
+}
+
+impl<'a> InPoly<'a> {
+    pub fn new(poly: &'a [[f64; 2]]) -> InPoly<'a> {
+        let mut bb = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for p in poly {
+            bb = [bb[0].min(p[0]), bb[1].min(p[1]), bb[2].max(p[0]), bb[3].max(p[1])];
+        }
+        InPoly { poly, bb }
+    }
+    pub fn contains(&self, p: V2) -> bool {
+        p[0] >= self.bb[0] && p[0] <= self.bb[2] && p[1] >= self.bb[1] && p[1] <= self.bb[3] && point_in_poly(p, self.poly)
+    }
+}
+
 pub fn centroid(poly: &[[f64; 2]]) -> [f64; 2] {
     if poly.is_empty() {
         return [0.0, 0.0];
@@ -151,17 +171,19 @@ pub fn gravity(o: &[f64], a: &[f64], t: &[Vec<f64>], beta: f64, intrazone: bool,
 pub fn resolve(net: &Net, p: &Payload, travel_min: &dyn Fn(usize, usize, &[[f64; 2]; 2]) -> f64) -> Resolved {
     let n = p.zones.len();
     let mut zones = Vec::with_capacity(n);
+    // ponto médio e comprimento de cada trecho, uma vez para todas as zonas
+    let mids: Vec<(V2, f64)> = net
+        .segs
+        .iter()
+        .map(|s| {
+            let len = s.poly.length();
+            (s.poly.at(len / 2.0).0, len)
+        })
+        .collect();
     for z in &p.zones {
-        let nodes = net.nodes.iter().filter(|nd| point_in_poly(nd.pos, &z.poly)).count();
-        let road_m: f64 = net
-            .segs
-            .iter()
-            .filter(|s| {
-                let mid = s.poly.at(s.poly.length() / 2.0).0;
-                point_in_poly(mid, &z.poly)
-            })
-            .map(|s| s.poly.length())
-            .sum();
+        let ip = InPoly::new(&z.poly);
+        let nodes = net.nodes.iter().filter(|nd| ip.contains(nd.pos)).count();
+        let road_m: f64 = mids.iter().filter(|(mid, _)| ip.contains(*mid)).map(|(_, len)| len).sum();
         let g = z.gen * profile_at(&z.profile, p.params.hour);
         let warning = if z.poly.len() < 3 {
             Some("polígono incompleto".to_string())

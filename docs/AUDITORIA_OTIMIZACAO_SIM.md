@@ -256,6 +256,13 @@ Tudo dentro da faixa entre sementes.
   8,80 → 8,70 ms (−1 %); 256 zonas: inconclusivo (o próprio HEAD variou 7,2–10,2 ms). Quase todo o ganho da
   versão inicial vinha justamente de quem estava cruzando a linha.
 
+**2026-10-31: D3 implementado** (versão 2, fase 2, passo 2). As árvores de rotas saíram do passo: lotes com latência
+fixa de 15 passos, calculados por 1–4 workers de rotas (ver `CONTEXT.md`, "Rotas em tempo real"). Junto: init com as
+árvores em paralelo, sem o roteador por trecho (só servia ao tempo entre zonas da matriz) e com pré-filtro por retângulo
+nos testes de ponto no polígono (idêntico). Navegador, Recife com OD 2018 + CTTU a 30×: OD 100 % 10,0 → 7,2 ms/passo
+(15,5× → 21,3×), OD 15 % 4,0 → 2,0 ms, 1º quadro 3,0 s → 0,6 s. Nativo (rotas no próprio passo): `Sim::new` com 256
+zonas 3,9 → 1,9 s. `recife_behavior` 6 sementes pareadas: concluídos 427 → 437, atraso 40,7 → 41,7 veíc·h (ruído).
+
 ## 6. Como medir (para repetir antes e depois)
 
 - Passo e fases: `PERF_OSM=~/Downloads/mapa-recife-novo.osm cargo test --release perf_sim -- --ignored --nocapture`

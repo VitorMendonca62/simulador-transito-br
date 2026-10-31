@@ -63,6 +63,19 @@ Nativo: `--release`, `taskset -c 2`, 2 rodadas (iguais).
 - **Passo 1 — wasm-opt -O3 (A7)**, feito: `.wasm` 1.076 → 896 KB (−17 %). Passo no navegador sem ganho mensurável
   (OD 100 %: 10,0 → 10,1 ms; OD 15 %: 4,0 → 3,8 ms, dentro do ruído). Mantido pelo download menor. O deploy
   (GitHub Actions) baixa o binaryen pelo wasm-pack.
+- **Passo 2 — rotas fora do worker da simulação (D3) + init**, feito. Lotes de árvores com latência fixa de 15 passos
+  (resultado igual com ou sem workers, teste `external_route_trees_match_local`), 1–4 workers de rotas, árvores
+  iniciais em paralelo, matriz OD com o tempo livre das árvores por faixa (sai o roteador por trecho) e pré-filtro por
+  retângulo nos testes de ponto no polígono.
+  | Medida | Base | Depois |
+  |---|---|---|
+  | ms/passo, OD 100 % (~10 mil veíc.) | 10,0 ms | **7,2 ms** (−28 %) |
+  | Velocidade que acompanha, OD 100 % | 15,5× | **21,3×** |
+  | ms/passo, OD 15 % (~1,2 mil veíc.) | 4,0 ms | **2,0 ms** (−50 %) |
+  | 1º quadro da simulação, Recife | 3,0–4,5 s | **0,6 s** |
+  | `Sim::new` nativo, 256 zonas (sem workers) | 3,9 s | 1,9 s |
+  | `recife_behavior`, 6 sementes pareadas | concluídos 427, atraso 40,7 veíc·h | 437, 41,7 veíc·h (ruído) |
+  O `sim %` da barra de desempenho agora não inclui o tempo dos workers de rotas.
 
 ### 2.1 Simulação (itens da `AUDITORIA_OTIMIZACAO_SIM.md` ainda pendentes)
 - **A7** — `wasm-opt -O3` (binaryen) no build. Ganho esperado 5–15 %, resultado idêntico.

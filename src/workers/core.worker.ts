@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import init, { import_osm, import_osm_signals, type Network } from '../../core/pkg/core.js'
-import type { NetworkData, NetworkMeta, SimStats, TileData, TileUpdate, WorkerIn, WorkerOut } from '../model/types'
+import type { NetworkData, NetworkMeta, RouterIn, RouterOut, SimStats, TileData, TileUpdate, WorkerIn, WorkerOut } from '../model/types'
 
 let ready: Promise<unknown> | null = null
 // A rede fica viva no worker (fases futuras: edição e simulação rodam aqui).
@@ -149,6 +149,99 @@ let busyMs = 0
 let wasmMem: WebAssembly.Memory | null = null
 self.setInterval(() => postSim({ type: 'perf', busyMs, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }), 1000)
 
+// ------------------------------------------------------------------ rotas em outros workers
+/**
+ * Workers auxiliares (`router.worker.ts`) com uma cópia do roteador por faixa: calculam as árvores iniciais das zonas
+ * em paralelo e os lotes das rotas em tempo real, fora do passo da simulação. O lote pedido num passo é instalado
+ * um número fixo de passos depois; se ainda não chegou, a simulação espera (o resultado não depende da máquina).
+ * `null` = indisponíveis: a simulação calcula tudo no próprio passo.
+ */
+let routers: Worker[] | null = null
+let routersFailed = false
+/** simulação atual (respostas de uma anterior são descartadas) */
+let routerGen = 0
+let routerNext = 0
+/** árvores iniciais ainda por chegar (0 = pronta) */
+let initPending = 0
+
+function getRouters(): Worker[] | null {
+  if (routers || routersFailed) return routers
+  try {
+    const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 2))
+    routers = Array.from({ length: n }, () => {
+      const w = new Worker(new URL('./router.worker.ts', import.meta.url), { type: 'module' })
+      w.onmessage = onRouter
+      w.onerror = (e) => dropRouters(e.message || 'falha ao carregar o worker de rotas')
+      return w
+    })
+  } catch (e) {
+    dropRouters(e instanceof Error ? e.message : String(e))
+  }
+  return routers
+}
+
+/** Sem workers de rotas: o que faltar é calculado no próprio passo da simulação. */
+function dropRouters(why: string) {
+  console.warn('rotas no próprio worker da simulação:', why)
+  routers?.forEach((w) => w.terminate())
+  routers = null
+  routersFailed = true
+  if (initPending > 0) {
+    initPending = 0
+    postSim({ type: 'simReady' })
+  }
+}
+
+const postRouter = (w: Worker, m: RouterIn, t: Transferable[] = []) => w.postMessage(m, t)
+
+function onRouter(ev: MessageEvent<RouterOut>) {
+  const m = ev.data
+  if (m.gen !== routerGen || !current?.sim_active()) return
+  if (m.type === 'error') return dropRouters(m.message)
+  if (m.init) {
+    current.sim_init_put(m.zone, m.dist)
+    if (initPending > 0 && --initPending === 0) postSim({ type: 'simReady' })
+  } else current.sim_route_put(m.zone, m.dist)
+}
+
+/** Entrega aos workers de rotas o lote que a simulação acabou de pedir (zonas divididas entre eles). */
+function sendRouteBatch(net: Network) {
+  const zones = net.sim_route_take()
+  if (!zones.length || !routers) return
+  const pen = net.sim_route_pen()
+  const cm = net.sim_route_cm()
+  const parts = new Map<Worker, { zone: number; targets: Uint32Array }[]>()
+  for (const z of zones) {
+    const w = routers[routerNext++ % routers.length]
+    parts.set(w, [...(parts.get(w) ?? []), { zone: z, targets: net.sim_zone_targets(z) }])
+  }
+  for (const [w, list] of parts) {
+    const p = pen.slice()
+    const c = cm.slice()
+    postRouter(w, { type: 'trees', gen: routerGen, init: false, pen: p, cm: c, zones: list }, [p.buffer, c.buffer])
+  }
+}
+
+/** Inicia a simulação com as árvores iniciais calculadas em paralelo pelos workers de rotas. */
+function simInitExt(net: Network, json: string): boolean {
+  const pool = getRouters()
+  if (!pool) return false
+  net.sim_init_ext(json)
+  routerGen++
+  const bytes = net.sim_router_bytes()
+  for (const w of pool) {
+    const b = bytes.slice()
+    postRouter(w, { type: 'graph', gen: routerGen, bytes: b }, [b.buffer])
+  }
+  const nz = net.sim_zone_count()
+  const parts: { zone: number; targets: Uint32Array }[][] = pool.map(() => [])
+  for (let z = 0; z < nz; z++) parts[z % pool.length].push({ zone: z, targets: net.sim_zone_targets(z) })
+  initPending = net.sim_init_missing()
+  pool.forEach((w, k) => parts[k].length && postRouter(w, { type: 'trees', gen: routerGen, init: true, zones: parts[k] }))
+  if (initPending === 0) postSim({ type: 'simReady' })
+  return true
+}
+
 /** Avança a simulação por fatias de tempo real: passos fixos de 0,2 s, no máximo ~10 ms por fatia. */
 function simLoop() {
   const t0 = performance.now()
@@ -171,7 +264,10 @@ function simSlice() {
   const t0 = performance.now()
   let ticks = 0
   while (simCarry >= SIM_DT && performance.now() - t0 < budget) {
+    // lote de rotas ainda nos workers: espera (sem eles, o próprio passo calcula)
+    if (routers && current.sim_route_wait()) break
     current.sim_step(1)
+    sendRouteBatch(current)
     simCarry -= SIM_DT
     ticks++
   }
@@ -244,9 +340,13 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     if (msg.type === 'simInit') {
       try {
         if (!current) throw new Error('Nenhum mapa carregado')
-        current.sim_init(msg.json)
         simRunning = false
-        postSim({ type: 'simReady' })
+        routerGen++
+        initPending = 0
+        if (!simInitExt(current, msg.json)) {
+          current.sim_init(msg.json)
+          postSim({ type: 'simReady' })
+        }
       } catch (e) {
         postSim({ type: 'simReady', error: e instanceof Error ? e.message : String(e) })
       }
@@ -306,6 +406,8 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     if (msg.type === 'simStop') {
       simRunning = false
       simInFlight = 0
+      routerGen++
+      initPending = 0
       current?.sim_stop()
       return
     }

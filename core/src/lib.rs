@@ -32,6 +32,8 @@ pub struct Network {
     lazy: bool,
     /// semáforos de base externa (nó OSM -> id externo); `None` = semáforos do próprio OSM
     ext_signals: Option<extsig::ExtSignals>,
+    /// pesos do último lote de rotas tomado (`sim_route_take`), entregues por `sim_route_pen`/`sim_route_cm`
+    route_w: (Vec<f32>, Vec<f32>),
 }
 
 fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, ext: Option<&extsig::ExtSignals>) -> Result<Net, String> {
@@ -51,7 +53,7 @@ fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal]) -> Res
     let net = build_parts(&raw, &base, &edits, lazy, ext_signals.as_ref())?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
-    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals })
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, route_w: Default::default() })
 }
 
 /// Rede com conexões por nó sob demanda (como no navegador).
@@ -113,10 +115,15 @@ impl Network {
 
     /// Inicia a simulação (JSON: `{"zones":[…],"params":{…}}`).
     pub fn start_sim(&mut self, json: &str) -> Result<(), String> {
+        self.start_sim_ext(json, false)
+    }
+
+    /// Como `start_sim`; com `route_ext`, as árvores de rotas ficam para outro worker (ver `Sim::new_ext`).
+    pub fn start_sim_ext(&mut self, json: &str, route_ext: bool) -> Result<(), String> {
         self.ensure_conns();
         let mut init: sim::SimInit = serde_json::from_str(json).map_err(|e| format!("simulação inválida: {e}"))?;
         init.prios = self.edits.prios.clone();
-        self.sim = Some(sim::Sim::new(&self.net, &init)?);
+        self.sim = Some(sim::Sim::new_ext(&self.net, &init, route_ext)?);
         Ok(())
     }
 
@@ -125,6 +132,26 @@ impl Network {
         if self.net.conns.is_empty() && !self.net.nodes.is_empty() {
             conn::build_connections(&mut self.net, &self.raw, &self.edits);
         }
+    }
+}
+
+/// Cópia do roteador por faixa num worker auxiliar: calcula as árvores das zonas para a simulação.
+#[wasm_bindgen]
+pub struct RouterHandle(sim::route::LaneRouter);
+
+#[wasm_bindgen]
+impl RouterHandle {
+    pub fn from_bytes(bytes: &[u8]) -> Result<RouterHandle, JsError> {
+        sim::route::LaneRouter::from_bytes(bytes).map(RouterHandle).ok_or_else(|| JsError::new("roteador inválido"))
+    }
+    pub fn set_weights(&mut self, pen: &[f32], change_mul: &[f32]) {
+        self.0.set_weights(pen, change_mul);
+    }
+    /// Árvore (tempo de cada faixa até a zona) a partir das faixas-alvo.
+    pub fn tree(&self, targets: &[u32]) -> Vec<f32> {
+        let mut d = Vec::new();
+        self.0.tree(targets, &mut d);
+        d
     }
 }
 
@@ -280,6 +307,58 @@ impl Network {
     // --- simulação
     pub fn sim_init(&mut self, json: &str) -> Result<(), JsError> {
         self.start_sim(json).map_err(|e| JsError::new(&e))
+    }
+    /// Inicia com as árvores de rotas calculadas por outros workers (`RouterHandle`): as iniciais chegam por
+    /// `sim_init_put`, os lotes em tempo real saem por `sim_route_take` e voltam por `sim_route_put`.
+    pub fn sim_init_ext(&mut self, json: &str) -> Result<(), JsError> {
+        self.start_sim_ext(json, true).map_err(|e| JsError::new(&e))
+    }
+    /// Grafo do roteador por faixa (bytes para `RouterHandle::from_bytes`).
+    pub fn sim_router_bytes(&self) -> Vec<u8> {
+        self.sim.as_ref().map_or(Vec::new(), |s| s.router_bytes())
+    }
+    pub fn sim_zone_count(&self) -> u32 {
+        self.sim.as_ref().map_or(0, |s| s.zone_count() as u32)
+    }
+    /// Faixas-alvo da zona `z` (início da árvore dela).
+    pub fn sim_zone_targets(&self, z: u32) -> Vec<u32> {
+        self.sim.as_ref().map_or(Vec::new(), |s| s.zone_targets(z as usize).to_vec())
+    }
+    pub fn sim_init_put(&mut self, z: u32, tree: Vec<f32>) {
+        if let Some(s) = self.sim.as_mut() {
+            s.init_put(&self.net, z as usize, tree);
+        }
+    }
+    pub fn sim_init_missing(&self) -> u32 {
+        self.sim.as_ref().map_or(0, |s| s.init_missing() as u32)
+    }
+    /// Zonas do lote recém-pedido (vazio se nenhum); os pesos vêm em seguida por `sim_route_pen`/`sim_route_cm`.
+    pub fn sim_route_take(&mut self) -> Vec<u32> {
+        let Some(s) = self.sim.as_mut() else { return Vec::new() };
+        match s.route_take() {
+            Some((zones, pen, cm)) => {
+                self.route_w = (pen.to_vec(), cm.to_vec());
+                zones
+            }
+            None => Vec::new(),
+        }
+    }
+    /// Penalidade de cada conversão no lote tomado por último.
+    pub fn sim_route_pen(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.route_w.0)
+    }
+    /// Multiplicador da troca de faixa no lote tomado por último.
+    pub fn sim_route_cm(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.route_w.1)
+    }
+    pub fn sim_route_put(&mut self, z: u32, tree: Vec<f32>) {
+        if let Some(s) = self.sim.as_mut() {
+            s.route_put(z, tree);
+        }
+    }
+    /// O próximo passo depende de árvores que ainda não chegaram (sem elas, `sim_step` as calcula aqui).
+    pub fn sim_route_wait(&self) -> bool {
+        self.sim.as_ref().is_some_and(|s| s.route_wait())
     }
     pub fn sim_step(&mut self, ticks: u32) {
         if let Some(s) = self.sim.as_mut() {
