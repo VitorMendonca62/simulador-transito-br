@@ -329,7 +329,17 @@ export const useStore = create<State>((set, get) => {
     }
   }
 
-  const run = async (buffer: ArrayBuffer, name: string, persist: boolean) => {
+  /** Aviso de quais semáforos ficaram depois de pedir `src` (a CTTU só cobre o Recife). */
+  const signalNotice = (src: SignalSource, got: SignalSource, data: NetworkData) => {
+    if (src === 'cttu' && got !== 'cttu') get().notify('Nenhum semáforo da CTTU cai neste mapa (a base cobre só o Recife). Ficam os do OSM.')
+    else if (got === 'cttu') {
+      const ctrl = new Set(data.meta.signals.map((s) => s.ext).filter((x) => x != null)).size
+      get().notify(`${ctrl} semáforos da CTTU importados (${data.meta.signals.length} nós). Os do OSM foram removidos.`)
+    } else get().notify(`Semáforos do OSM restaurados (${data.meta.signals.length}).`)
+  }
+
+  /** Importa o mapa; numa importação nova (`persist`), já com os semáforos de `signals` (sem remontar depois). */
+  const run = async (buffer: ArrayBuffer, name: string, persist: boolean, signals: SignalSource = 'osm') => {
     set({ loading: true, error: null })
     try {
       if (persist) {
@@ -346,7 +356,7 @@ export const useStore = create<State>((set, get) => {
         odRecord = {}
         odImportRecord = null
         odHourly = undefined
-        sigSourceRecord = 'osm'
+        sigSourceRecord = signals
         set({ selectedZone: null, demand: null })
       } else {
         connRecord = await loadConnEdits()
@@ -366,7 +376,14 @@ export const useStore = create<State>((set, get) => {
         history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
       }
       const { data, ms } = await importMap(buffer, name, editPayload())
-      if (persist) await saveMap(name, buffer)
+      if (persist) {
+        await saveMap(name, buffer)
+        if (signals !== 'osm') {
+          sigSourceRecord = data.meta.signalSource === 'ext' ? 'cttu' : 'osm'
+          saveSignalSource(sigSourceRecord)
+          signalNotice(signals, sigSourceRecord, data)
+        }
+      }
       set({ signalSource: sigSourceRecord })
       set({ fileName: name, importMs: ms, loading: false, selected: null, selectedSeg: null })
       install(data, { fit: true })
@@ -594,11 +611,7 @@ export const useStore = create<State>((set, get) => {
         saveSignalSource(got)
         install(data, { fit: false })
         set({ signalSource: got })
-        if (src === 'cttu' && got !== 'cttu') get().notify('Nenhum semáforo da CTTU cai neste mapa (a base cobre só o Recife). Ficam os do OSM.')
-        else if (got === 'cttu') {
-          const ctrl = new Set(data.meta.signals.map((s) => s.ext).filter((x) => x != null)).size
-          get().notify(`${ctrl} semáforos da CTTU importados (${data.meta.signals.length} nós). Os do OSM foram removidos.`)
-        } else get().notify(`Semáforos do OSM restaurados (${data.meta.signals.length}).`)
+        signalNotice(src, got, data)
       } catch (e) {
         sigSourceRecord = prev
         set({ error: e instanceof Error ? e.message : String(e) })
@@ -735,13 +748,12 @@ export const useStore = create<State>((set, get) => {
         const raw = new Uint8Array(await res.arrayBuffer())
         const gz = raw[0] === 0x1f && raw[1] === 0x8b
         const buf = gz ? await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : raw.buffer
-        await run(buf, name, true)
+        await run(buf, name, true, signals ? 'cttu' : 'osm')
       } catch (e) {
         set({ loading: false, error: `Não foi possível carregar ${name}: ${e instanceof Error ? e.message : e}` })
         return
       }
       if (!get().data) return
-      if (signals) await get().setSignalSource('cttu')
       if (zones) await get().importOd2018({ gateways: true })
     },
 

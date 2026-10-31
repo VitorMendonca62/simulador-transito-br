@@ -76,6 +76,15 @@ Nativo: `--release`, `taskset -c 2`, 2 rodadas (iguais).
   | `Sim::new` nativo, 256 zonas (sem workers) | 3,9 s | 1,9 s |
   | `recife_behavior`, 6 sementes pareadas | concluídos 427, atraso 40,7 veíc·h | 437, 41,7 veíc·h (ruído) |
   O `sim %` da barra de desempenho agora não inclui o tempo dos workers de rotas.
+- **Passo 3 — quadro de veículos menor**, medido e descartado: dos 1,81 ms do `snapshot` com 19 mil veículos, 1,61 ms
+  (89 %) são o cálculo da posição de cada veículo; compactar de 24 para 12 bytes pouparia ~0,2 ms × 15 quadros/s
+  (~0,3 % de CPU). Mandar só os visíveis também rende pouco com o Recife inteiro na tela.
+- **Passo 4 — abertura e edição**:
+  - Abrir o Recife com a CTTU importava o mapa com os semáforos do OSM e remontava tudo com os da CTTU (~1 s a mais).
+    Agora a 1ª importação já usa a CTTU. Abrir com OD + CTTU: **2,2–2,75 s → ~1,6 s** (OSM 0,9 s, OD 0,3 s).
+  - Edição de faixas no Recife: **~210 ms** = debounce 40 ms + worker 133 ms (reconstrução completa `Net::build`
+    ~84 ms nativo, malhas dos ladrilhos sujos, cópia dos arrays da rede) + instalação no mapa 25 ms. A meta de 100 ms
+    só sai com a reconstrução incremental (M2b), que fica por último na fase.
 
 ### 2.1 Simulação (itens da `AUDITORIA_OTIMIZACAO_SIM.md` ainda pendentes)
 - **A7** — `wasm-opt -O3` (binaryen) no build. Ganho esperado 5–15 %, resultado idêntico.
