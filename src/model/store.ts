@@ -107,6 +107,8 @@ interface State {
     /** veículo selecionado: rota restante até o destino */
     track: { id: number; alive: boolean; zone: number; kind: number; v: number; wait: number; info: VehicleInfo | null } | null
     follow: boolean
+    /** velocidade efetiva (s simulados por s real) no último segundo; null antes da 1ª medida */
+    rate: number | null
   }
   setFollow: (on: boolean) => void
   pickVehicle: (id: number | null) => void
@@ -254,6 +256,9 @@ const refreshApproaches = async (node: number) => {
   const list = await fetchApproaches(node)
   if (useStore.getState().selected === node) viewRef.current?.setApproaches(list, node)
 }
+
+/** relógio simulado e real na última medida da velocidade efetiva (zerado ao iniciar, pausar ou mudar a velocidade) */
+let rateAt: { sim: number; wall: number } | null = null
 
 export const useStore = create<State>((set, get) => {
   const persistDemand = () => {
@@ -472,7 +477,7 @@ export const useStore = create<State>((set, get) => {
     signalsImporting: false,
     selectedZone: null,
     demand: null,
-    sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false },
+    sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false, rate: null },
 
     setHeat: (h) => {
       set((s) => ({ sim: { ...s.sim, heat: h, replay: null } }))
@@ -510,7 +515,8 @@ export const useStore = create<State>((set, get) => {
         })
         simHeatKind(get().sim.heat === 'off' ? -1 : get().sim.heat === 'speed' ? 0 : 1)
         simRun(true, get().sim.speed)
-        set((s) => ({ sim: { ...s.sim, phase: 'running', starting: false, stats: null, replay: null, series: null, histLen: 0 } }))
+        rateAt = null
+        set((s) => ({ sim: { ...s.sim, phase: 'running', starting: false, stats: null, replay: null, series: null, histLen: 0, rate: null } }))
       } catch (e) {
         set((s) => ({ sim: { ...s.sim, starting: false }, error: e instanceof Error ? e.message : String(e) }))
       }
@@ -520,12 +526,14 @@ export const useStore = create<State>((set, get) => {
       if (sim.phase === 'idle') return void get().simStart()
       const run = sim.phase !== 'running'
       simRun(run, sim.speed)
-      set({ sim: { ...sim, phase: run ? 'running' : 'paused' } })
+      rateAt = null
+      set({ sim: { ...sim, phase: run ? 'running' : 'paused', rate: null } })
     },
     simSpeed: (s) => {
       const { sim } = get()
       if (sim.phase !== 'idle') simRun(sim.phase === 'running', s)
-      set({ sim: { ...sim, speed: s } })
+      rateAt = null
+      set({ sim: { ...sim, speed: s, rate: null } })
     },
     simReset: () => {
       simStop()
@@ -957,7 +965,15 @@ onSim((m) => {
     viewRef.current?.setSimClock(m.time)
     const cur = st.getState().sim
     // estatísticas e séries só mudam a ~1 Hz (o worker as manda junto com `series`): não re-renderiza a UI a cada quadro
-    if (m.series || !cur.stats) st.setState((s) => ({ sim: { ...s.sim, stats: m.stats, series: m.series ?? s.sim.series, histLen: m.histLen ?? s.sim.histLen } }))
+    if (m.series || !cur.stats) {
+      // velocidade efetiva: só com a simulação rodando, em janelas de ~1 s
+      const now = performance.now()
+      let rate = cur.rate
+      if (cur.phase !== 'running' || !rateAt || m.time < rateAt.sim) rate = null
+      else if (now > rateAt.wall + 500) rate = (m.time - rateAt.sim) / ((now - rateAt.wall) / 1000)
+      rateAt = { sim: m.time, wall: now }
+      st.setState((s) => ({ sim: { ...s.sim, stats: m.stats, series: m.series ?? s.sim.series, histLen: m.histLen ?? s.sim.histLen, rate } }))
+    }
     if (m.track != null && cur.track) {
       const t = JSON.parse(m.track) as { id?: number; alive: boolean; zone: number; kind: number; v: number; wait: number; pts: number[]; info?: VehicleInfo }
       if (t.id == null || t.id === cur.track.id) {
@@ -972,7 +988,8 @@ onSim((m) => {
     viewRef.current?.setVehicles(null)
     viewRef.current?.setSimClock(null)
     viewRef.current?.setTrack(null, null)
-    st.setState((s) => ({ sim: { ...s.sim, phase: 'idle', stats: null, replay: null, track: null } }))
+    rateAt = null
+    st.setState((s) => ({ sim: { ...s.sim, phase: 'idle', stats: null, replay: null, track: null, rate: null } }))
     if (st.getState().sim.heat === 'off') viewRef.current?.setHeat(null)
     st.getState().notify(`Simulação encerrada: ${m.reason}.`)
   }

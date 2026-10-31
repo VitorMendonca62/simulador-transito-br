@@ -34,6 +34,11 @@ export function SimPanel() {
           ))}
         </select>
       </div>
+      {running && sim.rate != null && sim.rate < sim.speed * 0.85 && (
+        <p className="hint" role="status">
+          Rodando a {sim.rate.toFixed(sim.rate < 10 ? 1 : 0)}×: o computador não acompanha {sim.speed}× com esta rede e esta demanda.
+        </p>
+      )}
       {sim.phase === 'idle' && (
         <p className="hint">
           {zones.length < 2 ? 'Desenhe zonas no modo Zonas para gerar viagens.' : `Inicia às ${String(Math.floor(demandParams.hour)).padStart(2, '0')}:${String(Math.round((demandParams.hour % 1) * 60)).padStart(2, '0')} com ${zones.length} zonas.`}

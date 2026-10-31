@@ -260,6 +260,7 @@ function simSlice() {
   const now = performance.now()
   simCarry += ((now - simLast) / 1000) * simSpeed
   simLast = now
+  // fatias curtas: as árvores dos workers de rotas só chegam entre uma fatia e outra (16 ms rendeu menos que 10)
   const budget = 10
   const t0 = performance.now()
   let ticks = 0

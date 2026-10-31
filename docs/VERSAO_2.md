@@ -85,6 +85,11 @@ Nativo: `--release`, `taskset -c 2`, 2 rodadas (iguais).
   - Edição de faixas no Recife: **~210 ms** = debounce 40 ms + worker 133 ms (reconstrução completa `Net::build`
     ~84 ms nativo, malhas dos ladrilhos sujos, cópia dos arrays da rede) + instalação no mapa 25 ms. A meta de 100 ms
     só sai com a reconstrução incremental (M2b), que fica por último na fase.
+- **Passo 5 — velocidade efetiva (E4)**, feito: o painel da simulação mostra "Rodando a N×: o computador não
+  acompanha M×" quando a velocidade real fica abaixo de 85 % da pedida (medida a ~1 Hz, zerada ao iniciar, pausar ou
+  mudar a velocidade). Fatia do worker de 16 ms testada e descartada (20,2× contra 21,3× com 10 ms). **Pendente:**
+  perfilar o thread principal com o painel visível (no painel oculto do teste o mapa desenhava a <1 fps, sem medida
+  confiável) e o M2b.
 
 ### 2.1 Simulação (itens da `AUDITORIA_OTIMIZACAO_SIM.md` ainda pendentes)
 - **A7** — `wasm-opt -O3` (binaryen) no build. Ganho esperado 5–15 %, resultado idêntico.
