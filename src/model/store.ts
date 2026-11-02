@@ -423,7 +423,8 @@ export const useStore = create<State>((set, get) => {
   }
   const scheduleRebuild = () => {
     clearTimeout(rebuildTimer)
-    rebuildTimer = window.setTimeout(() => void rebuild(), 40)
+    // sem espera: junta as edições do mesmo evento; cliques durante uma reconstrução viram uma só (`rebuildPending`)
+    rebuildTimer = window.setTimeout(() => void rebuild(), 0)
     saveSegEdits({ ...segRecord })
     saveSigConfigs({ ...sigRecord })
     saveRoads([...roadRecord], [...removedRecord])

@@ -89,7 +89,19 @@ Nativo: `--release`, `taskset -c 2`, 2 rodadas (iguais).
   acompanha M×" quando a velocidade real fica abaixo de 85 % da pedida (medida a ~1 Hz, zerada ao iniciar, pausar ou
   mudar a velocidade). Fatia do worker de 16 ms testada e descartada (20,2× contra 21,3× com 10 ms). **Pendente:**
   perfilar o thread principal com o painel visível (no painel oculto do teste o mapa desenhava a <1 fps, sem medida
-  confiável) e o M2b.
+  confiável).
+- **M2b — edição sem reconstruir a rede**, feito (2026-11-02), no caso que a interface mais usa: edições que só mudam
+  o perfil de trechos existentes (nº de faixas, largura, ônibus, mão única). `Net::update_segs` refaz o perfil dos
+  trechos editados, os recuos dos nós deles e a numeração das faixas; `render::update_tiles_partial` recalcula a
+  assinatura só desses trechos e nós. Inverter sentido, via nova, demolição e ligar/desligar semáforo continuam pela
+  reconstrução completa. Teste `fast_segment_edits_match_full_rebuild` (e `fast_segment_edits_recife` com
+  `PERF_OSM`): rede e ladrilhos idênticos à reconstrução completa. Junto: `meta_json` serializado por structs (era
+  ~21 ms por edição no Recife) e sem debounce na reconstrução (as edições durante uma reconstrução já viram uma só).
+  | Edição de faixas no Recife | Antes | Depois |
+  |---|---|---|
+  | `set_edits` nativo | 97,6 ms | 13,5 ms |
+  | Worker (edição + cópia dos arrays) | 133 ms | ~39 ms |
+  | Clique → mapa atualizado | ~210 ms | **~95 ms** |
 
 ### 2.1 Simulação (itens da `AUDITORIA_OTIMIZACAO_SIM.md` ainda pendentes)
 - **A7** — `wasm-opt -O3` (binaryen) no build. Ganho esperado 5–15 %, resultado idêntico.
@@ -236,7 +248,7 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | Fase | Status |
 |---|---|
 | 1 — Remover A/B | concluída (2026-10-31) |
-| 2 — Desempenho | pendente |
+| 2 — Desempenho | concluída (2026-11-02); falta só perfilar o desenho do mapa com o painel visível |
 | 3 — Dados de ônibus | pendente |
 | 4 — Encaixe na rede | pendente |
 | 5 — Simulação de ônibus | pendente |

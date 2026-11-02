@@ -101,7 +101,7 @@ fn seg_hash(net: &Net, s: &Seg) -> u64 {
     h.0
 }
 
-fn node_hash(net: &Net, ni: usize, seg_h: &[u64]) -> u64 {
+fn node_hash(net: &Net, ni: usize, seg_h: &dyn Fn(usize) -> u64) -> u64 {
     let n = &net.nodes[ni];
     let mut h = Fnv::new();
     h.u(n.osm_id as u64);
@@ -110,9 +110,13 @@ fn node_hash(net: &Net, ni: usize, seg_h: &[u64]) -> u64 {
     h.u(n.signal as u64 | (n.crossing as u64) << 1);
     for &e in &n.ends {
         h.u(e as u64);
-        h.u(seg_h[(e >> 1) as usize]);
+        h.u(seg_h((e >> 1) as usize));
     }
     h.0
+}
+
+fn seg_tile(s: &Seg) -> u32 {
+    tile_of(s.poly.at(s.poly.length() / 2.0).0)
 }
 
 fn emit_seg(net: &Net, s: &Seg, m: &mut TileMesh) {
@@ -271,8 +275,8 @@ impl TileSet {
 /// Atualiza os ladrilhos para a rede `net`. Com `prev = None` tudo é gerado.
 pub fn update_tiles(net: &Net, prev: Option<TileSet>) -> (TileSet, TileDelta) {
     let seg_h: Vec<u64> = net.segs.iter().map(|s| seg_hash(net, s)).collect();
-    let seg_tile: Vec<u32> = net.segs.iter().map(|s| tile_of(s.poly.at(s.poly.length() / 2.0).0)).collect();
-    let node_h: Vec<u64> = (0..net.nodes.len()).map(|i| node_hash(net, i, &seg_h)).collect();
+    let seg_tile: Vec<u32> = net.segs.iter().map(seg_tile).collect();
+    let node_h: Vec<u64> = (0..net.nodes.len()).map(|i| node_hash(net, i, &|si| seg_h[si])).collect();
     let node_tile: Vec<u32> = net.nodes.iter().map(|n| tile_of(n.pos)).collect();
 
     let mut set = prev.unwrap_or_default();
@@ -326,8 +330,65 @@ pub fn update_tiles(net: &Net, prev: Option<TileSet>) -> (TileSet, TileDelta) {
             buckets.entry(*t).or_default().1.push(i);
         }
     }
+    set.seg_sig = new_seg_sig;
+    set.node_sig = new_node_sig;
+    let delta = emit_dirty(net, &mut set, &dirty, buckets);
+    (set, delta)
+}
+
+/// Como `update_tiles`, mas só os trechos `segs` (e os nós nas pontas deles) podem ter mudado, com os mesmos trechos
+/// e nós de antes (caminho rápido da edição: ver `Net::update_segs`). Não percorre a rede inteira.
+pub fn update_tiles_partial(net: &Net, mut set: TileSet, segs: &[usize]) -> (TileSet, TileDelta) {
+    let mut dirty: std::collections::BTreeSet<u32> = Default::default();
+    let mut nodes: Vec<usize> = Vec::new();
+    for &si in segs {
+        let s = &net.segs[si];
+        let sig = (seg_hash(net, s), seg_tile(s));
+        if let Some(old) = set.seg_sig.insert(s.key, sig) {
+            if old != sig {
+                dirty.extend([old.1, sig.1]);
+            }
+        } else {
+            dirty.insert(sig.1);
+        }
+        nodes.extend([s.from as usize, s.to as usize]);
+    }
+    nodes.sort_unstable();
+    nodes.dedup();
+    for ni in nodes {
+        let n = &net.nodes[ni];
+        let sig = (node_hash(net, ni, &|si| seg_hash(net, &net.segs[si])), tile_of(n.pos));
+        if let Some(old) = set.node_sig.insert(n.osm_id, sig) {
+            if old != sig {
+                dirty.extend([old.1, sig.1]);
+            }
+        } else {
+            dirty.insert(sig.1);
+        }
+    }
+    let mut buckets: HashMap<u32, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    if !dirty.is_empty() {
+        for (i, s) in net.segs.iter().enumerate() {
+            let t = set.seg_sig[&s.key].1;
+            if dirty.contains(&t) {
+                buckets.entry(t).or_default().0.push(i);
+            }
+        }
+        for (i, n) in net.nodes.iter().enumerate() {
+            let t = set.node_sig[&n.osm_id].1;
+            if dirty.contains(&t) {
+                buckets.entry(t).or_default().1.push(i);
+            }
+        }
+    }
+    let delta = emit_dirty(net, &mut set, &dirty, buckets);
+    (set, delta)
+}
+
+/// Gera as malhas dos ladrilhos sujos a partir dos trechos e nós de cada um.
+fn emit_dirty(net: &Net, set: &mut TileSet, dirty: &std::collections::BTreeSet<u32>, mut buckets: HashMap<u32, (Vec<usize>, Vec<usize>)>) -> TileDelta {
     let mut delta = TileDelta::default();
-    for t in &dirty {
+    for t in dirty {
         match buckets.remove(t) {
             Some((segs, nodes)) => {
                 let mut m = TileMesh::default();
@@ -358,7 +419,5 @@ pub fn update_tiles(net: &Net, prev: Option<TileSet>) -> (TileSet, TileDelta) {
             }
         }
     }
-    set.seg_sig = new_seg_sig;
-    set.node_sig = new_node_sig;
-    (set, delta)
+    delta
 }

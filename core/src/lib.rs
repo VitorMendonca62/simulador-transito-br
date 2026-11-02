@@ -34,6 +34,33 @@ pub struct Network {
     ext_signals: Option<extsig::ExtSignals>,
     /// pesos do último lote de rotas tomado (`sim_route_take`), entregues por `sim_route_pen`/`sim_route_cm`
     route_w: (Vec<f32>, Vec<f32>),
+    /// edições aplicadas pelo caminho rápido (diagnóstico e testes)
+    pub fast_edits: u32,
+}
+
+/// Trechos cuja edição mudou, se a mudança cabe no caminho rápido (`Net::update_segs`): vias novas, demolições,
+/// semáforos ligados/desligados e inversões de sentido iguais nas duas versões.
+fn seg_only_changes(old: &Edits, new: &Edits) -> Option<Vec<SegKey>> {
+    if old.roads != new.roads || old.removed != new.removed {
+        return None;
+    }
+    let enabled = |e: &Edits| e.sigs.iter().map(|(k, v)| (*k, v.enabled)).collect::<std::collections::HashMap<i64, bool>>();
+    if enabled(old) != enabled(new) {
+        return None;
+    }
+    let mut changed: Vec<SegKey> = Vec::new();
+    for k in old.segs.keys().chain(new.segs.keys()) {
+        let (a, b) = (old.segs.get(k), new.segs.get(k));
+        if a != b {
+            if a.is_some_and(|e| e.reverse) || b.is_some_and(|e| e.reverse) {
+                return None;
+            }
+            changed.push(*k);
+        }
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    Some(changed)
 }
 
 fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, ext: Option<&extsig::ExtSignals>) -> Result<Net, String> {
@@ -53,7 +80,7 @@ fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal]) -> Res
     let net = build_parts(&raw, &base, &edits, lazy, ext_signals.as_ref())?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
-    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, route_w: Default::default() })
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, route_w: Default::default(), fast_edits: 0 })
 }
 
 /// Rede com conexões por nó sob demanda (como no navegador).
@@ -101,9 +128,26 @@ impl Network {
             prios: payload.priorities.into_iter().filter(|(_, v)| (1..=3).contains(v)).collect(),
         };
         edits.set_conns(payload.connections);
-        let net = build_parts(&self.raw, &self.base, &edits, self.lazy, self.ext_signals.as_ref())?;
+        // só o perfil de trechos existentes mudou: atualiza a rede atual em vez de reconstruir tudo
+        let fast = seg_only_changes(&self.edits, &edits).and_then(|changed| self.net.update_segs(&self.raw, &self.base, &edits, &changed));
+        let net = if fast.is_some() {
+            self.fast_edits += 1;
+            let mut net = std::mem::take(&mut self.net);
+            net.conns.clear();
+            net.conn_off.clear();
+            if !self.lazy {
+                conn::build_connections(&mut net, &self.raw, &edits);
+            }
+            conn::build_signals(&mut net, &edits, self.ext_signals.as_ref());
+            net
+        } else {
+            build_parts(&self.raw, &self.base, &edits, self.lazy, self.ext_signals.as_ref())?
+        };
         let prev = std::mem::take(&mut self.tiles);
-        let (tiles, delta) = render::update_tiles(&net, Some(prev));
+        let (tiles, delta) = match &fast {
+            Some(segs) => render::update_tiles_partial(&net, prev, segs),
+            None => render::update_tiles(&net, Some(prev)),
+        };
         self.edits = edits;
         self.net = net;
         self.sim = None; // a rede mudou: a simulação precisa recomeçar
@@ -171,30 +215,73 @@ pub fn import_osm_signals(data: &[u8], signals_json: &str) -> Result<Network, Js
 #[wasm_bindgen]
 impl Network {
     pub fn meta_json(&self) -> String {
+        // structs com Serialize em vez de `json!`: no Recife (1.200 semáforos) o `Value` montado nó a nó custava ~20 ms
+        // por edição
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PhaseJ<'a> {
+            green: f32,
+            yellow: f32,
+            all_red: f32,
+            ends: &'a [u32],
+        }
+        #[derive(serde::Serialize)]
+        struct EndJ<'a> {
+            end: u32,
+            key: &'a str,
+            x: f32,
+            y: f32,
+            a: f32,
+        }
+        #[derive(serde::Serialize)]
+        struct SignalJ<'a, X: serde::Serialize> {
+            node: u32,
+            osm: f64,
+            ext: Option<X>,
+            offset: f32,
+            phases: Vec<PhaseJ<'a>>,
+            ends: Vec<EndJ<'a>>,
+        }
+        #[derive(serde::Serialize)]
+        struct Counts {
+            nodes: usize,
+            segments: usize,
+            lanes: usize,
+            connections: usize,
+            signals: usize,
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct MetaJ<'a, X: serde::Serialize> {
+            bounds: [f64; 4],
+            geo: [f64; 3],
+            counts: Counts,
+            names: &'a [String],
+            signals: Vec<SignalJ<'a, X>>,
+            signal_source: &'static str,
+        }
         let n = &self.net;
-        let signals: Vec<_> = n
+        let signals = n
             .signals
             .iter()
-            .map(|s| {
-                json!({
-                    "node": s.node,
-                    "osm": n.nodes[s.node as usize].osm_id as f64,
-                    "ext": self.ext_signals.as_ref().and_then(|m| m.nodes.get(&n.nodes[s.node as usize].osm_id)),
-                    "offset": s.offset,
-                    "phases": s.phases.iter().map(|p| json!({"green": p.green, "yellow": p.yellow, "allRed": p.all_red, "ends": p.ends})).collect::<Vec<_>>(),
-                    "ends": s.ends.iter().map(|e| json!({"end": e.end, "key": e.key, "x": e.pos[0], "y": e.pos[1], "a": e.angle})).collect::<Vec<_>>(),
-                })
+            .map(|s| SignalJ {
+                node: s.node,
+                osm: n.nodes[s.node as usize].osm_id as f64,
+                ext: self.ext_signals.as_ref().and_then(|m| m.nodes.get(&n.nodes[s.node as usize].osm_id)),
+                offset: s.offset,
+                phases: s.phases.iter().map(|p| PhaseJ { green: p.green, yellow: p.yellow, all_red: p.all_red, ends: &p.ends }).collect(),
+                ends: s.ends.iter().map(|e| EndJ { end: e.end, key: &e.key, x: e.pos[0], y: e.pos[1], a: e.angle }).collect(),
             })
             .collect();
-        json!({
-            "bounds": n.bounds,
-            "geo": n.geo,
-            "counts": {"nodes": n.nodes.len(), "segments": n.segs.len(), "lanes": n.lanes.len(), "connections": n.conns.len(), "signals": n.signals.len()},
-            "names": n.names,
-            "signals": signals,
-            "signalSource": if self.ext_signals.is_some() { "ext" } else { "osm" },
-        })
-        .to_string()
+        let meta = MetaJ {
+            bounds: n.bounds,
+            geo: n.geo,
+            counts: Counts { nodes: n.nodes.len(), segments: n.segs.len(), lanes: n.lanes.len(), connections: n.conns.len(), signals: n.signals.len() },
+            names: &n.names,
+            signals,
+            signal_source: if self.ext_signals.is_some() { "ext" } else { "osm" },
+        };
+        serde_json::to_string(&meta).unwrap_or_default()
     }
 
     // --- nós

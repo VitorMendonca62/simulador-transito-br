@@ -23,7 +23,7 @@ pub const MAX_LANES: u8 = 8;
 pub type SegKey = [i64; 3];
 
 /// Edição de um trecho: valores finais, já na orientação resultante (`reverse` aplica a inversão).
-#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SegEdit {
     pub way: i64,
@@ -67,7 +67,7 @@ pub struct SigEdit {
 }
 
 /// Ponto de uma via nova (metros locais). `node` encaixa num nó existente; `way` encaixa no corpo de uma via.
-#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct NewPt {
     pub x: f64,
@@ -77,7 +77,7 @@ pub struct NewPt {
 }
 
 /// Via criada pelo usuário (estilo construtor do Cities: Skylines).
-#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct NewRoad {
     /// id único da via (vira o `way` das chaves de trecho)
@@ -422,6 +422,54 @@ pub struct Signal {
     pub ends: Vec<SignalEnd>,
 }
 
+/// Faixas de um trecho: atributos do way + edição do usuário (com o trecho já na orientação final).
+struct SegProfile {
+    oneway: bool,
+    lf: u8,
+    lb: u8,
+    w: f64,
+    bus_f: Vec<bool>,
+    bus_b: Vec<bool>,
+    turn_f: Vec<u8>,
+    turn_b: Vec<u8>,
+}
+
+fn seg_profile(a: &Attrs, reverse: bool, edit: Option<&SegEdit>) -> SegProfile {
+    let mut oneway = a.oneway != 0;
+    let (mut lf, mut lb) = (a.lf, if oneway { 0 } else { a.lb });
+    let (mut bus_f, mut bus_b) = (a.bus_f.clone(), a.bus_b.clone());
+    let (mut turn_f, mut turn_b) = (a.turn_f.clone(), a.turn_b.clone());
+    let mut lane_w = a.w;
+    if reverse && !oneway {
+        std::mem::swap(&mut lf, &mut lb);
+        std::mem::swap(&mut bus_f, &mut bus_b);
+        std::mem::swap(&mut turn_f, &mut turn_b);
+    }
+    if let Some(e) = edit {
+        oneway = e.oneway;
+        let old = (lf, lb);
+        lf = e.lf.clamp(1, MAX_LANES);
+        lb = if oneway { 0 } else { e.lb.clamp(1, MAX_LANES) };
+        if e.w >= 2.0 && e.w <= 5.0 {
+            lane_w = e.w;
+        }
+        bus_f = (0..lf as usize).map(|i| e.bus_f.get(i).copied().unwrap_or(false)).collect();
+        bus_b = (0..lb as usize).map(|i| e.bus_b.get(i).copied().unwrap_or(false)).collect();
+        // máscaras de curva do OSM só valem se o nº de faixas não mudou
+        if old.0 != lf {
+            turn_f = vec![0; lf as usize];
+        }
+        if old.1 != lb {
+            turn_b = vec![0; lb as usize];
+        }
+    }
+    turn_f.resize(lf as usize, 0);
+    turn_b.resize(lb as usize, 0);
+    bus_f.resize(lf as usize, false);
+    bus_b.resize(lb as usize, false);
+    SegProfile { oneway, lf, lb, w: lane_w, bus_f, bus_b, turn_f, turn_b }
+}
+
 #[derive(Default)]
 pub struct Net {
     pub nodes: Vec<Node>,
@@ -435,6 +483,8 @@ pub struct Net {
     pub bounds: [f64; 4],
     /// Origem da projeção (ver `BaseCache::geo`): x = (lon − lon_c)·kx, y = −(lat − lat_c)·M_PER_DEG.
     pub geo: [f64; 3],
+    /// recuo de cada ponta antes do teto por trecho (para recalcular só os nós vizinhos de uma edição)
+    cut_raw: Vec<f64>,
 }
 
 struct Tags<'a>(&'a [(String, String)]);
@@ -805,39 +855,7 @@ impl Net {
                     continue;
                 }
 
-                let mut oneway = a.oneway != 0;
-                let (mut lf, mut lb) = (a.lf, if oneway { 0 } else { a.lb });
-                let (mut bus_f, mut bus_b) = (a.bus_f.clone(), a.bus_b.clone());
-                let (mut turn_f, mut turn_b) = (a.turn_f.clone(), a.turn_b.clone());
-                let mut lane_w = a.w;
-                if reverse && !oneway {
-                    std::mem::swap(&mut lf, &mut lb);
-                    std::mem::swap(&mut bus_f, &mut bus_b);
-                    std::mem::swap(&mut turn_f, &mut turn_b);
-                }
-                if let Some(e) = edit {
-                    oneway = e.oneway;
-                    let old = (lf, lb);
-                    lf = e.lf.clamp(1, MAX_LANES);
-                    lb = if oneway { 0 } else { e.lb.clamp(1, MAX_LANES) };
-                    if e.w >= 2.0 && e.w <= 5.0 {
-                        lane_w = e.w;
-                    }
-                    bus_f = (0..lf as usize).map(|i| e.bus_f.get(i).copied().unwrap_or(false)).collect();
-                    bus_b = (0..lb as usize).map(|i| e.bus_b.get(i).copied().unwrap_or(false)).collect();
-                    // máscaras de curva do OSM só valem se o nº de faixas não mudou
-                    if old.0 != lf {
-                        turn_f = vec![0; lf as usize];
-                    }
-                    if old.1 != lb {
-                        turn_b = vec![0; lb as usize];
-                    }
-                }
-                turn_f.resize(lf as usize, 0);
-                turn_b.resize(lb as usize, 0);
-                bus_f.resize(lf as usize, false);
-                bus_b.resize(lb as usize, false);
-
+                let SegProfile { oneway, lf, lb, w: lane_w, bus_f, bus_b, turn_f, turn_b } = seg_profile(a, reverse, edit);
                 net.segs.push(Seg {
                     key,
                     way_id: w.id,
@@ -950,11 +968,26 @@ impl Net {
 
     fn compute_cuts(&mut self) {
         let mut cut = vec![0.0f64; self.segs.len() * 2];
-        for node in &self.nodes {
-            let n = node.ends.len();
-            if n < 2 {
-                continue;
-            }
+        for ni in 0..self.nodes.len() {
+            self.node_cuts(ni, &mut cut);
+        }
+        for si in 0..self.segs.len() {
+            Self::cap_cut(&mut self.segs[si], cut[si * 2], cut[si * 2 + 1]);
+        }
+        self.cut_raw = cut;
+    }
+
+    /// Recuo de cada ponta do nó `ni` para as faixas vizinhas não se sobreporem (escreve em `cut` por ponta).
+    fn node_cuts(&self, ni: usize, cut: &mut [f64]) {
+        let node = &self.nodes[ni];
+        let n = node.ends.len();
+        for &e in &node.ends {
+            cut[e as usize] = 0.0;
+        }
+        if n < 2 {
+            return;
+        }
+        {
             for i in 0..n {
                 let ei = node.ends[i];
                 let ej = node.ends[(i + 1) % n];
@@ -977,19 +1010,64 @@ impl Net {
                 cut[ej as usize] = cut[ej as usize].max(t2.max(0.0));
             }
         }
-        for (si, s) in self.segs.iter_mut().enumerate() {
-            let l = s.poly.length();
-            let cap = 22.0f64.min(l * 0.45);
-            let mut a = cut[si * 2].min(cap);
-            let mut b = cut[si * 2 + 1].min(cap);
-            if a + b > l * 0.8 {
-                let k = l * 0.8 / (a + b);
-                a *= k;
-                b *= k;
-            }
-            s.cut_from = a;
-            s.cut_to = b;
+    }
+
+    /// Recuos finais do trecho: teto de 22 m (ou 45 % do trecho) e, juntos, no máximo 80 % dele.
+    fn cap_cut(s: &mut Seg, a: f64, b: f64) {
+        let l = s.poly.length();
+        let cap = 22.0f64.min(l * 0.45);
+        let mut a = a.min(cap);
+        let mut b = b.min(cap);
+        if a + b > l * 0.8 {
+            let k = l * 0.8 / (a + b);
+            a *= k;
+            b *= k;
         }
+        s.cut_from = a;
+        s.cut_to = b;
+    }
+
+    /// Caminho rápido da reconstrução: edições que só mudam as faixas de trechos existentes (nº de faixas, largura,
+    /// ônibus, mão única; sem inverter sentido). Trechos, nós e ordem das pontas ficam; refaz o perfil dos trechos
+    /// editados, os recuos dos nós deles e a numeração das faixas. Devolve os trechos que podem ter mudado (os dos
+    /// nós vizinhos), ou `None` se não dá (aí, reconstrução completa).
+    pub fn update_segs(&mut self, raw: &RawOsm, base: &BaseCache, edits: &Edits, changed: &[SegKey]) -> Option<Vec<usize>> {
+        if self.cut_raw.len() != self.segs.len() * 2 {
+            return None;
+        }
+        let index: HashMap<SegKey, usize> = self.segs.iter().enumerate().map(|(i, s)| (s.key, i)).collect();
+        let mut touched: Vec<(usize, SegProfile)> = Vec::new();
+        for key in changed {
+            let Some(&si) = index.get(key) else { continue };
+            let edit = edits.segs.get(key);
+            if edit.is_some_and(|e| e.reverse) {
+                return None;
+            }
+            let bw = base.ways.iter().find(|b| raw.ways[b.raw_idx].id == key[0])?;
+            touched.push((si, seg_profile(&bw.attrs, false, edit)));
+        }
+        let mut nodes: Vec<usize> = Vec::new();
+        for (si, p) in touched {
+            let s = &mut self.segs[si];
+            (s.oneway, s.lf, s.lb, s.w, s.bus_f, s.bus_b, s.turn_f, s.turn_b) = (p.oneway, p.lf, p.lb, p.w, p.bus_f, p.bus_b, p.turn_f, p.turn_b);
+            nodes.extend([s.from as usize, s.to as usize]);
+        }
+        nodes.sort_unstable();
+        nodes.dedup();
+        let mut cut = std::mem::take(&mut self.cut_raw);
+        let mut segs: Vec<usize> = Vec::new();
+        for &ni in &nodes {
+            self.node_cuts(ni, &mut cut);
+            segs.extend(self.nodes[ni].ends.iter().map(|&e| (e >> 1) as usize));
+        }
+        segs.sort_unstable();
+        segs.dedup();
+        for &si in &segs {
+            Self::cap_cut(&mut self.segs[si], cut[si * 2], cut[si * 2 + 1]);
+        }
+        self.cut_raw = cut;
+        self.build_lanes();
+        Some(segs)
     }
 
     fn build_lanes(&mut self) {

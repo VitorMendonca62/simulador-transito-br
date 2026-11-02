@@ -359,6 +359,12 @@ fn perf_stages() {
     let t = Instant::now();
     n.set_edits(&json).unwrap();
     eprintln!("set_edits total  {:>7.1} ms  ({} de {} ladrilhos sujos)", t.elapsed().as_secs_f64() * 1e3, n.delta.dirty.len(), n.tiles.tiles.len());
+    // a mesma via de novo, com outro nº de faixas: só o perfil do trecho muda (caminho rápido)
+    let json = json.replace(r#""lf":2,"lb":2"#, r#""lf":3,"lb":1"#);
+    n.clear_delta();
+    let t = Instant::now();
+    n.set_edits(&json).unwrap();
+    eprintln!("set_edits rápido {:>7.1} ms  ({} de {} ladrilhos sujos, caminho rápido: {})", t.elapsed().as_secs_f64() * 1e3, n.delta.dirty.len(), n.tiles.tiles.len(), n.fast_edits);
 }
 
 #[test]
@@ -2164,4 +2170,68 @@ fn merging_street_gets_realistic_gaps() {
         queued += s.stats.queued;
     }
     assert!(queued < 40, "a rua não acumula fila de entrada: {queued}");
+}
+
+/// Impressão digital da rede (trechos, recuos, faixas, conexões, semáforos) para comparar reconstruções.
+fn net_fingerprint(net: &Net) -> String {
+    let mut out = String::new();
+    for s in &net.segs {
+        out += &format!("S{:?} {} {} {} {} {} {:?} {:?} {:?} {:?} {:.9} {:.9} {}\n", s.key, s.from, s.to, s.oneway, s.lf, s.lb, s.w, s.bus_f, s.bus_b, s.turn_f, s.cut_from, s.cut_to, s.lane_base);
+    }
+    for l in &net.lanes {
+        out += &format!("L{} {} {} {} {} {} {} {:?} {:?} {:?} {:?}\n", l.seg, l.dir, l.idx, l.from, l.to, l.bus, l.tmask, l.start, l.sdir, l.end, l.edir);
+    }
+    for c in &net.conns {
+        out += &format!("C{} {} {} {} {} {}\n", c.node, c.from_lane, c.to_lane, c.kind, c.state, c.base);
+    }
+    for g in &net.signals {
+        out += &format!("G{} {} {:?}\n", g.node, g.offset, g.phases.iter().map(|p| (p.green, p.yellow, p.all_red, p.ends.clone())).collect::<Vec<_>>());
+    }
+    out
+}
+
+/// Edições de faixas, largura, ônibus e mão única pelo caminho rápido (`Net::update_segs`) dão a mesma rede e os
+/// mesmos ladrilhos que a reconstrução completa com as mesmas edições.
+fn check_fast_seg_edits(mut n: Network, rebuild: &dyn Fn() -> Network) {
+    let ns = n.net.segs.len();
+    let pick: Vec<SegKey> = [ns / 7, ns / 3, ns / 2, (ns * 4) / 5].iter().map(|&i| n.net.segs[i].key).collect();
+    let seg = |k: &SegKey, json: &str| format!(r#"{{"way":{},"from":{},"to":{},{json}}}"#, k[0], k[1], k[2]);
+    let steps = [
+        vec![seg(&pick[0], r#""oneway":false,"lf":3,"lb":2"#)],
+        vec![seg(&pick[0], r#""oneway":false,"lf":3,"lb":2"#), seg(&pick[1], r#""oneway":true,"lf":2,"lb":0,"w":3.2"#)],
+        vec![seg(&pick[1], r#""oneway":true,"lf":2,"lb":0,"w":3.2"#), seg(&pick[2], r#""oneway":false,"lf":1,"lb":1,"busF":[true]"#)],
+        vec![seg(&pick[3], r#""oneway":false,"lf":4,"lb":4"#)],
+        vec![],
+    ];
+    for (k, segs) in steps.iter().enumerate() {
+        let json = format!(r#"{{"segments":[{}]}}"#, segs.join(","));
+        n.set_edits(&json).unwrap();
+        let mut full = rebuild();
+        full.set_edits(&json).unwrap();
+        assert_eq!(net_fingerprint(&n.net), net_fingerprint(&full.net), "passo {k}: rede diferente da reconstrução completa");
+        let tiles = |t: &crate::render::TileSet| {
+            let mut v: Vec<_> = t.tiles.iter().map(|(id, m)| (*id, m.asphalt.idx.len(), m.white.idx.len(), m.yellow.idx.len(), m.bus.idx.len(), m.asphalt.pos.iter().map(|x| x.to_bits() as u64).sum::<u64>())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(tiles(&n.tiles), tiles(&full.tiles), "passo {k}: ladrilhos diferentes");
+    }
+    assert_eq!(n.fast_edits as usize, steps.len(), "todas as edições pelo caminho rápido");
+    // inverter o sentido muda a geometria: reconstrução completa
+    n.set_edits(&format!(r#"{{"segments":[{}]}}"#, seg(&pick[0], r#""oneway":false,"lf":1,"lb":1,"reverse":true"#))).unwrap();
+    assert_eq!(n.fast_edits as usize, steps.len());
+}
+
+#[test]
+fn fast_segment_edits_match_full_rebuild() {
+    check_fast_seg_edits(sample(), &sample);
+}
+
+/// Mesmo teste no mapa real: `PERF_OSM=arquivo cargo test --release fast_segment_edits_recife -- --ignored`
+#[test]
+#[ignore]
+fn fast_segment_edits_recife() {
+    let data = std::fs::read(std::env::var("PERF_OSM").expect("defina PERF_OSM")).unwrap();
+    let build = || build_network_lazy_for_test(&data);
+    check_fast_seg_edits(build(), &build);
 }
