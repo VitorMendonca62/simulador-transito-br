@@ -206,8 +206,8 @@ Testes: `transit_fits_route_and_stop`, `transit_demolished_way_disables_and_undo
 `transit_fit_same_after_fast_and_full_rebuild`; diagnósticos ignorados `onibus_recife` (`RECIFE_OSM`, `SUGERIR=1`
 emite as conversões que faltam como exceções) e `onibus_padrao` (`PADRAO=<shape>`).
 
-Fica para as próximas fases: o worker e a interface ainda não carregam as linhas (fase 6); os ônibus ainda não usam
-`CONN_BUS` nem seguem o caminho encaixado (fase 5); o encaixe pode ficar mais rápido se for preciso refazê-lo a cada
+Fica para as próximas fases: o worker e a interface ainda não carregam as linhas (fase 6); os ônibus seguirem o
+caminho encaixado e usarem `CONN_BUS` entrou na fase 5; o encaixe pode ficar mais rápido se for preciso refazê-lo a cada
 edição.
 
 ### Fase 5 — Simulação
@@ -224,6 +224,58 @@ edição.
   regularidade (intervalo real entre ônibus, comboio).
 - Testes: determinismo, ônibus nunca sai da rota, conservação (partidas = concluídos + na rede), tempo de parada dentro
   da faixa configurada, faixa bloqueada pela parada não gera colisão.
+
+**Concluída (2026-11-03)**, só no núcleo (`core/src/sim/bus.rs`); o worker e a interface ainda não carregam as linhas
+(fase 6). Decisões: **baia fica para a fase 6** (os dados têm 0 baias; `baia` é simulada como parada na faixa e contada
+em `paradas_baia` no resumo do encaixe); **embarque pelo perfil da hora da OD**.
+- **Entrada**: `Network::start_sim_ext` passa os trechos encaixados (`SimInit.bus`, um `BusRoute` por `TrechoFit` ok).
+  `busLines` (padrão ligado) usa as linhas e zera o `busShare`; mapa sem linhas segue como antes. As conversões
+  `CONN_BUS` só entram na simulação com linhas, depois das ligadas (os ids das ligadas não mudam); carros e o roteador
+  delas não as usam.
+- **Rota fixa**: por trecho, um plano com o custo até o fim por (passo, faixa), de trás para frente (conversões para o
+  passo seguinte + troca de faixa no passo). O `stay_cost` do ônibus só olha conversões para o passo seguinte; troca
+  obrigatória, cortesia, MOBIL e linha contínua continuam valendo. Ônibus não vira infrator nem desiste; sem conversão
+  na faixa, espera no fim dela até trocar.
+- **Partidas**: `partidas` do GTFS (o relógio da simulação já é segundo do dia) com variação de ±`busJitter` s por viagem
+  (fora do PRNG); só a partir da hora inicial (a rede começa vazia). Nasce no começo do 1º passo; sem espaço, fila
+  própria. Termina ao fim do último passo (terminal ou borda).
+- **Parada**: obstáculo virtual na posição da parada (faixa da direita); parado a até 18 m antes (o ponto comporta
+  dois ônibus) começa o embarque: `clamp(busDwellMin + 2,5 s × Poisson(busPaxPeak × fator da hora), mín, máx)` + 1 s de
+  seta. Fator da hora = geração total da OD na hora ÷ pico (sem OD, perfil fixo de dia útil). Embarcando não conta como
+  espera (`wait`). Fora da faixa da parada, o ônibus para antes dela (e antes da linha contínua) e espera brecha para
+  entrar, até 30 s; depois disso a parada é perdida. Parada em faixa curta (< 22 m) passa para o fim do passo
+  anterior; o ônibus que já nasce sobre o 1º ponto embarca ali. Carro atrás de quem está parado no ponto pode
+  ultrapassar também a menos de 60 m do nó (fora da linha contínua).
+- **Parcelas** (padrão 0, por `noise` do motorista): `busLaneCarPct` usa a faixa exclusiva; `busStopCarPct` para uma vez
+  por viagem no primeiro ponto da faixa, 10–30 s (`carsAtBusStop`).
+- **Métricas** (`Sim::bus_report`, `sim_bus_report` no WASM, `bus` no `report()`, `busesActive`/`busTripsDone`/
+  `busSpeedKmh`/`busStops`/`busStopsMissed` no `sim_stats`): por linha, viagens, tempo médio, velocidade comercial,
+  tempo parado nas paradas e fora delas, paradas perdidas, intervalo real médio entre ônibus em cada parada, CV e
+  comboios (intervalo < 25 % do programado). Os ônibus de linha não entram em `spawned`/`finished` nem no atraso dos
+  carros. Painel do veículo (`explain`): `bus` com linha, passo, próxima parada e embarque.
+
+| Medida (Recife, CTTU, `recife_behavior`, 15 min às 8h, 3 sementes) | Sem linhas | Com linhas (`BUS=1`) |
+|---|---|---|
+| Carros concluídos / atraso total | 356 / 42,3 veíc·h (idêntico ao de antes) | 321 / 49,5 veíc·h |
+| Ônibus: partidas / concluídas / na rede | — | ~430 / ~69 / ~360 |
+| Paradas atendidas / perdidas | — | ~2.570 / ~19 (0,7 %) |
+| Velocidade comercial média | — | ~19,7 km/h |
+| Ônibus parados > 120 s (amostra a cada 5 s) | — | 0 (maior espera 97–120 s) |
+| Passo nativo | 0,67 ms | 0,84 ms (+25 %) |
+
+- Ao longo da depuração, em outras sementes, apareceram ônibus parados até ~150 s: filas de ônibus na Av. Martins de
+  Barros (muitas linhas no mesmo ponto; o da frente embarcando e a saída ocupada), não travas. `BUS_STUCK=1` lista cada
+  ônibus que passa de 120 s.
+- Com linhas, ~1 furo de vermelho por execução, todos de ônibus no dilema do amarelo (chegam à linha 0,1–0,3 s depois
+  do `AMBER_COMMIT`), e linha contínua ~430 por execução (era ~180), a maior parte de ônibus indo para a faixa do ponto.
+  Os carros concluem menos porque os ônibus ocupam a via e param nela.
+- Testes: `bus_follows_route_stops_and_is_conserved` (nunca sai do caminho, conservação, embarque dentro da faixa
+  configurada), `bus_lines_are_deterministic`, `bus_stop_blocking_lane_cars_overtake_without_overlap`,
+  `bus_only_turn_used_only_by_buses`, `bus_lane_and_stop_car_shares_apply_only_to_share`,
+  `no_lines_keeps_bus_share_behavior`.
+
+Fica para a fase 6: carregar as linhas no worker e na interface (`import_osm_full` com o JSON, `busLines` e os
+parâmetros de embarque no painel), baia, e o critério "parados > 120 s = 0" no cenário do app.
 
 ### Fase 6 — Interface
 - **Camada Ônibus** (Camadas): itinerários coloridos por linha e paradas (ícone), com LOD por zoom.
@@ -295,7 +347,7 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | 2 — Desempenho | concluída (2026-11-02); falta só perfilar o desenho do mapa com o painel visível |
 | 3 — Dados de ônibus | concluída (2026-11-02): GTFS oficial, 290 linhas, 86 % dos padrões contínuos (com as exceções da fase 4) |
 | 4 — Encaixe na rede | concluída (2026-11-03): exceções para ônibus, 81 % dos trechos encaixados |
-| 5 — Simulação de ônibus | pendente |
+| 5 — Simulação de ônibus | concluída (2026-11-03): rota fixa, partidas do GTFS, embarque nos pontos, métricas por linha (só no núcleo) |
 | 6 — Interface de linhas | pendente |
 | 7 — Moto como tipo | pendente |
 | 8 — Corredor | pendente |

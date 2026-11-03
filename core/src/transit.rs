@@ -515,6 +515,8 @@ impl TransitFit {
             ok: usize,
             paradas: usize,
             paradas_fora: u32,
+            /// paradas marcadas como baia, simuladas como parada na faixa até a fase 6
+            paradas_baia: usize,
             falhas: Vec<Falha<'a>>,
             excecoes: &'a [String],
         }
@@ -535,6 +537,7 @@ impl TransitFit {
             ok: self.trechos.iter().filter(|r| r.ok).count(),
             paradas: self.trechos.iter().map(|r| r.paradas.len()).sum(),
             paradas_fora: self.trechos.iter().map(|r| r.paradas_fora).sum(),
+            paradas_baia: self.trechos.iter().map(|r| r.paradas.iter().filter(|p| p.baia).count()).sum(),
             falhas,
             excecoes: avisos_exc,
         })

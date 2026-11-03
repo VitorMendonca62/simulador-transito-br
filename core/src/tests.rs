@@ -1098,7 +1098,8 @@ fn lane_changes_use_blinker_and_respect_solid_zone() {
 }
 
 /// `PERF_OSM=arquivo cargo test --release recife_behavior -- --ignored --nocapture`: indicadores de comportamento e rota
-/// (`CTTU=1` usa os semáforos da CTTU).
+/// (`CTTU=1` usa os semáforos da CTTU; `BUS=1` carrega as linhas de ônibus de `public/data/onibus_recife.json`;
+/// `BUS_STUCK=1` mostra cada ônibus que passa de 120 s parado).
 #[test]
 #[ignore]
 fn recife_behavior() {
@@ -1108,7 +1109,13 @@ fn recife_behavior() {
     let zones = [q(1, -3000.0, -3000.0, -1500.0, -1500.0, gen), q(2, 1500.0, -3000.0, 3000.0, -1500.0, gen), q(3, -3000.0, 1500.0, -1500.0, 3000.0, gen), q(4, 1500.0, 1500.0, 3000.0, 3000.0, gen)].join(",");
     let extra = std::env::var("SIM_PARAMS").unwrap_or_default();
     // CTTU=1: semáforos da base da CTTU (com os ajustes manuais) no lugar dos do OSM
-    let mut n = if std::env::var("CTTU").is_ok() {
+    let bus = std::env::var("BUS").is_ok();
+    let mut n = if bus {
+        let pts: Vec<crate::extsig::ExtSignal> =
+            if std::env::var("CTTU").is_ok() { serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap() } else { Vec::new() };
+        let t = crate::transit::TransitData::parse(include_str!("../../public/data/onibus_recife.json")).unwrap();
+        crate::build_network_transit(&data, &pts, t, true).unwrap()
+    } else if std::env::var("CTTU").is_ok() {
         let pts: Vec<crate::extsig::ExtSignal> = serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap();
         build_network_ext(&data, &pts).unwrap()
     } else {
@@ -1124,8 +1131,22 @@ fn recife_behavior() {
             n.sim.as_mut().unwrap().overlap_log = Some(Vec::new());
         }
         let t = std::time::Instant::now();
-        for _ in 0..(15 * 60 * 5) {
+        // ônibus parados há mais de 120 s (fora do embarque), contados a cada 5 s; o maior tempo parado visto
+        let (mut bus_stuck, mut bus_wait_max) = (0usize, 0.0f32);
+        for k in 0..(15 * 60 * 5) {
             n.sim.as_mut().unwrap().step(&n.net);
+            if bus && k % 25 == 0 {
+                let w = n.sim.as_ref().unwrap().bus_waits();
+                bus_stuck += w.iter().filter(|&&x| x > 120.0).count();
+                bus_wait_max = w.iter().copied().fold(bus_wait_max, f32::max);
+                if std::env::var("BUS_STUCK").is_ok() && w.iter().any(|&x| x > 120.0 && x <= 125.0) {
+                    let sm = n.sim.as_mut().unwrap();
+                    for id in sm.bus_ids_waiting(120.0, 125.0) {
+                        let x = sm.explain(&n.net, id);
+                        eprintln!("      BSTK t={} #{id} {} {} s={:.1} rest={:.1} wait={:.0} choice={} enter={} leader={} bus={} lanes={} block={}", k / 5, x["where"], x["street"], x["s"].as_f64().unwrap_or(0.0), x["rest"].as_f64().unwrap_or(0.0), x["wait"].as_f64().unwrap_or(0.0), x["choice"], x["enter"], x["leader"], x["bus"], x["lanes"], x["laneChangeBlock"]);
+                    }
+                }
+            }
         }
         // STUCK=n: quem está parado há mais de n s no fim (gargalos), com o motivo
         if let Some(t) = std::env::var("STUCK").ok().and_then(|v| v.parse::<f32>().ok()) {
@@ -1149,6 +1170,13 @@ fn recife_behavior() {
         eprintln!("semente {seed}: concluídos {:.0}  atraso total {:.1} veíc·h  fila {:.0}  irregulares {:.0}  linha contínua {}  freadas {:.0}  vermelho {}  passo {:.2} ms  rotas recalculadas {}", row[0], row[1], row[2], row[3], s.stats.solid_crossings, row[4], s.stats.red_runs, row[5], s.reroutes);
         for l in s.overlap_log.iter().flatten() {
             eprintln!("      OVL {l}");
+        }
+        if bus {
+            let b = s.bus_report();
+            eprintln!(
+                "   ônibus: partidas {}  concluídas {}  na rede {}  fila {}  paradas {} (perdidas {})  velocidade comercial {:.1} km/h  parados > 120 s {bus_stuck} (maior espera {bus_wait_max:.0} s)",
+                b["partidas"], b["concluidas"], b["ativos"], b["naFila"], b["paradas"], b["paradasPerdidas"], b["velocidadeKmh"].as_f64().unwrap_or(0.0)
+            );
         }
         eprintln!("   cruzamento: sobreposições {} (+{} geometria)  parados dentro {}  espera por ocupação {:.0} veíc·s  impasses {}", s.stats.junction_overlaps, s.stats.junction_overlaps_geom, s.stats.box_stops, s.stats.box_wait_s, s.stats.occ_deadlocks);
         for k in 0..6 {
@@ -2528,4 +2556,205 @@ fn transit_fit_same_after_fast_and_full_rebuild() {
     assert!(fast.ok && full.ok);
     assert_eq!(fast.caminho, full.caminho);
     assert_eq!(fast.caminho, base.caminho);
+}
+
+// ------------------------------------------------------------------ ônibus de linha na simulação (versão 2, fase 5)
+
+/// Como `bus_line`, com as partidas dadas e a parada `p` em [lat, lon].
+fn bus_line_at(ways: &[i64], ini: [f64; 2], fim: [f64; 2], excecoes: serde_json::Value, parada: [f64; 2], partidas: &[u32]) -> crate::transit::TransitData {
+    let j = serde_json::json!({
+        "excecoes": excecoes,
+        "paradas": {"p": {"nome": "Parada", "lat": parada[0], "lon": parada[1], "baia": false}},
+        "linhas": [{"id": "L1", "numero": "1", "nome": "Teste", "padroes": [{"id": "L1-a", "trechos": [
+            {"ways": ways, "pontos": [ini, fim], "lacunas": [], "paradas": [["p", 0.0]], "partidas": partidas}]}]}]
+    });
+    crate::transit::TransitData::parse(&j.to_string()).unwrap()
+}
+
+/// Avenida leste-oeste de ~600 m (nós 1 a 4), 2 faixas por sentido, com ruas laterais em 2 e 3 (três trechos);
+/// `extra` entra nas tags da avenida.
+fn avenue(extra: &str) -> String {
+    format!(
+        r#"<osm>
+<node id="1" lat="-8.0600" lon="-34.9000"/><node id="2" lat="-8.0600" lon="-34.8982"/>
+<node id="3" lat="-8.0600" lon="-34.8964"/><node id="4" lat="-8.0600" lon="-34.8946"/>
+<node id="5" lat="-8.0591" lon="-34.8982"/><node id="6" lat="-8.0591" lon="-34.8964"/>
+<way id="201"><nd ref="2"/><nd ref="5"/><tag k="highway" v="residential"/><tag k="name" v="Rua 1"/></way>
+<way id="202"><nd ref="3"/><nd ref="6"/><tag k="highway" v="residential"/><tag k="name" v="Rua 2"/></way>
+<way id="200"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><tag k="highway" v="secondary"/><tag k="name" v="Avenida"/><tag k="lanes" v="4"/>{extra}</way>
+</osm>"#
+    )
+}
+
+const AV1: [f64; 2] = [-8.0600, -34.9000];
+const AV4: [f64; 2] = [-8.0600, -34.8946];
+/// ponto no meio do trecho 2-3, do lado direito de quem vai para leste
+const AV_STOP: [f64; 2] = [-8.06004, -34.8973];
+
+/// Zonas nos dois extremos da avenida (carros de oeste para leste) e parâmetros extras.
+fn avenue_sim(n: &mut Network, gen: f64, extra: &str) {
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let (w, e) = (square(at(n, 1), 30.0), square(at(n, 4), 30.0));
+    let json = format!(
+        r#"{{"zones":[{{"id":1,"gen":{gen},"attr":0,"poly":{w}}},{{"id":2,"gen":0,"attr":1,"poly":{e}}}],
+          "params":{{"seed":5,"hour":7,{share}"beta":0,"odManual":{{"1>2":{gen}}}{extra}}}}}"#,
+        share = if extra.contains("busShare") { "" } else { r#""busShare":0,"# }
+    );
+    n.start_sim(&json).unwrap();
+}
+
+fn bus_rep(n: &Network) -> serde_json::Value {
+    n.sim.as_ref().unwrap().bus_report()
+}
+
+fn deps(n: u32, every: u32) -> Vec<u32> {
+    (0..n).map(|k| 25200 + k * every).collect()
+}
+
+/// O ônibus nasce no horário, segue o caminho encaixado passo a passo (nunca sai dele), para no ponto pelo tempo
+/// configurado e termina no fim do trecho; partidas = concluídas + na rede + na fila.
+#[test]
+fn bus_follows_route_stops_and_is_conserved() {
+    let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, &deps(12, 60));
+    let mut n = crate::build_network_transit(avenue("").as_bytes(), &[], t, false).unwrap();
+    avenue_sim(&mut n, 0.0, r#","busDwellMin":15,"busDwellMax":20,"busJitter":0"#);
+    let plan = n.sim.as_ref().unwrap().bus_plan_dirsegs(0);
+    assert_eq!(plan.len(), 3, "três trechos de 1 a 4");
+    for _ in 0..(20.0 * 60.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for (r, k, e, _) in s.bus_states() {
+            assert_eq!(r, 0);
+            let (k, (from, to)) = (k as usize, s.edge_dirseg(e as usize));
+            match to {
+                None => assert_eq!(from, plan[k], "faixa fora do passo {k}"),
+                Some(to) => assert!(from == plan[k] && k + 1 < plan.len() && to == plan[k + 1], "conversão fora do caminho no passo {k}"),
+            }
+        }
+        let r = bus_rep(&n);
+        let (dep, act, fila, fim) = (r["partidas"].as_u64().unwrap(), r["ativos"].as_u64().unwrap(), r["naFila"].as_u64().unwrap(), r["concluidas"].as_u64().unwrap());
+        assert_eq!(dep, act + fila + fim, "conservação: {r}");
+    }
+    let s = n.sim.as_ref().unwrap();
+    let r = bus_rep(&n);
+    assert_eq!(r["partidas"], 12);
+    assert_eq!(r["concluidas"], 12, "{r}");
+    assert_eq!(s.stats.bus_stops, 12, "um embarque por viagem: {r}");
+    assert_eq!(s.stats.bus_stops_missed, 0);
+    let mean = s.stats.bus_dwell_s / s.stats.bus_stops as f64;
+    assert!((15.0..=20.0).contains(&mean), "embarque médio {mean} s");
+    let l = &r["linhas"][0];
+    assert!(l["velocidadeKmh"].as_f64().unwrap() > 5.0 && l["paradoNasParadas"].as_f64().unwrap() >= 15.0, "{l}");
+    assert_eq!(s.stats.spawned, 0, "os ônibus de linha não entram nas viagens dos carros");
+}
+
+#[test]
+fn bus_lines_are_deterministic() {
+    let snap = || {
+        let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, &deps(10, 45));
+        let mut n = crate::build_network_transit(avenue("").as_bytes(), &[], t, false).unwrap();
+        avenue_sim(&mut n, 900.0, "");
+        run(&mut n, 600.0);
+        let mut v = Vec::new();
+        n.sim.as_ref().unwrap().snapshot(&n.net, &mut v);
+        (v, bus_rep(&n).to_string())
+    };
+    assert_eq!(snap(), snap());
+}
+
+/// Ônibus parado no ponto bloqueia a faixa da direita: os carros atrás ultrapassam pela esquerda ou esperam, sem
+/// sobreposição na fila e sem colisão nos cruzamentos.
+#[test]
+fn bus_stop_blocking_lane_cars_overtake_without_overlap() {
+    let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, &deps(20, 60));
+    let mut n = crate::build_network_transit(avenue("").as_bytes(), &[], t, false).unwrap();
+    avenue_sim(&mut n, 1200.0, r#","busDwellMin":30,"busDwellMax":40"#);
+    let mut boarding = 0;
+    for _ in 0..(25.0 * 60.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for list in s.edge_lists() {
+            for w in list.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+            }
+        }
+        boarding += s.bus_states().iter().filter(|b| b.3).count();
+    }
+    let s = n.sim.as_ref().unwrap();
+    assert!(boarding > 0, "algum ônibus embarcou: {}", bus_rep(&n));
+    assert!(s.stats.finished > 50, "os carros seguem: {:?}", s.stats);
+    assert!(s.stats.lane_changes > 0, "ultrapassagem pela faixa da esquerda");
+    assert_eq!(s.stats.junction_overlaps, 0);
+    assert_eq!(s.stats.bus_stops_missed, 0, "{}", bus_rep(&n));
+    assert_eq!(bus_rep(&n)["concluidas"], 20);
+}
+
+/// Conversão só de ônibus (exceção `conversao`): o ônibus a usa; carro nunca.
+#[test]
+fn bus_only_turn_used_only_by_buses() {
+    let fim = [-8.0491, -34.8991];
+    let exc = serde_json::json!([{"tipo": "conversao", "no": 2, "de": 100, "para": 101}]);
+    let t = bus_line_at(&[100, -101], N1, fim, exc, [-8.04998, -34.89915], &deps(6, 120));
+    let mut n = bus_net("", t);
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let (a, b) = (square(at(&n, 1), 25.0), square(at(&n, 5), 25.0));
+    // carros de 1 para 5: a esquerda em 2 é proibida para eles (dão a volta)
+    let json = format!(r#"{{"zones":[{{"id":1,"gen":600,"attr":0,"poly":{a}}},{{"id":2,"gen":0,"attr":1,"poly":{b}}}],"params":{{"seed":3,"hour":7,"busShare":0,"beta":0,"odManual":{{"1>2":600}}}}}}"#);
+    n.start_sim(&json).unwrap();
+    for _ in 0..(15.0 * 60.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        assert_eq!(n.sim.as_ref().unwrap().cars_on_bus_edges().0, 0, "carro numa conversão só de ônibus");
+    }
+    assert_eq!(bus_rep(&n)["concluidas"], 6, "{}", bus_rep(&n));
+}
+
+/// Parcelas de carros: faixa exclusiva de ônibus e parada no ponto. Com 0 % ninguém; com 100 %, todos podem.
+#[test]
+fn bus_lane_and_stop_car_shares_apply_only_to_share() {
+    // a faixa da direita é de ônibus (o ponto fica nela): quem para no ponto é testado na avenida sem faixa de ônibus
+    let run_av = |bus_lane: bool, extra: &str| {
+        let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, &deps(4, 120));
+        let tag = if bus_lane { r#"<tag k="bus:lanes:forward" v="|designated"/>"# } else { "" };
+        let mut n = crate::build_network_transit(avenue(tag).as_bytes(), &[], t, false).unwrap();
+        avenue_sim(&mut n, 900.0, extra);
+        let mut on_bus_lane = 0;
+        for _ in 0..(10.0 * 60.0 / 0.2) as u32 {
+            n.sim.as_mut().unwrap().step(&n.net);
+            on_bus_lane += n.sim.as_ref().unwrap().cars_on_bus_edges().1;
+        }
+        let s = n.sim.as_ref().unwrap();
+        (on_bus_lane, s.stats.cars_at_bus_stop, s.stats.finished)
+    };
+    let (lane0, _, fin0) = run_av(true, "");
+    assert_eq!(lane0, 0);
+    assert!(fin0 > 30);
+    let (lane1, _, _) = run_av(true, r#","busLaneCarPct":100"#);
+    assert!(lane1 > 0, "a parcela usa a faixa de ônibus");
+    assert_eq!(run_av(false, "").1, 0);
+    let (_, stop1, _) = run_av(false, r#","busStopCarPct":100"#);
+    assert!(stop1 > 0, "a parcela para no ponto");
+}
+
+/// Sem linhas (ou com `busLines` desligado), a simulação é a de antes: ônibus pelo `busShare`.
+#[test]
+fn no_lines_keeps_bus_share_behavior() {
+    let snap = |transit: bool, extra: &str| {
+        let osm = avenue("");
+        let mut n = if transit {
+            let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, &deps(10, 60));
+            crate::build_network_transit(osm.as_bytes(), &[], t, false).unwrap()
+        } else {
+            build_network(osm.as_bytes()).unwrap()
+        };
+        avenue_sim(&mut n, 900.0, &format!(r#","busShare":10{extra}"#));
+        run(&mut n, 400.0);
+        let mut v = Vec::new();
+        n.sim.as_ref().unwrap().snapshot(&n.net, &mut v);
+        v
+    };
+    assert_eq!(snap(false, ""), snap(true, r#","busLines":false"#));
 }

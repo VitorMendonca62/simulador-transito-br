@@ -180,6 +180,9 @@ impl Network {
         self.ensure_conns();
         let mut init: sim::SimInit = serde_json::from_str(json).map_err(|e| format!("simulação inválida: {e}"))?;
         init.prios = self.edits.prios.clone();
+        if init.params.bus_lines {
+            init.bus = self.bus_routes();
+        }
         self.sim = Some(sim::Sim::new_ext(&self.net, &init, route_ext)?);
         Ok(())
     }
@@ -191,6 +194,29 @@ impl Network {
             self.transit_fit = Some(transit::fit(&self.net, &self.raw, &self.restr, &self.edits, t));
         }
         self.transit_fit.as_ref()
+    }
+
+    /// Trechos de itinerário encaixados, no formato da simulação (vazio sem linhas).
+    fn bus_routes(&mut self) -> Vec<sim::bus::BusRoute> {
+        if self.transit_fit().is_none() {
+            return Vec::new();
+        }
+        let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return Vec::new() };
+        f.trechos
+            .iter()
+            .filter(|r| r.ok)
+            .map(|r| {
+                let (l, p) = (&t.linhas[r.linha], &t.linhas[r.linha].padroes[r.padrao]);
+                sim::bus::BusRoute {
+                    linha: if l.numero.is_empty() { l.id.clone() } else { l.numero.clone() },
+                    padrao: p.id.clone(),
+                    caminho: r.caminho.clone(),
+                    // baia ainda é tratada como parada na faixa (versão 2, fase 6)
+                    paradas: r.paradas.iter().map(|q| (q.passo, q.lane, q.s)).collect(),
+                    partidas: p.trechos[r.trecho].partidas.clone(),
+                }
+            })
+            .collect()
     }
 
     /// Avisos das exceções para ônibus que não couberam no mapa.
@@ -562,8 +588,21 @@ impl Network {
                 "junctionOverlaps": s.stats.junction_overlaps,
                 "junctionOverlapsGeom": s.stats.junction_overlaps_geom,
                 "occDeadlocks": s.stats.occ_deadlocks,
+                "busesActive": s.bus_summary().0,
+                "busTripsDone": s.bus_summary().1,
+                "busSpeedKmh": s.bus_summary().2,
+                "busStops": s.stats.bus_stops,
+                "busStopsMissed": s.stats.bus_stops_missed,
+                "carsAtBusStop": s.stats.cars_at_bus_stop,
             })
             .to_string(),
+            None => "{}".to_string(),
+        }
+    }
+    /// Métricas dos ônibus por linha (JSON; `{}` sem simulação ou sem linhas).
+    pub fn sim_bus_report(&self) -> String {
+        match &self.sim {
+            Some(s) => s.bus_report().to_string(),
             None => "{}".to_string(),
         }
     }
