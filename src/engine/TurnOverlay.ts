@@ -1,6 +1,6 @@
 import { Graphics } from 'pixi.js'
 import type { NetworkData, NodeConns } from '../model/types'
-import { CONN_ABSENT, CONN_ALLOWED, CONN_BLOCKED, CONN_STRIDE, KIND_RIGHT, KIND_STRAIGHT, KIND_UTURN } from '../model/types'
+import { CONN_ABSENT, CONN_BLOCKED, CONN_STRIDE, connOn, KIND_RIGHT, KIND_STRAIGHT, KIND_UTURN } from '../model/types'
 import { C } from './colors'
 
 type Pt = [number, number]
@@ -166,7 +166,7 @@ export function drawTurns(g: Graphics, d: NetworkData, nc: NodeConns | null, nod
 
   // 2) ligadas: contorno escuro + cor da faixa de origem
   const lit: number[] = []
-  for (let c = a; c < b; c++) if (nc.u32[c * CONN_STRIDE + 4] === CONN_ALLOWED) lit.push(c)
+  for (let c = a; c < b; c++) if (connOn(nc.u32[c * CONN_STRIDE + 4])) lit.push(c)
   const alphaOf = (c: number) => (active == null || nc.u32[c * CONN_STRIDE + 1] === active ? 1 : 0.18)
   for (const c of lit) {
     polyline(g, sample(c))
@@ -187,7 +187,7 @@ export function drawTurns(g: Graphics, d: NetworkData, nc: NodeConns | null, nod
     const lane = nc.u32[o + 1]
     const arr = byLane.get(lane) ?? []
     byLane.set(lane, arr)
-    arr.push({ kind: nc.u32[o + 3], ok: st === CONN_ALLOWED })
+    arr.push({ kind: nc.u32[o + 3], ok: connOn(st) })
   }
   for (const [lane, list] of byLane) {
     const o = lane * 8
@@ -207,7 +207,7 @@ export function drawTurns(g: Graphics, d: NetworkData, nc: NodeConns | null, nod
   const activeDst = new Set<number>()
   if (active != null) {
     for (let c = a; c < b; c++) {
-      if (nc.u32[c * CONN_STRIDE + 1] === active && nc.u32[c * CONN_STRIDE + 4] === CONN_ALLOWED) activeDst.add(nc.u32[c * CONN_STRIDE + 2])
+      if (nc.u32[c * CONN_STRIDE + 1] === active && connOn(nc.u32[c * CONN_STRIDE + 4])) activeDst.add(nc.u32[c * CONN_STRIDE + 2])
     }
   }
   const dragging = view.drag != null

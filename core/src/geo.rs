@@ -3,6 +3,30 @@
 
 pub type V2 = [f64; 2];
 
+/// Metros por grau de latitude (projeção equiretangular do mapa).
+pub const M_PER_DEG: f64 = 111_319.490_793_273_57;
+
+/// lat/lon → metros locais do mapa (`Net::geo = [lat_c, lon_c, kx]`; Y para baixo).
+pub fn latlon_to_xy(geo: &[f64; 3], lat: f64, lon: f64) -> V2 {
+    [(lon - geo[1]) * geo[2], -(lat - geo[0]) * M_PER_DEG]
+}
+
+/// Ponto mais próximo de `p` na polilinha `pts`: (índice do pedaço, fração no pedaço, distância).
+pub fn nearest_on_poly(pts: &[V2], p: V2) -> (usize, f64, f64) {
+    let mut best = (0, 0.0, f64::INFINITY);
+    for i in 0..pts.len().saturating_sub(1) {
+        let (a, b) = (pts[i], pts[i + 1]);
+        let v = sub(b, a);
+        let l2 = dot(v, v);
+        let t = if l2 > 0.0 { (dot(sub(p, a), v) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = len(sub(add(a, mul(v, t)), p));
+        if d < best.2 {
+            best = (i, t, d);
+        }
+    }
+    best
+}
+
 #[inline]
 pub fn add(a: V2, b: V2) -> V2 {
     [a[0] + b[0], a[1] + b[1]]

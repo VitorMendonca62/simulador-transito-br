@@ -276,27 +276,37 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
     // à esquerda) em vez de sobrar faixa sem saída.
     let osm = net.nodes[ni].osm_id;
     let way_of = |p: usize| net.segs[(ends[p] >> 1) as usize].way_id;
-    let banned = |a: usize, b: usize| -> bool {
-        let Some(list) = restr.get(&osm) else { return false };
+    // 0 = livre, 1 = proibida, 2 = proibida para carros com ônibus isentos (`except=bus`)
+    let ban = |a: usize, b: usize| -> u8 {
+        let Some(list) = restr.get(&osm) else { return 0 };
         // restrição é para carros: aproximação só de ônibus (corredor exclusivo) não é afetada
         if ap[a].0.iter().all(|&l| net.lanes[l as usize].bus) {
-            return false;
+            return 0;
         }
-        list.iter().any(|&ri| {
+        let mut out = 0u8;
+        for &ri in list {
             let r = &raw.restrictions[ri];
             // `to` que não chega a este nó (way partido em outro ponto, relação desatualizada): a restrição não se aplica aqui
             if way_of(a) != r.from || !(0..n).any(|p| way_of(p) == r.to) {
-                return false;
+                continue;
             }
-            if r.kind.starts_with("only_") {
+            let hit = if r.kind.starts_with("only_") {
                 way_of(b) != r.to
             } else if r.kind.starts_with("no_") {
                 way_of(b) == r.to
             } else {
                 false
+            };
+            if hit {
+                if !r.bus {
+                    return 1;
+                }
+                out = 2;
             }
-        })
+        }
+        out
     };
+    let banned = |a: usize, b: usize| ban(a, b) != 0;
     // distribuição das faixas da aproximação `a` entre as saídas `targets`
     let assign = |a: usize, targets: &[(usize, u8)]| -> Vec<Conn> {
         let ins = &ap[a].0;
@@ -395,13 +405,43 @@ pub fn node_conns(net: &Net, ni: usize, raw: &RawOsm, restr: &HashMap<i64, Vec<u
             for mut c in assign(a, &all) {
                 let b = (0..n).find(|&b| ap[b].1.contains(&c.to_lane)).unwrap_or(a);
                 if banned(a, b) && !have.contains(&(c.from_lane, c.to_lane)) {
-                    c.state = CONN_BLOCKED;
-                    c.base = CONN_BLOCKED;
+                    c.state = if ban(a, b) == 2 { CONN_BUS } else { CONN_BLOCKED };
+                    c.base = c.state;
                     conns.push(c);
                 }
             }
         }
         conns.extend(real);
+    }
+
+    // conversões só para ônibus (exceção das linhas, `kind == "bus_only"`): a proibida vira só de ônibus; a que não
+    // existe ganha faixas como uma manobra sozinha
+    if let Some(list) = restr.get(&osm) {
+        for &ri in list {
+            let r = &raw.restrictions[ri];
+            if r.kind != "bus_only" {
+                continue;
+            }
+            for a in (0..n).filter(|&a| way_of(a) == r.from && !ap[a].0.is_empty()) {
+                for b in (0..n).filter(|&b| way_of(b) == r.to && !ap[b].1.is_empty()) {
+                    let link = |c: &Conn| ap[a].0.contains(&c.from_lane) && ap[b].1.contains(&c.to_lane);
+                    if conns.iter().any(|c| link(c) && (c.state == CONN_ALLOWED || c.state == CONN_BUS)) {
+                        continue;
+                    }
+                    let had = conns.iter().any(|c| link(c));
+                    for c in conns.iter_mut().filter(|c| link(c)) {
+                        c.state = CONN_BUS;
+                    }
+                    if !had {
+                        let kind = if a == b { K_UTURN } else { classify(mul(outw[a], -1.0), outw[b]) };
+                        for mut c in assign(a, &[(b, kind)]) {
+                            c.state = CONN_BUS;
+                            conns.push(c);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // candidatas: todo par entrada -> saída que ainda não existe (estado ausente)

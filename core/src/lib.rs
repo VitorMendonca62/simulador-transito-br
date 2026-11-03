@@ -9,6 +9,7 @@ pub mod net;
 pub mod osm;
 pub mod render;
 pub mod sim;
+pub mod transit;
 
 use net::*;
 use serde_json::json;
@@ -32,6 +33,11 @@ pub struct Network {
     lazy: bool,
     /// semáforos de base externa (nó OSM -> id externo); `None` = semáforos do próprio OSM
     ext_signals: Option<extsig::ExtSignals>,
+    /// linhas de ônibus (exceções já aplicadas em `raw`), avisos das exceções e encaixe (sob demanda: refeito depois de
+    /// cada edição quando alguém pede)
+    transit: Option<transit::TransitData>,
+    transit_avisos: Vec<String>,
+    transit_fit: Option<transit::TransitFit>,
     /// pesos do último lote de rotas tomado (`sim_route_take`), entregues por `sim_route_pen`/`sim_route_cm`
     route_w: (Vec<f32>, Vec<f32>),
     /// edições aplicadas pelo caminho rápido (diagnóstico e testes)
@@ -72,30 +78,36 @@ fn build_parts(raw: &osm::RawOsm, base: &BaseCache, edits: &Edits, lazy: bool, e
     Ok(net)
 }
 
-fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal]) -> Result<Network, String> {
+fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal], transit: Option<transit::TransitData>) -> Result<Network, String> {
     let mut raw = osm::parse(data)?;
     let ext_signals = if ext.is_empty() { None } else { extsig::replace_signals(&mut raw, ext) };
+    let transit_avisos = transit.as_ref().map(|t| transit::apply_exceptions(&mut raw, t)).unwrap_or_default();
     let edits = Edits::default();
     let base = BaseCache::new(&raw)?;
     let net = build_parts(&raw, &base, &edits, lazy, ext_signals.as_ref())?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
-    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, route_w: Default::default(), fast_edits: 0 })
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, transit, transit_avisos, transit_fit: None, route_w: Default::default(), fast_edits: 0 })
 }
 
 /// Rede com conexões por nó sob demanda (como no navegador).
 pub fn build_network_lazy(data: &[u8]) -> Result<Network, String> {
-    build_network_with(data, true, &[])
+    build_network_with(data, true, &[], None)
+}
+
+/// Como `build_network`, com as linhas de ônibus (exceções aplicadas no OSM) e, opcionalmente, semáforos externos.
+pub fn build_network_transit(data: &[u8], ext: &[extsig::ExtSignal], transit: transit::TransitData, lazy: bool) -> Result<Network, String> {
+    build_network_with(data, lazy, ext, Some(transit))
 }
 
 /// Como `build_network`, com os semáforos do OSM trocados pelos da base externa (quando ela cobre o mapa).
 pub fn build_network_ext(data: &[u8], ext: &[extsig::ExtSignal]) -> Result<Network, String> {
-    build_network_with(data, false, ext)
+    build_network_with(data, false, ext, None)
 }
 
 /// Rede com todas as conexões calculadas (testes, simulação).
 pub fn build_network(data: &[u8]) -> Result<Network, String> {
-    build_network_with(data, false, &[])
+    build_network_with(data, false, &[], None)
 }
 
 impl Network {
@@ -151,6 +163,7 @@ impl Network {
         self.edits = edits;
         self.net = net;
         self.sim = None; // a rede mudou: a simulação precisa recomeçar
+        self.transit_fit = None;
         self.tiles = tiles;
         let ts = &self.tiles;
         self.delta.merge(delta, |id| ts.tiles.contains_key(&id));
@@ -169,6 +182,20 @@ impl Network {
         init.prios = self.edits.prios.clone();
         self.sim = Some(sim::Sim::new_ext(&self.net, &init, route_ext)?);
         Ok(())
+    }
+
+    /// Encaixe das linhas de ônibus na rede atual (calculado na primeira chamada depois de cada edição).
+    pub fn transit_fit(&mut self) -> Option<&transit::TransitFit> {
+        let t = self.transit.as_ref()?;
+        if self.transit_fit.is_none() {
+            self.transit_fit = Some(transit::fit(&self.net, &self.raw, &self.restr, &self.edits, t));
+        }
+        self.transit_fit.as_ref()
+    }
+
+    /// Avisos das exceções para ônibus que não couberam no mapa.
+    pub fn transit_warnings(&self) -> &[String] {
+        &self.transit_avisos
     }
 
     /// Garante `net.conns` completo (simulação e roteamento).
@@ -201,7 +228,20 @@ impl RouterHandle {
 
 #[wasm_bindgen]
 pub fn import_osm(data: &[u8]) -> Result<Network, JsError> {
-    build_network_with(data, true, &[]).map_err(|e| JsError::new(&e))
+    build_network_with(data, true, &[], None).map_err(|e| JsError::new(&e))
+}
+
+/// Importa com semáforos externos e linhas de ônibus (cada JSON vazio = sem). As exceções das linhas mudam o OSM
+/// bruto: trocar de linhas pede importar de novo.
+#[wasm_bindgen]
+pub fn import_osm_full(data: &[u8], signals_json: &str, transit_json: &str) -> Result<Network, JsError> {
+    let ext: Vec<extsig::ExtSignal> = if signals_json.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(signals_json).map_err(|e| JsError::new(&format!("semáforos inválidos: {e}")))?
+    };
+    let transit = if transit_json.trim().is_empty() { None } else { Some(transit::TransitData::parse(transit_json).map_err(|e| JsError::new(&e))?) };
+    build_network_with(data, true, &ext, transit).map_err(|e| JsError::new(&e))
 }
 
 /// Importa trocando os semáforos do OSM pelos da base externa. JSON: lista de `{id, lat, lon, cruzamento}`.
@@ -209,11 +249,20 @@ pub fn import_osm(data: &[u8]) -> Result<Network, JsError> {
 #[wasm_bindgen]
 pub fn import_osm_signals(data: &[u8], signals_json: &str) -> Result<Network, JsError> {
     let ext: Vec<extsig::ExtSignal> = serde_json::from_str(signals_json).map_err(|e| JsError::new(&format!("semáforos inválidos: {e}")))?;
-    build_network_with(data, true, &ext).map_err(|e| JsError::new(&e))
+    build_network_with(data, true, &ext, None).map_err(|e| JsError::new(&e))
 }
 
 #[wasm_bindgen]
 impl Network {
+    /// Resumo do encaixe das linhas de ônibus (`{}` sem linhas): trechos, encaixados, paradas e avisos.
+    pub fn transit_json(&mut self) -> String {
+        if self.transit_fit().is_none() {
+            return "{}".into();
+        }
+        let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return "{}".into() };
+        f.summary_json(t, &self.transit_avisos)
+    }
+
     pub fn meta_json(&self) -> String {
         // structs com Serialize em vez de `json!`: no Recife (1.200 semáforos) o `Value` montado nó a nó custava ~20 ms
         // por edição

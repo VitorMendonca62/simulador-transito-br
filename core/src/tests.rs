@@ -2235,3 +2235,297 @@ fn fast_segment_edits_recife() {
     let build = || build_network_lazy_for_test(&data);
     check_fast_seg_edits(build(), &build);
 }
+
+/// Diagnóstico das linhas de ônibus no Recife: `RECIFE_OSM=<mapa-recife.osm> cargo test --release onibus_recife --
+/// --ignored --nocapture`. Conta trechos encaixados e desligados por motivo, lista os piores avisos e mede o encaixe
+/// (CTTU=1 usa os semáforos da CTTU; LAZY=1 calcula as conexões só dos nós visitados, como no navegador).
+#[test]
+#[ignore]
+fn onibus_recife() {
+    let Ok(path) = std::env::var("RECIFE_OSM") else { return };
+    let data = std::fs::read(path).unwrap();
+    let t = crate::transit::TransitData::parse(include_str!("../../public/data/onibus_recife.json")).unwrap();
+    let ext: Vec<crate::extsig::ExtSignal> =
+        if std::env::var("CTTU").is_ok() { serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap() } else { Vec::new() };
+    let lazy = std::env::var("LAZY").is_ok();
+    let t0 = std::time::Instant::now();
+    let mut n = crate::build_network_transit(&data, &ext, t.clone(), lazy).unwrap();
+    let t_build = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let f = n.transit_fit().unwrap().clone();
+    let t_fit = t1.elapsed();
+    let ok = f.trechos.iter().filter(|r| r.ok).count();
+    let mut motivos: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in f.trechos.iter().filter(|r| !r.ok) {
+        let a = r.aviso.clone().unwrap_or_default();
+        let m = a.split(':').map(|x| x.trim()).find(|x| x.starts_with("conversão") || x.starts_with("as vias")).map_or_else(|| a.split(':').next().unwrap_or("").to_string(), |x| x.split(" no nó").next().unwrap().to_string());
+        *motivos.entry(m).or_default() += 1;
+    }
+    let paradas: usize = f.trechos.iter().map(|r| r.paradas.len()).sum();
+    let fora: u32 = f.trechos.iter().map(|r| r.paradas_fora).sum();
+    println!("rede {:?}, encaixe {:?}: {ok} de {} trechos encaixados; paradas {paradas} (fora {fora})", t_build, t_fit, f.trechos.len());
+    println!("motivos: {motivos:?}");
+    println!("avisos das exceções: {:?}", n.transit_warnings());
+    let mut por_aviso: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for r in f.trechos.iter().filter(|r| !r.ok) {
+        por_aviso.entry(r.aviso.clone().unwrap_or_default()).or_default().push(t.linhas[r.linha].padroes[r.padrao].id.clone());
+    }
+    let mut v: Vec<_> = por_aviso.into_iter().collect();
+    v.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
+    for (a, p) in v.iter().take(30) {
+        println!("{:>4}  {a}  (ex. {})", p.len(), p[0]);
+    }
+    // SUGERIR=1: conversões que o itinerário faz e o mapa não tem, como exceções `conversao` (JSON por linha)
+    if std::env::var("SUGERIR").is_ok() {
+        for (a, p) in &v {
+            let num = |pre: &str| a.split(pre).nth(1).and_then(|x| x.split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<i64>().ok());
+            if let (Some(de), Some(para), Some(no)) = (num("da via "), num("para a via "), num("no nó ")) {
+                let tipo = if a.contains("proibida") { "proibida" } else { "ausente" };
+                println!("SUGESTAO {{\"no\":{no},\"de\":{de},\"para\":{para},\"padroes\":{},\"exemplo\":\"{}\",\"caso\":\"{tipo}\"}}", p.len(), p[0]);
+            }
+        }
+    }
+}
+
+/// Detalhe do encaixe de um padrão: `RECIFE_OSM=... PADRAO=121-1116-2 cargo test --release onibus_padrao -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn onibus_padrao() {
+    let (Ok(path), Ok(pid)) = (std::env::var("RECIFE_OSM"), std::env::var("PADRAO")) else { return };
+    let data = std::fs::read(path).unwrap();
+    let t = crate::transit::TransitData::parse(include_str!("../../public/data/onibus_recife.json")).unwrap();
+    let mut n = crate::build_network_transit(&data, &[], t.clone(), false).unwrap();
+    let f = n.transit_fit().unwrap().clone();
+    let net = &n.net;
+    for r in f.trechos.iter().filter(|r| t.linhas[r.linha].padroes[r.padrao].id == pid) {
+        let tr = &t.linhas[r.linha].padroes[r.padrao].trechos[r.trecho];
+        println!("trecho {}: ok={} aviso={:?}", r.trecho, r.ok, r.aviso);
+        for (k, &w) in tr.ways.iter().enumerate() {
+            let segs: Vec<String> = net
+                .segs
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.way_id == w.abs())
+                .map(|(i, s)| format!("s{i} {}→{} lf{} lb{} ow{}", net.nodes[s.from as usize].osm_id, net.nodes[s.to as usize].osm_id, s.lf, s.lb, s.oneway as u8))
+                .collect();
+            println!("  [{k}] {w}: {}", segs.join(" | "));
+        }
+        if let Some(a) = &r.aviso {
+            if let Some(w) = a.split("para a via ").nth(1).and_then(|x| x.split(':').next()).and_then(|x| x.trim().parse::<i64>().ok()) {
+                let prev = a.split("da via ").nth(1).and_then(|x| x.split(' ').next()).and_then(|x| x.parse::<i64>().ok()).unwrap();
+                // nós comuns entre os dois ways e conexões neles
+                for (ni, nd) in net.nodes.iter().enumerate() {
+                    let touches = |way: i64| nd.ends.iter().any(|&e| net.segs[(e >> 1) as usize].way_id == way);
+                    if touches(w) && touches(prev) {
+                        println!("  nó {} (osm {}):", ni, nd.osm_id);
+                        let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+                        for c in &net.conns[lo..hi] {
+                            let (a, b) = (&net.lanes[c.from_lane as usize], &net.lanes[c.to_lane as usize]);
+                            let (wa, wb) = (net.segs[a.seg as usize].way_id, net.segs[b.seg as usize].way_id);
+                            if (wa == prev || wa == w) && (wb == w || wb == prev) {
+                                println!("    s{}d{} → s{}d{} way {wa}→{wb} kind {} state {}", a.seg, a.dir, b.seg, b.dir, c.kind, c.state);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- linhas de ônibus (transit.rs) ---
+
+/// Rua A (100, mão dupla) de 1 a 4; Rua B (101) cruza em 2 (5 ao norte, 6 ao sul); Rua C (102, mão única) de 3 para o
+/// norte (7); Rua D (103) começa em 8, a ~6 m do fim da Rua A, sem ligação. Esquerda de A (sentido leste) para B
+/// proibida em 2.
+fn bus_grid(except: &str) -> String {
+    format!(
+        r#"<osm>
+<node id="1" lat="-8.0500" lon="-34.9000"/><node id="2" lat="-8.0500" lon="-34.8991"/>
+<node id="3" lat="-8.0500" lon="-34.8982"/><node id="4" lat="-8.0500" lon="-34.8973"/>
+<node id="5" lat="-8.0491" lon="-34.8991"/><node id="6" lat="-8.0509" lon="-34.8991"/>
+<node id="7" lat="-8.0491" lon="-34.8982"/><node id="8" lat="-8.05003" lon="-34.89725"/>
+<node id="9" lat="-8.0500" lon="-34.8964"/>
+<way id="100"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><tag k="highway" v="tertiary"/><tag k="name" v="Rua A"/></way>
+<way id="101"><nd ref="5"/><nd ref="2"/><nd ref="6"/><tag k="highway" v="tertiary"/><tag k="name" v="Rua B"/></way>
+<way id="102"><nd ref="3"/><nd ref="7"/><tag k="highway" v="tertiary"/><tag k="name" v="Rua C"/><tag k="oneway" v="yes"/></way>
+<way id="103"><nd ref="8"/><nd ref="9"/><tag k="highway" v="tertiary"/><tag k="name" v="Rua D"/></way>
+<relation id="9000"><member type="way" ref="100" role="from"/><member type="node" ref="2" role="via"/><member type="way" ref="101" role="to"/>
+<tag k="type" v="restriction"/><tag k="restriction" v="no_left_turn"/>{except}</relation>
+</osm>"#
+    )
+}
+
+/// Uma linha com um padrão de um trecho; `pontos` = começo e fim, uma parada perto do nó 3.
+fn bus_line(ways: &[i64], ini: [f64; 2], fim: [f64; 2], excecoes: serde_json::Value) -> crate::transit::TransitData {
+    let j = serde_json::json!({
+        "excecoes": excecoes,
+        "paradas": {"p3": {"nome": "Parada 3", "lat": -8.04998, "lon": -34.89825, "baia": false}},
+        "linhas": [{"id": "L1", "numero": "1", "nome": "Teste", "padroes": [{"id": "L1-a", "trechos": [
+            {"ways": ways, "pontos": [ini, fim], "lacunas": [], "paradas": [["p3", 0.0]], "partidas": [25200]}]}]}]
+    });
+    crate::transit::TransitData::parse(&j.to_string()).unwrap()
+}
+
+fn bus_net(except: &str, t: crate::transit::TransitData) -> Network {
+    crate::build_network_transit(bus_grid(except).as_bytes(), &[], t, false).unwrap()
+}
+
+const N1: [f64; 2] = [-8.0500, -34.9000];
+const N4: [f64; 2] = [-8.0500, -34.8973];
+
+fn fit0(n: &mut Network) -> crate::transit::TrechoFit {
+    n.transit_fit().unwrap().trechos[0].clone()
+}
+
+#[test]
+fn transit_fits_route_and_stop() {
+    let mut n = bus_net("", bus_line(&[100], N1, N4, serde_json::json!([])));
+    let r = fit0(&mut n);
+    assert!(r.ok, "{:?}", r.aviso);
+    // de 1 a 4 pela Rua A: três trechos (1-2, 2-3, 3-4), no sentido leste
+    assert_eq!(r.caminho.len(), 3);
+    let net = &n.net;
+    let osm = |s: u32, d: u8| {
+        let sg = &net.segs[s as usize];
+        let (a, b) = if d == 0 { (sg.from, sg.to) } else { (sg.to, sg.from) };
+        (net.nodes[a as usize].osm_id, net.nodes[b as usize].osm_id)
+    };
+    let nos: Vec<(i64, i64)> = r.caminho.iter().map(|&(s, d)| osm(s, d)).collect();
+    assert_eq!(nos, vec![(1, 2), (2, 3), (3, 4)]);
+    // parada perto do nó 3: no fim do 2º passo ou no começo do 3º, na faixa da direita do sentido
+    assert_eq!(r.paradas.len(), 1);
+    let p = &r.paradas[0];
+    let (s, d) = r.caminho[p.passo as usize];
+    let lane = &net.lanes[p.lane as usize];
+    assert_eq!((lane.seg, lane.dir), (s, d));
+    assert!(p.passo == 1 || p.passo == 2);
+    // sentido contrário (4 → 1) também encaixa
+    let mut m = bus_net("", bus_line(&[-100], N4, N1, serde_json::json!([])));
+    assert!(fit0(&mut m).ok);
+}
+
+#[test]
+fn transit_demolished_way_disables_and_undo_restores() {
+    let mut n = bus_net("", bus_line(&[100], N1, N4, serde_json::json!([])));
+    assert!(fit0(&mut n).ok);
+    n.set_edits(r#"{"removed":[[100,2,3]]}"#).unwrap();
+    let r = fit0(&mut n);
+    assert!(!r.ok);
+    assert!(r.aviso.as_deref().unwrap_or("").contains("100"), "{:?}", r.aviso);
+    n.set_edits("{}").unwrap();
+    assert!(fit0(&mut n).ok);
+}
+
+#[test]
+fn transit_way_split_by_new_road_still_fits() {
+    let mut n = bus_net("", bus_line(&[100], N1, N4, serde_json::json!([])));
+    let len = |n: &Network, r: &crate::transit::TrechoFit| r.caminho.iter().map(|&(s, _)| n.net.segs[s as usize].poly.length()).sum::<f64>();
+    let r0 = fit0(&mut n);
+    let l0 = len(&n, &r0);
+    let p2 = n.net.nodes.iter().find(|x| x.osm_id == 2).unwrap().pos;
+    let p3 = n.net.nodes.iter().find(|x| x.osm_id == 3).unwrap().pos;
+    let x = (p2[0] + p3[0]) / 2.0;
+    n.set_edits(&format!(
+        r#"{{"roads":[{{"id":900000000000001,"hw":"residential","name":"Nova","oneway":false,"lf":1,"lb":1,"pts":[{{"x":{x},"y":{}}},{{"x":{x},"y":{}}}]}}]}}"#,
+        p2[1] - 80.0,
+        p2[1] + 80.0
+    ))
+    .unwrap();
+    let r = fit0(&mut n);
+    assert!(r.ok, "{:?}", r.aviso);
+    assert_eq!(r.caminho.len(), 4, "a Rua A foi dividida pela via nova");
+    assert!((len(&n, &r) - l0).abs() < 1.0, "mesmo caminho em metros: {} × {l0}", len(&n, &r));
+}
+
+#[test]
+fn transit_ligar_creates_bus_only_link() {
+    let lig = crate::transit::BUS_BASE + 1;
+    let route = [100, lig, 103];
+    // sem a ligação, a Rua D não encosta na Rua A
+    let mut sem = bus_net("", bus_line(&route, N1, [-8.0500, -34.8964], serde_json::json!([])));
+    assert!(!fit0(&mut sem).ok);
+    let exc = serde_json::json!([{"tipo": "ligar", "id": 1, "de_no": 4, "para_no": 8}]);
+    let mut n = bus_net("", bus_line(&route, N1, [-8.0500, -34.8964], exc));
+    let r = fit0(&mut n);
+    assert!(r.ok, "{:?}", r.aviso);
+    assert!(n.transit_warnings().is_empty());
+    // a ligação é só de ônibus
+    let seg = n.net.segs.iter().position(|s| s.way_id == lig).unwrap() as u32;
+    assert!(n.net.lanes.iter().filter(|l| l.seg == seg).all(|l| l.bus));
+}
+
+#[test]
+fn transit_mao_dupla_adds_bus_contraflow() {
+    let route = [-102];
+    let ini = [-8.0491, -34.8982];
+    let fim = [-8.0500, -34.8982];
+    let mut sem = bus_net("", bus_line(&route, ini, fim, serde_json::json!([])));
+    assert!(!fit0(&mut sem).ok, "Rua C é mão única");
+    let mut n = bus_net("", bus_line(&route, ini, fim, serde_json::json!([{"tipo": "mao_dupla", "way": 102}])));
+    assert!(fit0(&mut n).ok);
+    let s = n.net.segs.iter().find(|s| s.way_id == 102).unwrap();
+    assert_eq!((s.lf, s.lb), (1, 1));
+    // a faixa do contrafluxo é só de ônibus; a do sentido da mão continua para todos
+    assert_eq!((s.bus_f.as_slice(), s.bus_b.as_slice()), (&[false][..], &[true][..]));
+}
+
+fn bus_left_conns(n: &Network) -> Vec<u8> {
+    // conexões em 2 da Rua A (vindo de 1) para a Rua B ao norte (5)
+    let net = &n.net;
+    let ni = net.nodes.iter().position(|x| x.osm_id == 2).unwrap();
+    let (lo, hi) = (net.conn_off[ni] as usize, net.conn_off[ni + 1] as usize);
+    net.conns[lo..hi]
+        .iter()
+        .filter(|c| {
+            let (a, b) = (&net.lanes[c.from_lane as usize], &net.lanes[c.to_lane as usize]);
+            let (sa, sb) = (&net.segs[a.seg as usize], &net.segs[b.seg as usize]);
+            let to_osm = |s: &Seg, d: u8| net.nodes[if d == 0 { s.to } else { s.from } as usize].osm_id;
+            sa.way_id == 100 && to_osm(sa, a.dir) == 2 && sb.way_id == 101 && to_osm(sb, b.dir) == 5
+        })
+        .map(|c| c.state)
+        .collect()
+}
+
+#[test]
+fn transit_conversao_allows_bus_only_turn() {
+    let route = [100, -101];
+    let fim = [-8.0491, -34.8991];
+    let mut sem = bus_net("", bus_line(&route, N1, fim, serde_json::json!([])));
+    let r = fit0(&mut sem);
+    assert!(!r.ok);
+    assert!(r.aviso.as_deref().unwrap().contains("conversão proibida no nó 2"), "{:?}", r.aviso);
+    let exc = serde_json::json!([{"tipo": "conversao", "no": 2, "de": 100, "para": 101}]);
+    let mut n = bus_net("", bus_line(&route, N1, fim, exc));
+    assert!(fit0(&mut n).ok);
+    // a esquerda fica só para ônibus: o roteador de carros (só CONN_ALLOWED) não a usa
+    let st = bus_left_conns(&n);
+    assert!(!st.is_empty() && st.iter().all(|&s| s == CONN_BUS), "{st:?}");
+}
+
+#[test]
+fn restriction_with_bus_exception_is_bus_only() {
+    let t = bus_line(&[100, -101], N1, [-8.0491, -34.8991], serde_json::json!([]));
+    let mut n = bus_net(r#"<tag k="except" v="bus;taxi"/>"#, t);
+    let st = bus_left_conns(&n);
+    assert!(!st.is_empty() && st.iter().all(|&s| s == CONN_BUS), "{st:?}");
+    assert!(fit0(&mut n).ok, "ônibus isentos da restrição");
+}
+
+#[test]
+fn transit_fit_same_after_fast_and_full_rebuild() {
+    let mut n = bus_net("", bus_line(&[100], N1, N4, serde_json::json!([])));
+    let base = fit0(&mut n);
+    // só o perfil de um trecho (caminho rápido)
+    n.set_edits(&edit_json([100, 3, 4], "\"oneway\":false,\"lf\":2,\"lb\":1")).unwrap();
+    assert!(n.fast_edits > 0);
+    let fast = fit0(&mut n);
+    // mesma edição pela reconstrução completa (rede nova)
+    let mut m = bus_net("", bus_line(&[100], N1, N4, serde_json::json!([])));
+    m.set_edits(&format!("{{\"segments\":[{{\"way\":100,\"from\":3,\"to\":4,\"oneway\":false,\"lf\":2,\"lb\":1}}],\"signals\":[{{\"node\":1,\"enabled\":true}}]}}")).unwrap();
+    m.set_edits(&edit_json([100, 3, 4], "\"oneway\":false,\"lf\":2,\"lb\":1")).unwrap();
+    let full = fit0(&mut m);
+    assert!(fast.ok && full.ok);
+    assert_eq!(fast.caminho, full.caminho);
+    assert_eq!(fast.caminho, base.caminho);
+}

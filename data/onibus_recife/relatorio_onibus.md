@@ -5,77 +5,78 @@ Gerado por `scripts/onibus_recife/gerar_onibus.py`. Fonte: [GTFS do Grande Recif
 ## Números principais
 
 - Rotas no GTFS: 400 (395 de ônibus; metrô e VLT ficam de fora). Com viagem no dia de referência: 388.
-- Linhas com algum trecho no mapa do Recife: **292**; padrões (shapes) no mapa: **999** de 1340 com viagem no dia.
-- Padrões com itinerário contínuo (sem lacuna): **700** (70%). Ligações refeitas pelo menor caminho no mapa (trecho sem amostra perto de via, como terminal ou rua `service`): 310.
-- Lacunas: **92** pares de ways distintos, em 511 ocorrências (desvio longo (conversão que o mapa não permite): 62; sem ligação no mapa: 17; só contra a mão única: 13).
-- Amostras do itinerário a até 20 m de um way compatível (mediana por padrão): 97%.
-- Padrões que saem e voltam ao mapa (mais de um trecho): 82.
-- Ônibus entrando em trechos do mapa no dia: **32095**; às 7h: **2037**.
+- Linhas com algum trecho no mapa do Recife: **290**; padrões (shapes) no mapa: **995** de 1340 com viagem no dia.
+- Padrões com itinerário contínuo (sem lacuna): **853** (86%). Ligações refeitas pelo menor caminho no mapa (trecho sem amostra perto de via, como terminal ou rua `service`): 640.
+- Lacunas: **56** pares de ways distintos, em 178 ocorrências (desvio longo (ligação curta ausente no mapa): 49; sem ligação no mapa: 5; só contra a mão única: 2).
+- Amostras do itinerário a até 20 m de um way compatível (mediana por padrão): 98%.
+- Padrões que saem e voltam ao mapa (mais de um trecho): 75.
+- Ônibus entrando em trechos do mapa no dia: **31456**; às 7h: **1991**.
 - Paradas usadas: **2868** (baias pelo OSM: 0). Paradas GTFS dentro do mapa sem padrão no dia: 22. Sem nome (o GTFS só traz o código e não há parada do OSM com nome a até 30 m): 1179.
+- Exceções para ônibus (`ajustes_manuais.json`): conversao: 35, incluir: 14, ligar: 46, mao_dupla: 4. Vias `service` incluídas automaticamente (o shape passa por elas): 30 (lista em `incluir_auto.csv`).
 - Paradas do OSM no mapa (`highway=bus_stop`): 188; sem parada GTFS a até 30 m: 36. Elementos de parada no Overpass (Recife): 3660.
 
 ## Ônibus por hora no mapa
 
 | hora | ônibus |
 |---|---|
-| 0h | 143 |
-| 1h | 82 |
-| 2h | 79 |
-| 3h | 87 |
-| 4h | 633 |
-| 5h | 1864 |
-| 6h | 2263 |
-| 7h | 2037 |
-| 8h | 1893 |
-| 9h | 1637 |
-| 10h | 1508 |
-| 11h | 1549 |
-| 12h | 1611 |
-| 13h | 1703 |
-| 14h | 1865 |
-| 15h | 2012 |
-| 16h | 2033 |
-| 17h | 1884 |
-| 18h | 1704 |
-| 19h | 1389 |
-| 20h | 1252 |
-| 21h | 1228 |
-| 22h | 1069 |
-| 23h | 570 |
+| 0h | 141 |
+| 1h | 81 |
+| 2h | 78 |
+| 3h | 86 |
+| 4h | 620 |
+| 5h | 1816 |
+| 6h | 2207 |
+| 7h | 1991 |
+| 8h | 1859 |
+| 9h | 1610 |
+| 10h | 1480 |
+| 11h | 1521 |
+| 12h | 1579 |
+| 13h | 1666 |
+| 14h | 1822 |
+| 15h | 1967 |
+| 16h | 1985 |
+| 17h | 1844 |
+| 18h | 1676 |
+| 19h | 1372 |
+| 20h | 1229 |
+| 21h | 1207 |
+| 22h | 1053 |
+| 23h | 566 |
 
 ## Lacunas
 
-Dois ways seguidos do itinerário que o mapa não liga por um caminho de até 2× a distância reta + 300 m. *Desvio longo*: o mapa liga, mas por outro caminho (conversão proibida ou ausente). *Só contra a mão única*: o ônibus passa onde o OSM marca mão única (o núcleo não lê exceção para ônibus). *Sem ligação no mapa*: via que o núcleo não carrega (`service`, terminal) ou que falta no OSM. São os candidatos a `ajustes_manuais.json`; lista completa em `lacunas.csv`.
+Dois ways seguidos do itinerário que o mapa não liga por um caminho de até 2× a distância reta + 300 m. *Desvio longo*: o mapa liga, mas só por um caminho bem mais longo (falta uma ligação curta: corredor que não encosta na pista, alça, acesso de terminal). *Só contra a mão única*: o ônibus passa onde o OSM marca mão única (o OSM do Recife não marca `oneway:bus`). *Sem ligação no mapa*: via que o núcleo não carrega (`service`, terminal) ou que falta no OSM. Cada uma se resolve com uma exceção para ônibus em `ajustes_manuais.json` (`ligar`, `mao_dupla`) ou fica como aviso; lista completa em `lacunas.csv`.
 
 | de_way | para_way | motivo | distancia_m | padroes | exemplo | lat | lon |
 |---|---|---|---|---|---|---|---|
-| 128451839 | 796498278 | desvio longo (conversão que o mapa não permite) | 1020 | 39 | 121-1116-2 | -8.078013 | -34.898104 |
-| 678493300 | 128451839 | só contra a mão única | 948 | 39 | 121-1116-2 | -8.074915 | -34.88926 |
-| 574139911 | 136667235 | desvio longo (conversão que o mapa não permite) | 10 | 24 | 202-1060-2 | -8.030867 | -34.956647 |
-| 151153196 | 778595301 | só contra a mão única | 10 | 19 | 011-1120-2 | -8.087987 | -34.891545 |
-| 695519696 | 129478578 | desvio longo (conversão que o mapa não permite) | 57 | 18 | 125-306-2 | -8.122797 | -34.912431 |
-| 647530685 | 129479410 | só contra a mão única | 209 | 16 | 023-679-1 | -8.131974 | -34.916888 |
-| 775253565 | 573293591 | desvio longo (conversão que o mapa não permite) | 60 | 15 | 1906-1541-2 | -8.008732 | -34.938013 |
-| 995648132 | 627935214 | sem ligação no mapa | 33 | 14 | 2416-1245-2 | -8.050969 | -34.921544 |
-| 134472028 | 87240009 | desvio longo (conversão que o mapa não permite) | 249 | 13 | 011-1120-2 | -8.11992 | -34.902017 |
-| 809324597 | 626712794 | sem ligação no mapa | 9 | 13 | 2421-771-1 | -8.050311 | -34.922389 |
-| 129478578 | 707010070 | desvio longo (conversão que o mapa não permite) | 175 | 12 | 023-679-1 | -8.122183 | -34.912353 |
+| 339192844 | 151153196 | desvio longo (ligação curta ausente no mapa) | 82 | 19 | 011-1120-2 | -8.085873 | -34.891135 |
 | 332536308 | 479907716 | só contra a mão única | 10 | 12 | 049-665-2 | -8.06867 | -34.990636 |
-| 222795597 | 336100412 | sem ligação no mapa | 95 | 10 | 120-1184-1 | -8.110033 | -34.963213 |
 | 336100412 | 222795597 | sem ligação no mapa | 105 | 10 | 120-1184-2 | -8.110037 | -34.963229 |
-| 762384521 | 128162317 | desvio longo (conversão que o mapa não permite) | 10 | 10 | 1062-1045-1 | -8.062309 | -34.878284 |
-| 1107392940 | 706175626 | só contra a mão única | 10 | 9 | 011-1120-2 | -8.085328 | -34.89052 |
-| 204618974 | 637666036 | desvio longo (conversão que o mapa não permite) | 100 | 8 | 202-599-1 | -8.031199 | -34.954846 |
-| 339192846 | 706175626 | só contra a mão única | 10 | 7 | 014-1442-2 | -8.085318 | -34.8905 |
-| 707010072 | 129478578 | desvio longo (conversão que o mapa não permite) | 66 | 7 | 020-241-1 | -8.122756 | -34.91243 |
-| 777105569 | 796498278 | desvio longo (conversão que o mapa não permite) | 543 | 7 | 121-1312-2 | -8.078733 | -34.900134 |
-| 869890189 | 984862014 | desvio longo (conversão que o mapa não permite) | 480 | 7 | 2459-1357-2 | -8.035496 | -34.984779 |
-| 967932896 | 647530685 | só contra a mão única | 290 | 7 | 191-300-1 | -8.131651 | -34.91726 |
-| 984862014 | 869890189 | desvio longo (conversão que o mapa não permite) | 480 | 7 | 2459-1357-1 | -8.035484 | -34.984765 |
+| 222795597 | 336100412 | sem ligação no mapa | 95 | 8 | 120-1184-1 | -8.110033 | -34.963213 |
+| 869890189 | 984862014 | desvio longo (ligação curta ausente no mapa) | 480 | 7 | 2459-1357-2 | -8.035496 | -34.984779 |
+| 984862014 | 869890189 | desvio longo (ligação curta ausente no mapa) | 480 | 7 | 2459-1357-1 | -8.035484 | -34.984765 |
 | 30812855 | 222100952 | sem ligação no mapa | 276 | 6 | 219-682-2 | -8.076808 | -34.980316 |
-| 137364477 | 628645780 | desvio longo (conversão que o mapa não permite) | 10 | 6 | 2493-1360-2 | -8.042886 | -34.934622 |
-| 316808706 | 901242726 | desvio longo (conversão que o mapa não permite) | 10 | 6 | 152-343-2 | -8.141269 | -34.933348 |
-| 573648907 | 628649580 | desvio longo (conversão que o mapa não permite) | 10 | 6 | 2493-1360-2 | -8.038196 | -34.943109 |
-| 573648911 | 573648910 | desvio longo (conversão que o mapa não permite) | 10 | 6 | 2493-1360-1 | -8.042843 | -34.934963 |
-| 628924113 | 626263369 | desvio longo (conversão que o mapa não permite) | 121 | 6 | 2429-1193-1 | -8.039164 | -34.943624 |
-| 703515996 | 318869517 | desvio longo (conversão que o mapa não permite) | 10 | 6 | 2493-1360-1 | -8.039965 | -34.940183 |
+| 316808706 | 901242726 | desvio longo (ligação curta ausente no mapa) | 10 | 6 | 152-343-2 | -8.141269 | -34.933348 |
+| 772524562 | 1126443037 | desvio longo (ligação curta ausente no mapa) | 59 | 6 | 516-201-1 | -8.058321 | -34.898531 |
+| 901242726 | 316808706 | desvio longo (ligação curta ausente no mapa) | 10 | 6 | 152-343-1 | -8.141278 | -34.933361 |
+| 194287395 | 129483732 | desvio longo (ligação curta ausente no mapa) | 10 | 5 | 014-1121-1 | -8.08488 | -34.887178 |
+| 221642218 | 323308461 | desvio longo (ligação curta ausente no mapa) | 224 | 5 | 331-675-2 | -8.087069 | -34.970444 |
+| 701900698 | 701900697 | desvio longo (ligação curta ausente no mapa) | 14 | 5 | 134-1031-1 | -8.123609 | -34.912389 |
+| 703620185 | 772281235 | desvio longo (ligação curta ausente no mapa) | 44 | 5 | 108-624-1 | -8.088645 | -34.946305 |
+| 128333663 | 367517835 | desvio longo (ligação curta ausente no mapa) | 10 | 4 | 710-519-1 | -8.064749 | -34.89703 |
+| 161802350 | 901242726 | desvio longo (ligação curta ausente no mapa) | 593 | 4 | 152-343-1 | -8.139142 | -34.935262 |
+| 222795414 | 430383804 | desvio longo (ligação curta ausente no mapa) | 200 | 4 | 149-1035-1 | -8.108743 | -34.962352 |
+| 901242726 | 161802350 | desvio longo (ligação curta ausente no mapa) | 592 | 4 | 152-343-2 | -8.139145 | -34.935259 |
+| 230514550 | 598232863 | desvio longo (ligação curta ausente no mapa) | 10 | 3 | 191-300-1 | -8.073769 | -34.893898 |
+| 703556861 | 128446976 | desvio longo (ligação curta ausente no mapa) | 10 | 3 | 101-605-1 | -8.06798 | -34.883495 |
+| 777105568 | 883617690 | desvio longo (ligação curta ausente no mapa) | 10 | 3 | 200-1037-1 | -8.077493 | -34.896675 |
+| 136957397 | 137186650 | desvio longo (ligação curta ausente no mapa) | 55 | 2 | 858-1364-1 | -8.077236 | -34.906766 |
+| 137186650 | 129812361 | desvio longo (ligação curta ausente no mapa) | 10 | 2 | 858-1364-1 | -8.077382 | -34.907022 |
+| 161802350 | 707366299 | desvio longo (ligação curta ausente no mapa) | 16 | 2 | 125-306-1 | -8.137015 | -34.937009 |
+| 222795597 | 553472082 | sem ligação no mapa | 522 | 2 | 149-1500-1 | -8.112781 | -34.963533 |
+| 703620185 | 1183809384 | desvio longo (ligação curta ausente no mapa) | 66 | 2 | 202-1060-2 | -8.087703 | -34.945832 |
+| 707366299 | 161802350 | desvio longo (ligação curta ausente no mapa) | 18 | 2 | 125-306-2 | -8.137022 | -34.937023 |
+| 707366299 | 901242726 | desvio longo (ligação curta ausente no mapa) | 607 | 2 | 153-349-1 | -8.139083 | -34.935331 |
+| 707366299 | 336096294 | desvio longo (ligação curta ausente no mapa) | 7 | 2 | 153-349-2 | -8.134145 | -34.943867 |
+| 901242726 | 707366299 | desvio longo (ligação curta ausente no mapa) | 607 | 2 | 153-349-2 | -8.139067 | -34.935357 |

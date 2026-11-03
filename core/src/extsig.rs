@@ -276,7 +276,7 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
                     marked.entry(id).or_insert(s.id);
                     any = true;
                     for &[from, to] in &s.proibir {
-                        raw.restrictions.push(crate::osm::RawRestriction { kind: "no_turn".into(), from, via: id, to });
+                        raw.restrictions.push(crate::osm::RawRestriction { kind: "no_turn".into(), from, via: id, to, bus: false });
                     }
                 }
             }

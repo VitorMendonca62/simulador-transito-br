@@ -145,6 +145,9 @@ export type RouterOut =
 export const CONN_BLOCKED = 0 // proibida por restrição OSM (vermelho)
 export const CONN_ALLOWED = 1 // ligada
 export const CONN_ABSENT = 2 // candidata não ligada (só aparece ao arrastar)
+export const CONN_BUS = 3 // ligada só para ônibus (exceção das linhas de ônibus ou restrição com ônibus isentos)
+/** Conexão ligada (para todos ou só para ônibus). */
+export const connOn = (st: number) => st === CONN_ALLOWED || st === CONN_BUS
 
 /** Estatísticas da simulação (1 Hz). */
 export interface SimStats {

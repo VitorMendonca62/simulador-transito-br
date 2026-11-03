@@ -6,6 +6,8 @@ gerado:
     python scripts/onibus_recife/aplicar_ajustes.py [--app public/data/onibus_recife.json]
 
 Cada item alterado guarda os valores gerados em `_orig`; reaplicar volta a eles antes de aplicar a lista atual.
+As exceções para ônibus (`excecoes`) vão inteiras para o topo do JSON; como elas mudam o casamento dos itinerários,
+mudar uma exceção pede rodar gerar_onibus.py de novo (este script só as copia).
 Só usa a biblioteca padrão.
 """
 import argparse
@@ -14,6 +16,28 @@ import sys
 from pathlib import Path
 
 AJUSTES = Path(__file__).with_name("ajustes_manuais.json")
+
+
+TIPOS = {"incluir": ("ways",), "ligar": ("id", "de_no", "para_no"), "mao_dupla": ("way",),
+         "conversao": ("no", "de", "para")}
+
+
+def excecoes(path: Path = AJUSTES) -> list[dict]:
+    """Exceções para ônibus, validadas. `ligar` tem `id` próprio (1, 2, ...): o way sintético é 300 << 40 + id."""
+    out, ids = [], set()
+    for e in json.loads(path.read_text()).get("excecoes", []):
+        campos = TIPOS.get(e.get("tipo"))
+        ok = campos is not None and all(
+            isinstance(e.get(c), list) and e[c] and all(isinstance(w, int) for w in e[c]) if c == "ways"
+            else isinstance(e.get(c), int) for c in campos)
+        if not ok:
+            raise SystemExit(f"exceção inválida: {e}")
+        if e["tipo"] == "ligar":
+            if e["id"] < 1 or e["id"] in ids:
+                raise SystemExit(f"ligar: id {e['id']} repetido ou < 1")
+            ids.add(e["id"])
+        out.append({k: e[k] for k in ("tipo", *campos)})
+    return out
 
 
 def _restaura(item: dict):
@@ -51,7 +75,8 @@ def aplicar(dados: dict, path: Path = AJUSTES) -> int:
             raise SystemExit(f"ajuste de {tipo} {a['id']}: não está nos dados gerados")
         return tab[a["id"]]
 
-    n = 0
+    dados["excecoes"] = excecoes(path)
+    n = len(dados["excecoes"])
     for a in aj.get("linhas", []):
         if a.get("desligar"):
             _troca(busca(linhas, a, "linha"), "desligada", True)

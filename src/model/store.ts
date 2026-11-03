@@ -44,7 +44,7 @@ import {
 } from './persistence'
 import { ROAD_PRESETS } from './presets'
 import { applyPatch, segInfo, segsOfWay, type SegPatch } from './segments'
-import { CONN_ABSENT, CONN_ALLOWED, type NetworkData, type NodeConns, type SignalDef, type SimStats } from './types'
+import { CONN_ABSENT, CONN_ALLOWED, connOn, type NetworkData, type NodeConns, type SignalDef, type SimStats } from './types'
 
 /** recorte do Recife do OpenStreetMap (outubro de 2026), comprimido */
 const RECIFE_URL = `${import.meta.env.BASE_URL}data/mapa-recife.osm.gz`
@@ -775,7 +775,7 @@ export const useStore = create<State>((set, get) => {
       const { data, nodeConns: nc } = get()
       if (!data || !nc || conns.length === 0) return
       // alguma ligada -> remove todas; senão liga todas
-      const any = conns.some((c) => nc.u32[c * 5 + 4] === CONN_ALLOWED)
+      const any = conns.some((c) => connOn(nc.u32[c * 5 + 4]))
       for (const c of conns) {
         nc.u32[c * 5 + 4] = any ? CONN_ABSENT : CONN_ALLOWED
         noteConn(data, nc, c)
@@ -788,7 +788,7 @@ export const useStore = create<State>((set, get) => {
       if (!data || !nc) return
       for (let c = 0; c < nc.n; c++) {
         if (nc.u32[c * 5 + 1] === fromLane && nc.u32[c * 5 + 2] === toLane) {
-          nc.u32[c * 5 + 4] = nc.u32[c * 5 + 4] === CONN_ALLOWED ? CONN_ABSENT : CONN_ALLOWED
+          nc.u32[c * 5 + 4] = connOn(nc.u32[c * 5 + 4]) ? CONN_ABSENT : CONN_ALLOWED
           noteConn(data, nc, c)
           afterConnEdit()
           return

@@ -41,6 +41,8 @@ Q_PARADAS = (f'[out:json][timeout:180];{AREA_RECIFE}(node["highway"="bus_stop"](
              'node["public_transport"~"^(platform|stop_position)$"]["bus"="yes"](area.a);'
              'node["bus_bay"](area.a);way["bus_bay"](area.a););out tags center;')
 MAPA = Path("public/data/mapa-recife.osm.gz")
+# ids dos ways sintéticos das ligações só de ônibus (`ligar`), iguais aos do núcleo (core/src/transit.rs)
+BUS_BASE = 300 << 40
 
 # vias que o núcleo aceita (core/src/net.rs, parse_highway); `_link` incluso
 VIAS = {"motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street",
@@ -64,6 +66,9 @@ C_RETORNO = 30.0        # inverter o sentido no mesmo way
 C_LACUNA = 25.0         # trocar para um way sem ligação com o anterior
 DESVIO_M = 3000.0       # na classificação das lacunas: caminho dirigido até essa distância = desvio longo
 PONTE_FATOR, PONTE_FOLGA_M = 2.0, 300.0  # lacuna ligada pelo menor caminho de até 2× a reta + 300 m
+LIGAR_MAX_M = 40.0      # sugestão de `ligar` numa lacuna só com os nós a até essa distância
+RECUO_M = 30.0          # folga para trás no way anterior ao procurar a passagem para o seguinte
+RUIDO_AMOSTRAS = 6      # corrida de até ~50 m que não se liga ao itinerário é ruído do casamento
 # paradas
 PARADA_RAIO_M = 30.0    # parada a até essa distância do itinerário entra no padrão
 BAIA_RAIO_M = 25.0
@@ -120,10 +125,13 @@ def baixar(brutos: Path, atualizar: bool):
 # ---------------------------------------------------------------- mapa
 
 class Mapa:
-    """Ways veiculares do mapa do app, em pedaços de dois pontos para a busca espacial."""
+    """Ways veiculares do mapa do app, em pedaços de dois pontos para a busca espacial, com as exceções para
+    ônibus (`incluir` traz vias `service` como vias só de ônibus; `ligar` cria um way só de ônibus entre dois nós;
+    `mao_dupla` libera os dois sentidos)."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, excecoes=()):
         coords, ways, paradas = {}, {}, []
+        incluir = {w for e in excecoes if e["tipo"] == "incluir" for w in e["ways"]}
         self.osm_base = None
         with gzip.open(path) as f:
             for ev, el in ET.iterparse(f, events=("end",)):
@@ -136,8 +144,9 @@ class Mapa:
                 elif tag == "way":
                     t = {c.get("k"): c.get("v") for c in el.iter("tag")}
                     hw = t.get("highway", "")
-                    if hw.removesuffix("_link") in VIAS and t.get("area") != "yes":
-                        ways[int(el.get("id"))] = ([int(n.get("ref")) for n in el.iter("nd")], t)
+                    wid = int(el.get("id"))
+                    if (hw.removesuffix("_link") in VIAS or wid in incluir or hw == "service") and t.get("area") != "yes":
+                        ways[wid] = ([int(n.get("ref")) for n in el.iter("nd")], t)
                 elif tag == "meta":
                     self.osm_base = el.get("osm_base")
                 elif tag == "relation":
@@ -146,7 +155,15 @@ class Mapa:
                     continue
                 el.clear()
         self.paradas_osm = paradas
-        self.ids, self.nos, self.sentido, self.xy = [], [], [], []
+        mao_dupla = {e["way"] for e in excecoes if e["tipo"] == "mao_dupla"}
+        for e in excecoes:
+            if e["tipo"] == "ligar":
+                ways[BUS_BASE + e["id"]] = ([e["de_no"], e["para_no"]], {"highway": "busway", "oneway": "yes"})
+        self.excecoes = Counter(e["tipo"] for e in excecoes)
+        self.ids, self.nos, self.sentido, self.xy, self.nomes = [], [], [], [], []
+        # vias `service` fora das exceções: só servem para ligar buracos do itinerário (não recebem amostras); as
+        # que um itinerário usar saem em `incluir_auto` e o núcleo as carrega como vias só de ônibus
+        self.extra = set()
         px0, py0, px1, py1, pw = [], [], [], [], []
         self.no_ways = defaultdict(set)
         for wid, (nds, t) in ways.items():
@@ -156,13 +173,17 @@ class Mapa:
             k = len(self.ids)
             self.ids.append(wid)
             self.nos.append(nds)
-            self.sentido.append(sentido_unico(t))
+            self.sentido.append(0 if wid in mao_dupla else sentido_unico(t))
+            self.nomes.append(t.get("name", ""))
             la = np.array([coords[n][0] for n in nds])
             lo = np.array([coords[n][1] for n in nds])
             wx, wy = xy(la, lo)
             self.xy.append((wx, wy))
             for n in nds:
                 self.no_ways[n].add(k)
+            if t.get("highway") == "service" and wid not in incluir:
+                self.extra.add(k)
+                continue
             px0.extend(wx[:-1]); py0.extend(wy[:-1]); px1.extend(wx[1:]); py1.extend(wy[1:]); pw.extend([k] * (len(nds) - 1))
         self.idx = {w: k for k, w in enumerate(self.ids)}
         # grafo dirigido nó -> [(nó, metros, way, sentido)], com a mão única do núcleo
@@ -183,6 +204,7 @@ class Mapa:
         self.pang = np.degrees(np.arctan2(self.p[:, 3] - self.p[:, 1], self.p[:, 2] - self.p[:, 0]))
         self.tree = shapely.STRtree(shapely.linestrings(np.stack([self.p[:, :2], self.p[:, 2:]], axis=1)))
         self._viz = {}
+        self._coer = {}
 
     def dentro(self, x, y):
         """Amostras a até PERTO_M de alguma via do mapa (o mapa é o Recife; fora dele não há vias)."""
@@ -234,6 +256,86 @@ class Mapa:
                     de[m] = (n, w, s)
                     heapq.heappush(fila, (nc, m))
         return None
+
+
+    def sugere_ligar(self, a: int, sa: int, p, b: int, sb: int, q):
+        """Nós para uma ligação só de ônibus (`ligar`) numa lacuna: o nó de a alcançável no sentido sa mais perto de p
+        e o nó de b de onde dá para seguir no sentido sb mais perto de q. (de, para, metros) se estiverem a até
+        LIGAR_MAX_M; senão None."""
+        na, nb = self.nos[a], self.nos[b]
+        chega = na[1:] if sa > 0 else na[:-1]
+        sai = nb[:-1] if sb > 0 else nb[1:]
+        if not chega or not sai:
+            return None
+        de = min(chega, key=lambda n: math.dist(self.no_xy[n], p))
+        para = min(sai, key=lambda n: math.dist(self.no_xy[n], q))
+        d = math.dist(self.no_xy[de], self.no_xy[para])
+        return (de, para, d) if 0 < d <= LIGAR_MAX_M else None
+
+    def coerente(self, a: int, sa: int, b: int, sb: int) -> bool:
+        """Dá para chegar a um nó comum andando em a no sentido sa e sair dele andando em b no sentido sb?"""
+        k = (a, sa, b, sb)
+        v = self._coer.get(k)
+        if v is None:
+            na, nb = self.nos[a], self.nos[b]
+            chega = set(na[1:]) if sa > 0 else set(na[:-1])
+            sai = set(nb[:-1]) if sb > 0 else set(nb[1:])
+            v = self._coer[k] = not chega.isdisjoint(sai)
+        return v
+
+    def liga(self, a: int, sa: int, p, b: int, sb: int, q):
+        """Passagem do way a (andando no sentido sa a partir do ponto p) para o way b (no sentido sb, até perto de q)
+        pelo grafo dirigido: lista de (way, sentido) entre os dois (vazia se encostam), ou None se não houver uma com
+        até PONTE_FATOR × a distância reta + PONTE_FOLGA_M. Não anda nos dois ways contra o sentido do itinerário."""
+        teto = PONTE_FATOR * math.hypot(q[0] - p[0], q[1] - p[1]) + PONTE_FOLGA_M
+        nos = self.nos[a]
+        wx, wy = self.xy[a]
+        i, f, _ = _mais_perto(wx, wy, p)
+        # nós de a à frente de p (com folga de RECUO_M para trás: a última amostra casada em a pode passar um pouco do
+        # cruzamento), com a distância ao longo de a
+        cum = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(wx), np.diff(wy)))])
+        sp = cum[i] + f * (cum[i + 1] - cum[i])
+        dist, de, fila = {}, {}, []
+        for j, n in enumerate(nos):
+            c = (cum[j] - sp) * sa
+            if c >= -RECUO_M and abs(c) < dist.get(n, 1e18):
+                dist[n] = abs(c)
+                heapq.heappush(fila, (abs(c), n))
+        nb = self.nos[b]
+        saida_b = set(nb[:-1]) if sb > 0 else set(nb[1:])  # nós de onde dá para seguir por b no sentido sb
+        while fila:
+            c, n = heapq.heappop(fila)
+            if c > dist.get(n, 1e18) or c > teto:
+                continue
+            if n in saida_b:
+                seq = []
+                while n in de:
+                    n, w, s_ = de[n]
+                    if not seq or seq[-1] != (w, s_):
+                        seq.append((w, s_))
+                seq.reverse()
+                # o que vem antes da última passagem por a é volta desnecessária
+                ult_a = max((k for k, e in enumerate(seq) if e[0] == a), default=-1)
+                return [e for e in seq[ult_a + 1:] if e[0] != b]
+            for m, cc, w, s_ in self.grafo.get(n, ()):
+                if (w == a and s_ != sa) or (w == b and s_ != sb):
+                    continue
+                nc = c + cc
+                if nc < dist.get(m, 1e18):
+                    dist[m] = nc
+                    de[m] = (n, w, s_)
+                    heapq.heappush(fila, (nc, m))
+        return None
+
+
+def _mais_perto(wx, wy, p):
+    """(índice do pedaço, fração, distância) do ponto p na polilinha (wx, wy)."""
+    ax, ay, bx, by = wx[:-1], wy[:-1], wx[1:], wy[1:]
+    vx, vy = bx - ax, by - ay
+    t = np.clip(((p[0] - ax) * vx + (p[1] - ay) * vy) / np.maximum(vx * vx + vy * vy, 1e-9), 0, 1)
+    d = np.hypot(ax + t * vx - p[0], ay + t * vy - p[1])
+    i = int(np.argmin(d))
+    return i, float(t[i]), float(d[i])
 
 
 def _grafo_livre(self):
@@ -410,7 +512,7 @@ def casar(mapa: Mapa, x, y):
             for j, ((wa, sa), _) in enumerate(estados[k - 1]):
                 if wa == w:
                     tr = 0.0 if sa == s else C_RETORNO
-                elif mapa.vizinhos(wa, w):
+                elif mapa.vizinhos(wa, w) and mapa.coerente(wa, sa, w, s):
                     tr = C_VIZINHO
                 else:
                     tr = C_LACUNA
@@ -434,23 +536,34 @@ def casar(mapa: Mapa, x, y):
             seq[-1][2] = i
         else:
             seq.append([e, i, i])
-    # ligações: menor caminho no mapa entre o fim de uma corrida e o começo da seguinte, ou lacuna
+    # ligações: cada corrida tem de seguir da anterior pelo grafo dirigido (sentido dos dois ways respeitado), direto
+    # ou pelo menor caminho; corrida curta que não se liga, com a seguinte ligando direto à anterior, é ruído (way
+    # vizinho pego de passagem) e sai; o resto vira lacuna
     ways, lacunas, pontes, sem_ponte = [seq[0][0]], [], 0, []
-    for k in range(1, len(seq)):
-        (a, _), _, ia = seq[k - 1]
+    ult = seq[0]
+    k = 1
+    while k < len(seq):
+        (a, sa), _, ia = ult
         (b, sb), ib, _ = seq[k]
-        if a != b and not mapa.vizinhos(a, b):
-            ponte = mapa.caminho(a, (x[ia], y[ia]), b, (x[ib], y[ib]))
-            if ponte is None:
-                lacunas.append(len(ways))
-                sem_ponte.append((a, (x[ia], y[ia]), b, (x[ib], y[ib])))
-            else:
-                pontes += 1
-                for e in ponte:
-                    if ways[-1] != e:
-                        ways.append(e)
+        # mesmo way no sentido contrário: retorno (ponto final, fim de rua); o núcleo exige o retorno no nó
+        ponte = mapa.liga(a, sa, (x[ia], y[ia]), b, sb, (x[ib], y[ib])) if a != b else ([] if sa != sb else None)
+        if ponte is None and seq[k][2] - seq[k][1] < RUIDO_AMOSTRAS and k + 1 < len(seq):
+            (c, sc), ic, _ = seq[k + 1]
+            if c != a and mapa.liga(a, sa, (x[ia], y[ia]), c, sc, (x[ic], y[ic])) is not None:
+                k += 1
+                continue
+        if ponte is None:
+            lacunas.append(len(ways))
+            sem_ponte.append((a, sa, (x[ia], y[ia]), b, sb, (x[ib], y[ib])))
+        else:
+            pontes += bool(ponte)
+            for e in ponte:
+                if ways[-1] != e:
+                    ways.append(e)
         if ways[-1] != (b, sb):
             ways.append((b, sb))
+        ult = seq[k]
+        k += 1
     return [mapa.ids[w] * s for w, s in ways], lacunas, len(obs) / len(x), pontes, sem_ponte
 
 
@@ -549,8 +662,10 @@ def montar(g, mapa: Mapa, baias, nomes_osm):
         for a, b in faixas:
             tx, ty, ts = sx[a:b], sy[a:b], ss[a:b]
             ways, lacunas, frac, pontes, sem_ponte = casar(mapa, tx, ty)
-            for a_, p_, b_, q_ in sem_ponte:
-                buracos.setdefault((a_, b_), [p_, q_, set()])[2].add(sid)
+            if not ways:  # pedaço no mapa sem nenhuma via perto (praça, terminal fora das vias): não é trecho
+                continue
+            for a_, sa_, p_, b_, sb_, q_ in sem_ponte:
+                buracos.setdefault((a_, b_), [p_, q_, set(), sa_, sb_])[2].add(sid)
             s0, s1 = ts[0], ts[-1]
             par = []
             for (_, stop, _), pos in zip(seq, proj):
@@ -575,6 +690,9 @@ def montar(g, mapa: Mapa, baias, nomes_osm):
                             "lacunas": lacunas, "entra_na_borda": a > 0, "sai_na_borda": b < len(sx),
                             "paradas": par, "partidas": partidas,
                             "_casado": frac, "_km": (s1 - s0) / 1000, "_pontes": pontes})
+        st["trechos"] = len(trechos)
+        if not trechos:
+            continue
         st["km_no_mapa"] = round(sum(t["_km"] for t in trechos), 2)
         st["casado"] = round(min(t["_casado"] for t in trechos), 3)
         st["lacunas"] = sum(len(t["lacunas"]) for t in trechos)
@@ -648,22 +766,36 @@ def tabela_md(linhas, cols):
 def classificar_lacunas(mapa: Mapa, buracos):
     """Uma linha por par de ways sem ligação, com o motivo provável e os padrões afetados (mais afetados primeiro)."""
     out = []
-    for (a, b), (p, q, pads) in buracos.items():
+    for (a, b), (p, q, pads, sa, sb) in buracos.items():
         if mapa.caminho(a, p, b, q, teto=DESVIO_M) is not None:
-            motivo = "desvio longo (conversão que o mapa não permite)"
+            motivo = "desvio longo (ligação curta ausente no mapa)"
         elif mapa.caminho(a, p, b, q, teto=DESVIO_M, dirigido=False) is not None:
             motivo = "só contra a mão única"
         else:
             motivo = "sem ligação no mapa"
         la, lo = latlon((p[0] + q[0]) / 2, (p[1] + q[1]) / 2)
+        sug = mapa.sugere_ligar(a, sa, p, b, sb, q)
         out.append({"de_way": mapa.ids[a], "para_way": mapa.ids[b], "motivo": motivo,
+                    "sugestao": f"ligar {sug[0]} -> {sug[1]} ({sug[2]:.0f} m)" if sug else "",
                     "distancia_m": round(math.hypot(q[0] - p[0], q[1] - p[1])), "padroes": len(pads),
                     "lat": round(float(la), 6), "lon": round(float(lo), 6), "exemplo": min(pads)})
     out.sort(key=lambda r: (-r["padroes"], r["de_way"]))
     return out
 
 
-def relatorio(saida: Path, g, dados, stats, usadas, mapa: Mapa, n_osm_paradas, lacunas):
+def vias_auto(linhas, mapa: Mapa):
+    """Vias `service` que algum itinerário atravessa (ligação de buraco): way -> padrões que passam."""
+    auto = defaultdict(set)
+    for l in linhas:
+        for p in l["padroes"]:
+            for t in p["trechos"]:
+                for w in t["ways"]:
+                    if mapa.idx[abs(w)] in mapa.extra:
+                        auto[abs(w)].add(p["id"])
+    return auto
+
+
+def relatorio(saida: Path, g, dados, stats, usadas, mapa: Mapa, n_osm_paradas, lacunas, auto):
     no_mapa = [s for s in stats if s["trechos"]]
     linhas_mapa = {s["linha"] for s in no_mapa}
     cont = [s for s in no_mapa if s.get("continuo")]
@@ -711,16 +843,21 @@ def relatorio(saida: Path, g, dados, stats, usadas, mapa: Mapa, n_osm_paradas, l
          f"- Paradas usadas: **{len(paradas)}** (baias pelo OSM: {baias}). Paradas GTFS dentro do mapa sem padrão no "
          f"dia: {len(sem_padrao)}. Sem nome (o GTFS só traz o código e não há parada do OSM com nome a até "
          f"{OSM_PARADA_RAIO_M:.0f} m): {sum(p['nome'] is None for p in paradas.values())}.",
+         f"- Exceções para ônibus (`ajustes_manuais.json`): "
+         f"{', '.join(f'{k}: {v}' for k, v in sorted(mapa.excecoes.items())) or 'nenhuma'}. Vias `service` "
+         f"incluídas automaticamente (o shape passa por elas): {len(auto)} (lista em `incluir_auto.csv`).",
          f"- Paradas do OSM no mapa (`highway=bus_stop`): {len(mapa.paradas_osm)}; sem parada GTFS a até "
          f"{OSM_PARADA_RAIO_M:.0f} m: {len(sem)}. Elementos de parada no Overpass (Recife): {n_osm_paradas}.",
          "", "## Ônibus por hora no mapa", "",
          tabela_md([{"hora": f"{h}h", "ônibus": n} for h, n in enumerate(por_hora)], ["hora", "ônibus"]),
          "", "## Lacunas", "",
          "Dois ways seguidos do itinerário que o mapa não liga por um caminho de até "
-         f"{PONTE_FATOR:.0f}× a distância reta + {PONTE_FOLGA_M:.0f} m. *Desvio longo*: o mapa liga, mas por outro "
-         "caminho (conversão proibida ou ausente). *Só contra a mão única*: o ônibus passa onde o OSM marca mão única "
-         "(o núcleo não lê exceção para ônibus). *Sem ligação no mapa*: via que o núcleo não carrega (`service`, "
-         "terminal) ou que falta no OSM. São os candidatos a `ajustes_manuais.json`; lista completa em `lacunas.csv`.", "",
+         f"{PONTE_FATOR:.0f}× a distância reta + {PONTE_FOLGA_M:.0f} m. *Desvio longo*: o mapa liga, mas só por "
+         "um caminho bem mais longo (falta uma ligação curta: corredor que não encosta na pista, alça, acesso de "
+         "terminal). *Só contra a mão única*: o ônibus passa onde o OSM marca mão única (o OSM do Recife não marca "
+         "`oneway:bus`). *Sem ligação no mapa*: via que o núcleo não carrega (`service`, "
+         "terminal) ou que falta no OSM. Cada uma se resolve com uma exceção para ônibus em "
+         "`ajustes_manuais.json` (`ligar`, `mao_dupla`) ou fica como aviso; lista completa em `lacunas.csv`.", "",
          tabela_md(lacunas[:30], ["de_way", "para_way", "motivo", "distancia_m", "padroes", "exemplo", "lat", "lon"]), ""]
     (saida / "relatorio_onibus.md").write_text("\n".join(L))
 
@@ -772,16 +909,17 @@ def main():
 
     baixar(brutos, a.atualizar)
     print("lendo o mapa ...", file=sys.stderr)
-    mapa = Mapa(MAPA)
+    sys.path.insert(0, str(Path(__file__).parent))
+    from aplicar_ajustes import aplicar, excecoes
+    mapa = Mapa(MAPA, excecoes())
     g = ler_gtfs(brutos / "gtfs.zip")
     baias, nomes_osm, n_osm = ler_paradas_osm(brutos / "osm_paradas.json")
     print("recortando e casando os itinerários ...", file=sys.stderr)
     linhas, paradas, stats, usadas, buracos = montar(g, mapa, baias, nomes_osm)
+    auto = vias_auto(linhas, mapa)
     dados = {"fonte": {"gtfs": g["versao"], "dia_referencia": f"{g['dia']:%Y-%m-%d}", "mapa_osm_base": mapa.osm_base},
-             "paradas": paradas, "linhas": linhas}
+             "incluir_auto": sorted(auto), "paradas": paradas, "linhas": linhas}
 
-    sys.path.insert(0, str(Path(__file__).parent))
-    from aplicar_ajustes import aplicar
     aplicar(dados)
     validar(dados, mapa)
     a.app.parent.mkdir(parents=True, exist_ok=True)
@@ -795,8 +933,12 @@ def main():
                ["id", "nome", "lat", "lon", "baia", "padroes"])
     lacunas = classificar_lacunas(mapa, buracos)
     gravar_csv(a.saida / "lacunas.csv", lacunas,
-               ["de_way", "para_way", "motivo", "distancia_m", "padroes", "exemplo", "lat", "lon"])
-    relatorio(a.saida, g, dados, stats, usadas, mapa, n_osm, lacunas)
+               ["de_way", "para_way", "motivo", "distancia_m", "padroes", "exemplo", "lat", "lon", "sugestao"])
+    gravar_csv(a.saida / "incluir_auto.csv",
+               [{"way": w, "nome": mapa.nomes[mapa.idx[w]], "padroes": len(ps), "exemplo": min(ps)}
+                for w, ps in sorted(auto.items(), key=lambda x: (-len(x[1]), x[0]))],
+               ["way", "nome", "padroes", "exemplo"])
+    relatorio(a.saida, g, dados, stats, usadas, mapa, n_osm, lacunas, auto)
     if a.inspecionar:
         inspecao(a.inspecao or a.saida / "inspecao.geojson", dados, mapa, set(a.inspecionar.split(",")))
     n_pad = sum(len(l["padroes"]) for l in linhas)

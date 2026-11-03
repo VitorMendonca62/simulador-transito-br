@@ -15,6 +15,9 @@ pub struct RawRestriction {
     pub from: i64,
     pub via: i64,
     pub to: i64,
+    /// ônibus isentos (`except` com bus/psv): a conversão proibida para carros fica liberada só para ônibus.
+    /// `kind == "bus_only"` (exceção das linhas de ônibus, `transit.rs`) libera para ônibus uma conversão que não existe.
+    pub bus: bool,
 }
 
 #[derive(Default)]
@@ -144,14 +147,16 @@ impl RawOsm {
         // `restriction:motorcar` vale para carros como a geral; `restriction:hgv`, `:bus` etc. não se aplicam ao carro
         let Some(kind) = get("restriction").or_else(|| get("restriction:motorcar")) else { return };
         // exceção que inclui carros (ex.: except=motorcar) faz a restrição não valer para o tráfego simulado
-        if get("except").map_or(false, |e| e.split(';').any(|x| matches!(x.trim(), "motorcar" | "motor_vehicle" | "vehicle"))) {
+        let except = |v: &[&str]| get("except").map_or(false, |e| e.split(';').any(|x| v.contains(&x.trim())));
+        if except(&["motorcar", "motor_vehicle", "vehicle"]) {
             return;
         }
+        let bus = except(&["bus", "psv"]);
         let from = members.iter().find(|m| m.0 == 1 && m.2 == "from").map(|m| m.1);
         let to = members.iter().find(|m| m.0 == 1 && m.2 == "to").map(|m| m.1);
         let via = members.iter().find(|m| m.0 == 0 && m.2 == "via").map(|m| m.1);
         if let (Some(from), Some(to), Some(via)) = (from, to, via) {
-            self.restrictions.push(RawRestriction { kind: kind.to_string(), from, via, to });
+            self.restrictions.push(RawRestriction { kind: kind.to_string(), from, via, to, bus });
         }
     }
 }

@@ -1,5 +1,740 @@
 {
-  "_sobre": "Linhas de ônibus conferidas à mão (aplicar_ajustes.py mescla em public/data/onibus_recife.json). linhas/padroes: desligar = a linha ou o padrão (shape do GTFS) não entra na simulação. padroes.ways = itinerário conferido no mapa, uma lista por trecho de ids de way com sinal = sentido de passagem (null mantém o casado). paradas: baia (true/false), lat/lon (mover), remover. Cada item leva uma nota com o motivo.",
+  "_sobre": "Linhas de ônibus conferidas à mão (aplicar_ajustes.py mescla em public/data/onibus_recife.json). linhas/padroes: desligar = a linha ou o padrão (shape do GTFS) não entra na simulação. padroes.ways = itinerário conferido no mapa, uma lista por trecho de ids de way com sinal = sentido de passagem (null mantém o casado). paradas: baia (true/false), lat/lon (mover), remover. Cada item leva uma nota com o motivo. excecoes = exceções para ônibus, usadas no casamento (gerar_onibus.py) e no núcleo (core/src/transit.rs): incluir {ways} = vias que o núcleo não carrega (service de corredor ou terminal) entram como vias só de ônibus, com a mão do OSM; ligar {id, de_no, para_no} = ligação de mão única só para ônibus entre dois nós OSM do mapa (way sintético 300<<40 + id); mao_dupla {way} = ônibus também no sentido contrário de um way de mão única (faixa de contrafluxo); conversao {no, de, para} = conversão só para ônibus num nó em que o mapa a proíbe. Mudar uma exceção pede rodar gerar_onibus.py.",
+  "excecoes": [
+    {
+      "tipo": "incluir",
+      "ways": [
+        777105568,
+        128332544,
+        128475536,
+        128475711,
+        128332541
+      ],
+      "nota": "Corredor de Ônibus entre a Dantas Barreto e a Av. Sul (Cais de Santa Rita/Joana Bezerra): service de ônibus que o núcleo não carrega; o shape do GTFS passa por ele (121, 1062 e outras)"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        707010096,
+        967938958,
+        707010069,
+        627923432,
+        627923433,
+        967938959
+      ],
+      "nota": "TI Tancredo Neves: vias internas do terminal (service), por onde o shape do GTFS entra e sai"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        574519211,
+        627935215,
+        627935213,
+        627935216
+      ],
+      "nota": "TI Getúlio Vargas (BRT): vias internas do terminal (service)"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        598169139,
+        816364130,
+        816364131,
+        610910948
+      ],
+      "nota": "TI CDU (ônibus comum): vias internas do terminal (service)"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        633675586,
+        775253500,
+        633675585,
+        633675587,
+        643834517,
+        643834512,
+        633675578,
+        633675590,
+        706213505,
+        772281199,
+        633675581,
+        633675605,
+        633675606,
+        966166281,
+        772281200,
+        764063548,
+        766721300,
+        633675591
+      ],
+      "nota": "Terminal junto à Av. da Recuperação (provável TI Macaxeira; vias sem nome e 'Desembarque'): o shape do GTFS percorre essas vias service — DUVIDOSO: conferir o nome do terminal"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        647530675,
+        966579795,
+        647530683,
+        756558213,
+        647530679,
+        129480174,
+        668516851,
+        647530674,
+        668516857,
+        647530676
+      ],
+      "nota": "Aeroporto (Praça Min. Salgado Filho, acessos às áreas de embarque/desembarque): service por onde o shape do GTFS passa"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        1188028629,
+        134471991,
+        771496123,
+        1446021966,
+        134472031
+      ],
+      "nota": "Entrada de ônibus do Shopping Recife (service)"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        778543948
+      ],
+      "nota": "Acesso ao Shopping RioMar pela Freire de Andrade (service)"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        1394173402
+      ],
+      "nota": "Ligação da República do Líbano (service com note 'Avenida Republica do Libano')"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        775237046,
+        637666030,
+        637666034
+      ],
+      "nota": "Praça Caxangá: retorno por service até a Av. Caxangá"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        1149629293
+      ],
+      "nota": "Dantas Barreto: trecho service entre as duas pistas"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        628649582
+      ],
+      "nota": "Corredor Exclusivo BRT Leste-Oeste: pedaço marcado como service"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        619544505,
+        619544506
+      ],
+      "nota": "service sem nome sob o shape (lacunas 51/52) — DUVIDOSO: conferir"
+    },
+    {
+      "tipo": "incluir",
+      "ways": [
+        143668938
+      ],
+      "nota": "Rua Jaguaruana marcada como service"
+    },
+    {
+      "tipo": "ligar",
+      "id": 2,
+      "de_no": 5272448000,
+      "para_no": 9267644580,
+      "nota": "Caxangá → corredor do BRT Leste-Oeste: nós a 3 m sem ligação no OSM"
+    },
+    {
+      "tipo": "ligar",
+      "id": 3,
+      "de_no": 9267644580,
+      "para_no": 5272448000,
+      "nota": "Corredor do BRT Leste-Oeste → Caxangá: mesmo ponto, sentido contrário"
+    },
+    {
+      "tipo": "ligar",
+      "id": 4,
+      "de_no": 5834985859,
+      "para_no": 5834985860,
+      "nota": "Corredor do BRT Leste-Oeste → Caxangá: nós a 2 m sem ligação no OSM"
+    },
+    {
+      "tipo": "ligar",
+      "id": 5,
+      "de_no": 5508744324,
+      "para_no": 2090537304,
+      "nota": "Caxangá → corredor do BRT Leste-Oeste: nós a 11 m sem ligação no OSM"
+    },
+    {
+      "tipo": "ligar",
+      "id": 6,
+      "de_no": 2146134432,
+      "para_no": 6578564651,
+      "nota": "Praça Caxangá → service do retorno até a Caxangá: nós a 6 m sem ligação no OSM (20 padrões) — DUVIDOSO"
+    },
+    {
+      "tipo": "ligar",
+      "id": 7,
+      "de_no": 5267919794,
+      "para_no": 5268008272,
+      "nota": "Acesso ao Shopping RioMar → alça para a Via Mangue: nós a 12 m sem ligação no OSM (19 padrões) — DUVIDOSO"
+    },
+    {
+      "tipo": "ligar",
+      "id": 8,
+      "de_no": 11742672712,
+      "para_no": 6080962349,
+      "nota": "Aeroporto: acesso à área de embarque → desembarque, nós a 4 m sem ligação"
+    },
+    {
+      "tipo": "ligar",
+      "id": 9,
+      "de_no": 11731499010,
+      "para_no": 11746059893,
+      "nota": "Aeroporto: acesso à área de desembarque → embarque, nós a 11 m sem ligação"
+    },
+    {
+      "tipo": "ligar",
+      "id": 10,
+      "de_no": 1639742322,
+      "para_no": 1428542335,
+      "nota": "Av. Eng. Antônio de Góes → Ponte Eng. Antônio de Góes: nós a 10 m sem ligação"
+    },
+    {
+      "tipo": "ligar",
+      "id": 11,
+      "de_no": 2312195584,
+      "para_no": 2312195601,
+      "nota": "Av. Jornalista Costa Porto → 1ª Travessa Belém de Judá: nós a 15 m sem ligação"
+    },
+    {
+      "tipo": "ligar",
+      "id": 12,
+      "de_no": 2312195601,
+      "para_no": 2312195584,
+      "nota": "1ª Travessa Belém de Judá → Av. Jornalista Costa Porto: mesmo ponto, sentido contrário"
+    },
+    {
+      "tipo": "mao_dupla",
+      "way": 128475711,
+      "nota": "Corredor de Ônibus (Av. Sul, bus=yes): o shape do GTFS (121 e outras, 45 padrões) percorre 14 m no sentido contrário ao oneway"
+    },
+    {
+      "tipo": "mao_dupla",
+      "way": 151147818,
+      "nota": "Rua Manoel de Brito: 14 m no contrafluxo na ligação para a Antônio de Góes — DUVIDOSO"
+    },
+    {
+      "tipo": "mao_dupla",
+      "way": 607122239,
+      "nota": "Av. Luiz de Lacerda: 9 m no contrafluxo — DUVIDOSO"
+    },
+    {
+      "tipo": "mao_dupla",
+      "way": 597530694,
+      "nota": "Rua Maria Cândida: 7 m no contrafluxo até a Av. Norte — DUVIDOSO"
+    },
+    {
+      "tipo": "ligar",
+      "id": 13,
+      "de_no": 3257315524,
+      "para_no": 560413314,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 591693088 'Avenida Guararapes' → 44457183 'Avenida Dantas Barreto', nós a 19 m, 50 padrões (ex. 044-1523-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 14,
+      "de_no": 7258872851,
+      "para_no": 3463814940,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 151153196 'Avenida República do Líbano' → 778595301 'Avenida República do Líbano', nós a 13 m, 10 padrões (ex. 014-1268-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 15,
+      "de_no": 1540283776,
+      "para_no": 1432318867,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 140616534 'Corredor Exclusivo BRT Leste - Oeste' → 30812778 'Avenida Caxangá', nós a 5 m, 9 padrões (ex. 2043-1049-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 16,
+      "de_no": 14167941999,
+      "para_no": 3463814938,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 151153196 'Avenida República do Líbano' → 1394173402 '', nós a 22 m, 9 padrões (ex. 011-1120-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 17,
+      "de_no": 5916501163,
+      "para_no": 5916501160,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 137364477 'Avenida Caxangá' → 628645780 'Corredor Exclusivo BRT Leste - Oeste', nós a 7 m, 6 padrões (ex. 2493-1360-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 18,
+      "de_no": 1428542673,
+      "para_no": 324271634,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 129483751 'Ponte Engenheiro Antônio de Góes' → 29422720 'Ponte Engenheiro Antônio de Góes', nós a 8 m, 5 padrões (ex. 014-1121-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 19,
+      "de_no": 2458671734,
+      "para_no": 7060151267,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 238008117 'Rua Escritor Joaquim Noberto da Silva' → 328662399 'Rua Coronel Fonseca Lima', nós a 15 m, 5 padrões (ex. 2459-1357-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 20,
+      "de_no": 2563431169,
+      "para_no": 9111636539,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 249376185 'Rua Barão de Cotegipe' → 596232342 'Rua Arapongas', nós a 4 m, 4 padrões (ex. 2459-1357-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 21,
+      "de_no": 5754497470,
+      "para_no": 7033850453,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 821123754 'Rua Professor Mussa Hazin' → 130888047 'Avenida Luiz de Lacerda', nós a 22 m, 4 padrões (ex. 2429-1193-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 22,
+      "de_no": 7206343747,
+      "para_no": 1416886219,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 967106433 'Avenida Dantas Barreto' → 128375498 'Avenida Dantas Barreto', nós a 13 m, 4 padrões (ex. 321-999-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 23,
+      "de_no": 5506388809,
+      "para_no": 1432319445,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 140616534 'Corredor Exclusivo BRT Leste - Oeste' → 129895550 'Rua Real da Torre', nós a 6 m, 3 padrões (ex. 2437-54-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 24,
+      "de_no": 2317663588,
+      "para_no": 2317663587,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 222822316 'Rua Jornalista Waldete Agra' → 328849396 'Rua Córrego da Bica', nós a 17 m, 3 padrões (ex. 631-1113-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 25,
+      "de_no": 5632454679,
+      "para_no": 7267083658,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 428378802 'Avenida Chapada do Araripe' → 778568559 '', nós a 10 m, 3 padrões (ex. 120-1386-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 26,
+      "de_no": 11874884815,
+      "para_no": 1428448641,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 695519696 'Avenida Sul' → 129478150 'Viaduto Tancredo Neves', nós a 20 m, 3 padrões (ex. 132-980-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 27,
+      "de_no": 2317627728,
+      "para_no": 2317627726,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 758400911 'Rua Córrego da Areia' → 222818445 'Córrego do Boleiro', nós a 8 m, 3 padrões (ex. 513-1165-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 28,
+      "de_no": 7352170061,
+      "para_no": 2122115666,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 786325338 'Avenida Nossa Senhora da Saúde' → 202233953 'Avenida Nossa Senhora da Saúde', nós a 15 m, 3 padrões (ex. 414-387-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 29,
+      "de_no": 1432316097,
+      "para_no": 5508744447,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 129895646 'Avenida Caxangá' → 577617408 'Corredor Exclusivo BRT Leste - Oeste', nós a 17 m, 2 padrões (ex. 2457-1201-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 30,
+      "de_no": 1418899843,
+      "para_no": 1419732620,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 316676559 'Avenida Sul' → 128332544 'Corredor de Ônibus', nós a 7 m, 2 padrões (ex. 200-1037-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 31,
+      "de_no": 7246393935,
+      "para_no": 7246393936,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 607466377 'Rua Vale do Itajaí' → 776641509 'Rua Vale do Itajaí', nós a 10 m, 2 padrões (ex. 205-1513-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 32,
+      "de_no": 6644048750,
+      "para_no": 1428486621,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 627923433 'Terminal Integrado Tancredo Neves' → 707010072 'Avenida Sul', nós a 15 m, 2 padrões (ex. 023-679-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 33,
+      "de_no": 5508744446,
+      "para_no": 3252640998,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 628645780 'Corredor Exclusivo BRT Leste - Oeste' → 137364477 'Avenida Caxangá', nós a 18 m, 2 padrões (ex. 2920-192-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 34,
+      "de_no": 2549311052,
+      "para_no": 6454084176,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 797179314 'Rua Acadêmico Hélio Ramos' → 762960703 'Rua Acadêmico Hélio Ramos', nós a 10 m, 2 padrões (ex. 522-206-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 35,
+      "de_no": 7223026353,
+      "para_no": 3810749658,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 901950480 'Rua Alto do Eucalipto' → 901950480 'Rua Alto do Eucalipto', nós a 4 m, 2 padrões (ex. 622-104-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 36,
+      "de_no": 7227587747,
+      "para_no": 3895002030,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 968521072 'Avenida Governador Agamenon Magalhães' → 968521070 'Avenida Governador Agamenon Magalhães', nós a 11 m, 2 padrões (ex. 825-1264-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 37,
+      "de_no": 7973888197,
+      "para_no": 1428553821,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 129485273 'Avenida Doutor José Rufino' → 1183809382 'Avenida Recife', nós a 20 m, 1 padrões (ex. 232-1025-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 38,
+      "de_no": 2059422882,
+      "para_no": 2059422866,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 195511319 'Rua Siriji' → 808052599 'Rua Quatro de Março', nós a 16 m, 1 padrões (ex. 511-1198-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 39,
+      "de_no": 1428551131,
+      "para_no": 7239681411,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 371261851 'Estrada dos Remédios' → 967692821 'Rua da Paz', nós a 8 m, 1 padrões (ex. 858-1364-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 40,
+      "de_no": 7162256279,
+      "para_no": 7162256280,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 414485759 'Estrada da Mumbeca' → 414485759 'Estrada da Mumbeca', nós a 20 m, 1 padrões (ex. 601-992-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 41,
+      "de_no": 7130883324,
+      "para_no": 4083749742,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 545224001 'Rua Andorinha' → 967673867 'Rua da Linha', nós a 17 m, 1 padrões (ex. 843-531-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 42,
+      "de_no": 10062290338,
+      "para_no": 7233484021,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 663615172 'Avenida João Rio Branco de Lima' → 916842199 'Avenida João Rio Branco de Lima', nós a 16 m, 1 padrões (ex. 136-326-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 43,
+      "de_no": 7233484020,
+      "para_no": 8515489875,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 663615174 'Avenida João Rio Branco de Lima' → 916842199 'Avenida João Rio Branco de Lima', nós a 18 m, 1 padrões (ex. 132-980-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 44,
+      "de_no": 7233484021,
+      "para_no": 10062290338,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 663615174 'Avenida João Rio Branco de Lima' → 663615172 'Avenida João Rio Branco de Lima', nós a 16 m, 1 padrões (ex. 136-326-2)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 45,
+      "de_no": 5982182223,
+      "para_no": 530814218,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 700013797 'Corredor Exclusivo BRT Leste - Oeste' → 314754240 'Avenida Caxangá', nós a 3 m, 1 padrões (ex. 2437-54-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 46,
+      "de_no": 6124939655,
+      "para_no": 1499415233,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 573648906 'Corredor Exclusivo BRT Leste - Oeste (Avenida Caxangá)' → 318869508 'Avenida Afonso Olindense', nós a 3 m, 1 padrões (ex. 2445-197-1)"
+    },
+    {
+      "tipo": "ligar",
+      "id": 47,
+      "de_no": 5508744340,
+      "para_no": 5567413102,
+      "nota": "Sugerido pelo gerador (conferir): lacuna 574139911 'Corredor Exclusivo BRT Leste - Oeste (Avenida Caxangá)' → 582016159 'Avenida Caxangá', nós a 7 m, 1 padrões (ex. 202-599-2)"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1421478381,
+      "de": 128682905,
+      "para": 966780291,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (128682905 'Avenida Luís Correia de Brito' → 966780291 'Avenida Luís Correia de Brito', 16 padrões, ex. 825-1233-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 6124939646,
+      "de": 653564077,
+      "para": 966590954,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (653564077 'Avenida Joaquim Ribeiro' → 966590954 'Rua Ribeiro Pessoa', 12 padrões, ex. 2060-416-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1001388747,
+      "de": 968242414,
+      "para": 315073873,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (968242414 '' → 315073873 'Avenida Governador Agamenon Magalhães', 12 padrões, ex. 014-1121-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1417465208,
+      "de": 678493300,
+      "para": 678493301,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (678493300 'Avenida Dantas Barreto' → 678493301 'Avenida Sul', 11 padrões, ex. 101-605-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 5508744481,
+      "de": 317090530,
+      "para": 628645806,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (317090530 'Rua Jener de Souza' → 628645806 'Corredor Exclusivo BRT Leste - Oeste', 7 padrões, ex. 2427-1196-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 995388322,
+      "de": 315073872,
+      "para": 315073870,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (315073872 'Avenida Rui Barbosa' → 315073870 'Avenida Governador Agamenon Magalhães', 6 padrões, ex. 510-812-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 2025970041,
+      "de": 328629874,
+      "para": 761542906,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (328629874 'Ladeira da Cohab' → 761542906 'Avenida Dois Rios', 6 padrões, ex. 102-606-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1418581593,
+      "de": 319481719,
+      "para": 315073869,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (319481719 'Ponte Rivaldo de Carvalho' → 315073869 'Avenida Governador Agamenon Magalhães', 4 padrões, ex. 011-1120-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1036684696,
+      "de": 86264126,
+      "para": 967981841,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (86264126 'Rua Joaquim Nabuco' → 967981841 'Avenida Governador Agamenon Magalhães', 4 padrões, ex. 131-308-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 324724373,
+      "de": 466073062,
+      "para": 597951721,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (466073062 '' → 597951721 '', 3 padrões, ex. 520-203-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1418941430,
+      "de": 604681168,
+      "para": 128445509,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (604681168 'Rua Vidal de Negreiros' → 128445509 'Praça das Cinco Pontas', 3 padrões, ex. 044-1523-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 7082739120,
+      "de": 758400914,
+      "para": 758400924,
+      "nota": "Conversão que o itinerário do GTFS faz e o mapa não cria (758400914 'Rua Córrego do Joaquim' → 758400924 'Rua Aporema', 3 padrões, ex. 510-812-2) — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3106350843,
+      "de": 884229189,
+      "para": 137752797,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (884229189 'Avenida Engenheiro Abdias de Carvalho' → 137752797 'Avenida General San Martin', 3 padrões, ex. 321-1432-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3106350843,
+      "de": 305935781,
+      "para": 305935782,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (305935781 'Avenida General San Martin' → 305935782 'Avenida Engenheiro Abdias de Carvalho', 2 padrões, ex. 313-1278-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3810785027,
+      "de": 377691627,
+      "para": 377691625,
+      "nota": "Conversão que o itinerário do GTFS faz e o mapa não cria (377691627 'Rua Acajutiba' → 377691625 'Rua Dona Maria Augusta Nogueira', 2 padrões, ex. 311-1216-2) — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 5508744390,
+      "de": 641626594,
+      "para": 637666026,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (641626594 'Rua Rodrigues Ferreira' → 637666026 'Corredor Exclusivo BRT Leste - Oeste (Avenida Caxangá)', 2 padrões, ex. 2488-58-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1462082586,
+      "de": 750219375,
+      "para": 966843270,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (750219375 'Rua do Paissandú' → 966843270 'Avenida Governador Agamenon Magalhães', 2 padrões, ex. 013-648-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 5508744344,
+      "de": 314754221,
+      "para": 653564075,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (314754221 'Rua Gastão Vidigal' → 653564075 'Corredor Exclusivo BRT Leste - Oeste (Avenida Caxangá)', 1 padrões, ex. 2446-844-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 7262483822,
+      "de": 317402249,
+      "para": 222819869,
+      "nota": "Conversão que o itinerário do GTFS faz e o mapa não cria (317402249 'Rua Erundina Negreiros de Araújo' → 222819869 'Rua da Democracia', 1 padrões, ex. 644-102-2) — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 7241940300,
+      "de": 627935213,
+      "para": 574519213,
+      "nota": "Conversão que o itinerário do GTFS faz e o mapa não cria (627935213 'T.I Getúlio Vargas (Ônibus Comum)' → 574519213 'TI Getúlio Vargas (BRT)', 1 padrões, ex. 412-588-2) — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1443746203,
+      "de": 777786580,
+      "para": 131144626,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (777786580 'Rua Marquês de Maricá' → 131144626 'Rua Professor Estevão Francisco da Costa', 1 padrões, ex. 2434-1492-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3106350843,
+      "de": 884229189,
+      "para": 305935781,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (884229189 'Avenida Engenheiro Abdias de Carvalho' → 305935781 'Avenida General San Martin', 1 padrões, ex. 322-629-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 661046172,
+      "de": 967938107,
+      "para": 967938106,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (967938107 'Rua Doutor José Mariano' → 967938106 'Rua Velha', 1 padrões, ex. 166-1495-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 2565554667,
+      "de": 250033733,
+      "para": 250033733,
+      "nota": "Retorno que o itinerário do GTFS faz em 250033733 'Rua Professor Cláudio Selva' (8 padrões, ex. 524-1134-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 5519635906,
+      "de": 656131273,
+      "para": 656131273,
+      "nota": "Retorno que o itinerário do GTFS faz em 656131273 'Avenida Piracicaba' (5 padrões, ex. 212-622-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1560826701,
+      "de": 142616979,
+      "para": 142616979,
+      "nota": "Retorno que o itinerário do GTFS faz em 142616979 'Rua Ladeira de Pedra' (3 padrões, ex. 715-440-1), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3810746542,
+      "de": 377687684,
+      "para": 377687684,
+      "nota": "Retorno que o itinerário do GTFS faz em 377687684 'Rua Leôncio Rodrigues' (3 padrões, ex. 717-1497-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 4757900859,
+      "de": 483033934,
+      "para": 483033934,
+      "nota": "Retorno que o itinerário do GTFS faz em 483033934 'Avenida Central' (3 padrões, ex. 102-606-1), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1535753392,
+      "de": 703620185,
+      "para": 703620185,
+      "nota": "Retorno que o itinerário do GTFS faz em 703620185 '' (3 padrões, ex. 108-624-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 6611712852,
+      "de": 162801568,
+      "para": 704150002,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (162801568 '' → 704150002 'Avenida Cruz Cabugá', 2 padrões, ex. 1983-166-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 7238610871,
+      "de": 1536657688,
+      "para": 1536657688,
+      "nota": "Retorno que o itinerário do GTFS faz em 1536657688 'Rua Astério Rufino Alves' (1 padrões, ex. 411-777-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 3432082236,
+      "de": 222795414,
+      "para": 222795414,
+      "nota": "Retorno que o itinerário do GTFS faz em 222795414 'Rua Poeta Aprendiz' (1 padrões, ex. 203-601-2), provável ponto final — DUVIDOSO"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1493632488,
+      "de": 314754308,
+      "para": 777105572,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (314754308 'Rua Pintor Antônio Albuquerque' → 777105572 'Avenida Recife', 1 padrões, ex. 102-606-2): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 1036684678,
+      "de": 705991869,
+      "para": 129736982,
+      "nota": "O itinerário do GTFS faz esta conversão e o OSM a proíbe (705991869 'Avenida Governador Agamenon Magalhães' → 129736982 'Rua Henrique Dias', 1 padrões, ex. 131-308-1): conferir se os ônibus são isentos ou se a restrição do OSM está errada"
+    },
+    {
+      "tipo": "conversao",
+      "no": 6454084176,
+      "de": 762960703,
+      "para": 762960703,
+      "nota": "Retorno que o itinerário do GTFS faz em 762960703 'Rua Acadêmico Hélio Ramos' (1 padrões, ex. 440-656-2), provável ponto final — DUVIDOSO"
+    }
+  ],
   "linhas": [],
   "padroes": [],
   "paradas": []

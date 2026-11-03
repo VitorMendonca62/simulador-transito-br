@@ -160,31 +160,55 @@ Recife publica um **GTFS oficial** (`granderecife.pe.gov.br/gtfs/gtfs.zip`, 38 M
 - Ajustes em `ajustes_manuais.json` (desligar linha/padrão, trocar `ways` de um trecho, parada baia/mover/remover),
   reaplicados por `aplicar_ajustes.py` sem baixar nada; rodar o gerador sem rede dá o mesmo JSON (conferido).
 
-Cobertura (`data/onibus_recife/relatorio_onibus.md`):
-| Medida | Valor |
-|---|---|
-| Linhas com trecho no Recife | 292 (de 388 com viagem no dia) |
-| Padrões no mapa | 999 (82 saem e voltam ao mapa) |
-| Padrões contínuos (sem lacuna) | 700 (70 %) |
-| Lacunas | 92 pares de ways, 511 ocorrências: 62 desvio longo (conversão que o mapa não permite), 17 sem ligação no mapa, 13 só contra a mão única |
-| Amostras a ≤ 20 m de um way compatível (mediana por padrão) | 97 % |
-| Paradas usadas | 2.868 (0 baias: o OSM do Recife não marca `bus_bay`; 1.179 sem nome) |
-| Entradas de ônibus em trechos no dia / às 7h | 32.095 / 2.037 |
-| `onibus_recife.json` | 2,7 MB (~0,5 MB comprimido) |
-
-O que sobra para a fase 4: as lacunas (`lacunas.csv`, ordenadas por padrões afetados) viram ajustes ou avisos por
-linha; contramão de ônibus pede ler exceção de mão única para ônibus (`oneway:bus`/`oneway:psv`), que o mapa atual
-não traz.
+Cobertura na conclusão da fase 3: 292 linhas, 999 padrões, 700 contínuos (70 %), 92 pares de lacunas. Os números
+atuais, depois das exceções da fase 4, estão na seção seguinte e em `data/onibus_recife/relatorio_onibus.md`.
 
 ### Fase 4 — Núcleo: encaixe na rede
-- `core/src/transit.rs`: encaixar cada itinerário na rede (por id de way; onde o way foi dividido ou editado, pelo
-  caminho mais curto entre os pontos) → sequência de **faixas permitidas a ônibus**. Paradas viram uma posição numa
-  faixa (trecho + distância), na faixa da direita ou na baia.
-- Tipo de parada: na faixa (bloqueia a faixa) ou baia (`bus_bay`, sai do fluxo). Sem tag, na faixa.
-- Itinerário que não encaixa (via demolida, conversão proibida): aviso por linha, a linha é desligada. Nada de pular
-  trechos.
-- Edições da rede reencaixam as linhas (as linhas usam chaves estáveis, como os semáforos).
-- Testes: itinerário encaixa no mapa de exemplo; linha com via demolida gera aviso; encaixe estável depois de rebuild.
+**Concluída (2026-11-03).**
+
+**Exceções para ônibus** (`excecoes` em `scripts/onibus_recife/ajustes_manuais.json`, usadas pelo gerador e pelo
+núcleo). Olhando as piores lacunas, quase todas eram coisas que o OSM não descreve para ônibus: corredores e terminais
+mapeados como `service` (que o núcleo não carrega), corredor do BRT sem nó comum com a pista, contrafluxo e
+conversões proibidas no OSM que o itinerário oficial faz.
+- `incluir` (vias `service` viram vias só de ônibus), `ligar` (ligação de mão única só de ônibus entre dois nós),
+  `mao_dupla` (faixa de ônibus no contrafluxo), `conversao` (conversão só de ônibus num nó). Restrição do OSM com
+  `except=bus`/`psv` passa a valer só para carros.
+- O gerador atravessa vias `service` para ligar buracos do itinerário e lista as usadas em `incluir_auto` (30).
+  Também sugere um `ligar` por lacuna (`lacunas.csv`) e passou a exigir coerência de sentido em cada passagem entre
+  ways, descartando ruído do casamento e aceitando retorno no ponto final.
+- Propostas a partir dos dados, cada uma com nota: 14 `incluir`, 46 `ligar`, 4 `mao_dupla`, 35 `conversao`. As
+  marcadas "conferir"/"DUVIDOSO" (79) pedem conferência local.
+
+**Encaixe** (`core/src/transit.rs`): o JSON entra no núcleo por `import_osm_full(bytes, semáforos, linhas)`. As
+exceções mudam o OSM bruto antes do `BaseCache` (como a CTTU). O encaixe roda sob demanda depois de cada edição
+(`Network::transit_fit`, `transit_json()`), para não pesar na edição.
+- Cada item `±way` vira os trechos dele na rede atual, com o sentido pela geometria do way bruto (vale para way
+  dividido por via nova, `oneway=-1` e inversão). Dijkstra sobre (trecho dirigido, item), passando só por conversões
+  ligadas (`CONN_ALLOWED` ou o novo `CONN_BUS`). Way que o itinerário só toca num nó é aceito.
+- Conversão só de ônibus: estado `CONN_BUS = 3` em `node_conns`. Carros e o roteador continuam só com `CONN_ALLOWED`;
+  a interface o desenha como ligada.
+- Trecho que não encaixa fica desligado com aviso (lacuna, via inexistente, conversão proibida ou ausente no nó X,
+  vias que não se encontram). Nada é pulado. Paradas: projetadas em ordem, a até 30 m, na faixa mais à direita (a de
+  ônibus, se houver).
+
+| Medida | Valor |
+|---|---|
+| Padrões contínuos no gerador | 853 de 995 (86 %; eram 70 %) |
+| Trechos encaixados no núcleo (Recife) | 874 de 1.077 (81 %) |
+| Falhas restantes | 143 lacunas, 46 vias que não se encontram (retorno no ponto final que o casamento não registra), 14 conversões ausentes |
+| Paradas encaixadas / fora do caminho | 21.120 / 715 (por trecho) |
+| Encaixe nativo, Recife | ~110 ms (meta de 10 ms não batida; fica fora da edição por ser sob demanda) |
+| `recife_behavior` sem linhas | idêntico ao de antes |
+
+Testes: `transit_fits_route_and_stop`, `transit_demolished_way_disables_and_undo_restores`,
+`transit_way_split_by_new_road_still_fits`, `transit_ligar_creates_bus_only_link`, `transit_mao_dupla_adds_bus_contraflow`,
+`transit_conversao_allows_bus_only_turn`, `restriction_with_bus_exception_is_bus_only`,
+`transit_fit_same_after_fast_and_full_rebuild`; diagnósticos ignorados `onibus_recife` (`RECIFE_OSM`, `SUGERIR=1`
+emite as conversões que faltam como exceções) e `onibus_padrao` (`PADRAO=<shape>`).
+
+Fica para as próximas fases: o worker e a interface ainda não carregam as linhas (fase 6); os ônibus ainda não usam
+`CONN_BUS` nem seguem o caminho encaixado (fase 5); o encaixe pode ficar mais rápido se for preciso refazê-lo a cada
+edição.
 
 ### Fase 5 — Simulação
 - **Geração por linha**: cada viagem entra no trecho no horário do GTFS (`partidas`, com pequena variação sorteada
@@ -269,8 +293,8 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 |---|---|
 | 1 — Remover A/B | concluída (2026-10-31) |
 | 2 — Desempenho | concluída (2026-11-02); falta só perfilar o desenho do mapa com o painel visível |
-| 3 — Dados de ônibus | concluída (2026-11-02): GTFS oficial, 292 linhas, 70 % dos padrões contínuos |
-| 4 — Encaixe na rede | pendente |
+| 3 — Dados de ônibus | concluída (2026-11-02): GTFS oficial, 290 linhas, 86 % dos padrões contínuos (com as exceções da fase 4) |
+| 4 — Encaixe na rede | concluída (2026-11-03): exceções para ônibus, 81 % dos trechos encaixados |
 | 5 — Simulação de ônibus | pendente |
 | 6 — Interface de linhas | pendente |
 | 7 — Moto como tipo | pendente |

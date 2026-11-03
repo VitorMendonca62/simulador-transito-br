@@ -389,6 +389,8 @@ pub struct Lane {
 pub const CONN_BLOCKED: u8 = 0;
 pub const CONN_ALLOWED: u8 = 1;
 pub const CONN_ABSENT: u8 = 2;
+/// Ligada só para ônibus (restrição com ônibus isentos ou exceção das linhas de ônibus); carros não a usam.
+pub const CONN_BUS: u8 = 3;
 
 pub struct Conn {
     pub node: u32,
@@ -650,7 +652,6 @@ macro_rules! stage {
     };
 }
 
-const M_PER_DEG: f64 = 111_319.490_793_273_57;
 
 impl Net {
     pub fn build(raw: &RawOsm, edits: &Edits, base: &BaseCache) -> Result<Net, String> {
