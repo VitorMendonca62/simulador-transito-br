@@ -504,6 +504,13 @@ pub struct Sim {
     stop_last: Vec<Vec<f32>>,
     /// pontos de ônibus de cada faixa (posição na faixa), para os carros da parcela que param no ponto
     lane_stops: std::collections::HashMap<u32, Vec<f32>>,
+    /// paradas das linhas (id do GTFS ou da edição, nome) e índice por id; passagens por (parada, linha)
+    stop_ids: Vec<String>,
+    stop_names: Vec<String>,
+    stop_id_of: std::collections::HashMap<String, u32>,
+    stop_hw: std::collections::HashMap<(u32, u32), bus::StopLineHw>,
+    /// ônibus em cada baia (pela parada)
+    bay_occ: std::collections::HashMap<u32, u8>,
     last_spawn: usize,
     /// por veículo: plano, passo, próxima parada, embarque restante (s), ponto escolhido (carro), acumulados da viagem
     /// (embarcando, parado fora de parada, intervalo programado), parcelas de carro
@@ -516,6 +523,8 @@ pub struct Sim {
     bus_lane_ok: Vec<bool>,
     /// carro da parcela que para no ponto: 0 não, 1 vai parar, 2 já parou
     stop_car: Vec<u8>,
+    /// ônibus fora da faixa, numa baia (parada + 1; 0 = não): não está na lista da faixa, não anda, não troca de faixa
+    in_bay: Vec<u32>,
 }
 
 impl Sim {
@@ -818,6 +827,12 @@ impl Sim {
             bus_hour: [0.0; 24],
             stop_last: Vec::new(),
             lane_stops: Default::default(),
+            stop_ids: Vec::new(),
+            stop_names: Vec::new(),
+            stop_id_of: Default::default(),
+            stop_hw: Default::default(),
+            bay_occ: Default::default(),
+            in_bay: Vec::new(),
             last_spawn: 0,
             route: Vec::new(),
             bstep: Vec::new(),
@@ -1335,6 +1350,7 @@ impl Sim {
                 self.bacc.push([0.0; 3]);
                 self.bus_lane_ok.push(false);
                 self.stop_car.push(0);
+                self.in_bay.push(0);
                 i
             }
         };
@@ -1361,6 +1377,7 @@ impl Sim {
         self.dwell[id] = 0.0;
         self.stop_at[id] = f32::NAN;
         self.bacc[id] = [0.0; 3];
+        self.in_bay[id] = 0;
         self.bus_lane_ok[id] = drv.bus_ok && kind == 0;
         self.stop_car[id] = if kind == 0 && ((noise(drv.seed, 0x570B) + 1.0) * 50.0) < self.params.bus_stop_car_pct as f32 { 1 } else { 0 };
         self.origin[id] = origin;
@@ -2476,6 +2493,16 @@ impl Sim {
             if !self.alive[i] {
                 continue;
             }
+            if self.in_bay[i] != 0 {
+                // na baia: parado fora da faixa, embarcando ou esperando brecha para voltar
+                self.v[i] = 0.0;
+                self.metrics.bus_sample(0.0, dt);
+                self.stop_update(i, dt);
+                if self.dwell[i] <= 0.0 && self.in_bay[i] != 0 {
+                    self.wait[i] += dt;
+                }
+                continue;
+            }
             let v = self.v[i];
             let nv = (v + self.acc[i] * dt).max(0.0);
             self.s[i] += 0.5 * (v + nv) * dt;
@@ -2483,6 +2510,9 @@ impl Sim {
             if (self.edge[i] as usize) < self.nl {
                 let l = &self.lanes[self.edge[i] as usize];
                 self.metrics.sample(l.dirseg as usize, nv, dt, l.to_node as usize, l.len - self.s[i]);
+            }
+            if self.route[i] != NONE {
+                self.metrics.bus_sample(nv, dt);
             }
             if self.route[i] != NONE || self.stop_car[i] == 1 {
                 self.stop_update(i, dt);
@@ -2572,7 +2602,7 @@ impl Sim {
 
         // 5) trocas de faixa
         for i in 0..n {
-            if self.alive[i] && (self.edge[i] as usize) < self.nl && self.cool[i] <= 0.0 {
+            if self.alive[i] && (self.edge[i] as usize) < self.nl && self.cool[i] <= 0.0 && self.in_bay[i] == 0 {
                 self.consider_lane_change(i);
             }
         }
@@ -3596,6 +3626,9 @@ impl Sim {
                 "proximaParada": self.bstop[i],
                 "paradas": p.stops.len(),
                 "embarcando": self.dwell[i].max(0.0),
+                "proximaParadaNome": self.next_stop_name(i),
+                "tempoEmbarcando": self.bacc[i][0],
+                "naBaia": self.in_bay[i] != 0,
             })
         } else {
             serde_json::Value::Null

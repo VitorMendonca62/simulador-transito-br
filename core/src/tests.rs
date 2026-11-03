@@ -2758,3 +2758,129 @@ fn no_lines_keeps_bus_share_behavior() {
     };
     assert_eq!(snap(false, ""), snap(true, r#","busLines":false"#));
 }
+
+// ------------------------------------------------------------------ edições das linhas e baia (versão 2, fase 6)
+
+fn av_net(partidas: &[u32]) -> Network {
+    let t = bus_line_at(&[200], AV1, AV4, serde_json::json!([]), AV_STOP, partidas);
+    crate::build_network_transit(avenue("").as_bytes(), &[], t, false).unwrap()
+}
+
+/// Remover, mover, trocar o tipo e criar paradas muda só o encaixe (sem reconstruir a rede).
+#[test]
+fn transit_stop_edits_change_fit() {
+    let mut n = av_net(&deps(1, 60));
+    let stops = |n: &mut Network| fit0(n).paradas.iter().map(|p| (p.id.clone(), p.passo, p.baia)).collect::<Vec<_>>();
+    assert_eq!(stops(&mut n), vec![("p".to_string(), 1, false)], "parada no trecho 2-3");
+    n.set_transit_edits_str(r#"{"stops":{"p":{"removed":true}}}"#).unwrap();
+    assert!(stops(&mut n).is_empty());
+    // movida para o trecho 3-4, como baia
+    n.set_transit_edits_str(r#"{"stops":{"p":{"pos":[-8.06004,-34.8955],"baia":true}}}"#).unwrap();
+    assert_eq!(stops(&mut n), vec![("p".to_string(), 2, true)]);
+    // criada no trecho 1-2: entra antes da do GTFS, na ordem do caminho
+    n.set_transit_edits_str(r#"{"added":[{"id":"u1","nome":"Nova","pos":[-8.06004,-34.8991],"baia":false}]}"#).unwrap();
+    assert_eq!(stops(&mut n), vec![("u1".to_string(), 0, false), ("p".to_string(), 1, false)]);
+    // longe de qualquer caminho: não entra
+    n.set_transit_edits_str(r#"{"added":[{"id":"u2","nome":"Longe","pos":[-8.0580,-34.8991],"baia":false}]}"#).unwrap();
+    assert_eq!(stops(&mut n).len(), 1);
+    let js: serde_json::Value = serde_json::from_str(&n.transit_stops_json()).unwrap();
+    assert!(js.as_array().unwrap().iter().any(|s| s["id"] == "u2" && s["nova"] == true));
+    n.set_transit_edits_str("").unwrap();
+    assert_eq!(stops(&mut n).len(), 1);
+}
+
+#[test]
+fn transit_scale_departures_keeps_gtfs_shape() {
+    use crate::transit::scale_departures;
+    let deps: Vec<u32> = vec![25200, 25800, 26400, 27000, 28800 + 100];
+    assert_eq!(scale_departures(&deps, &|_| 1.0), deps);
+    assert!(scale_departures(&deps, &|_| 0.0).is_empty());
+    // 7h: 4 partidas; com 0,5 ficam 2, nas pontas da hora; 8h intacta
+    let half = scale_departures(&deps, &|h| if h == 7 { 0.5 } else { 1.0 });
+    assert_eq!(half, vec![25200, 27000, 28900]);
+    // com 2: 8 partidas na hora das 7, entre a primeira e a última reais, em ordem
+    let dbl = scale_departures(&deps, &|h| if h == 7 { 2.0 } else { 1.0 });
+    let h7: Vec<u32> = dbl.iter().copied().filter(|&p| p / 3600 == 7).collect();
+    assert_eq!(h7.len(), 8);
+    assert!(h7.windows(2).all(|w| w[0] <= w[1]) && h7[0] == 25200 && h7[7] == 27000);
+    // uma partida só na hora, fator 3: três, dentro da hora
+    let one = scale_departures(&[28900], &|_| 3.0);
+    assert_eq!(one.len(), 3);
+    assert!(one.iter().all(|&p| p / 3600 == 8));
+}
+
+/// Linha desligada não tem ônibus; o fator multiplica as partidas.
+#[test]
+fn transit_line_off_and_factor_apply_to_sim() {
+    let partidas = |edits: &str| {
+        let mut n = av_net(&deps(6, 60));
+        n.set_transit_edits_str(edits).unwrap();
+        avenue_sim(&mut n, 0.0, r#","busJitter":0"#);
+        run(&mut n, 600.0);
+        bus_rep(&n)["partidas"].as_u64().unwrap_or(0)
+    };
+    assert_eq!(partidas(""), 6);
+    assert_eq!(partidas(r#"{"lines":{"L1":{"off":true}}}"#), 0);
+    let f: Vec<f32> = (0..24).map(|h| if h == 7 { 2.0 } else { 1.0 }).collect();
+    assert_eq!(partidas(&serde_json::json!({"lines": {"L1": {"factor": f}}}).to_string()), 12);
+}
+
+/// Parada em baia: o ônibus sai da faixa para embarcar, os carros passam por ele sem trocar de faixa e ele volta com
+/// brecha; ninguém se sobrepõe e todas as viagens terminam.
+#[test]
+fn bus_bay_lets_cars_pass_and_remerges() {
+    let run_av = |baia: bool| {
+        let mut n = av_net(&deps(15, 60));
+        if baia {
+            n.set_transit_edits_str(r#"{"stops":{"p":{"baia":true}}}"#).unwrap();
+        }
+        avenue_sim(&mut n, 1200.0, r#","busDwellMin":30,"busDwellMax":40"#);
+        let mut in_bay = 0;
+        for _ in 0..(25.0 * 60.0 / 0.2) as u32 {
+            n.sim.as_mut().unwrap().step(&n.net);
+            let s = n.sim.as_ref().unwrap();
+            in_bay += s.buses_in_bay();
+            for list in s.edge_lists() {
+                for w in list.windows(2) {
+                    let (sa, _) = s.vehicle_s(w[0]);
+                    let (sb, lb) = s.vehicle_s(w[1]);
+                    assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+                }
+            }
+            let r = bus_rep(&n);
+            assert_eq!(r["partidas"].as_u64().unwrap(), r["ativos"].as_u64().unwrap() + r["naFila"].as_u64().unwrap() + r["concluidas"].as_u64().unwrap());
+        }
+        let s = n.sim.as_ref().unwrap();
+        (in_bay, s.stats.lane_changes, s.stats.finished, bus_rep(&n))
+    };
+    let (bay0, lc0, fin0, _) = run_av(false);
+    let (bay1, lc1, fin1, r1) = run_av(true);
+    assert_eq!(bay0, 0);
+    assert!(bay1 > 0, "algum ônibus entrou na baia");
+    assert_eq!(r1["concluidas"], 15, "{r1}");
+    assert_eq!(r1["paradasPerdidas"], 0, "{r1}");
+    assert!(lc1 < lc0, "com baia, menos ultrapassagens: {lc1} contra {lc0}");
+    // o ônibus volta à faixa partindo do zero e quem vem atrás desacelera: até 10 % menos carros concluídos
+    assert!(fin1 as f64 >= 0.9 * fin0 as f64, "os carros não ficam presos atrás do ônibus: {fin1} contra {fin0}");
+}
+
+#[test]
+fn sim_stop_info_lists_next_buses() {
+    let mut n = av_net(&deps(8, 60));
+    avenue_sim(&mut n, 0.0, r#","busJitter":0,"busDwellMin":10,"busDwellMax":10"#);
+    run(&mut n, 10.0);
+    let i = n.sim.as_ref().unwrap().stop_info("p");
+    assert_eq!(i["linhas"], serde_json::json!(["1"]));
+    assert_eq!(i["proximos"].as_array().unwrap().len(), 1, "{i}");
+    assert!(i["proximos"][0]["eta"].as_f64().unwrap() > 0.0);
+    run(&mut n, 600.0);
+    let i = n.sim.as_ref().unwrap().stop_info("p");
+    let w = &i["espera"][0];
+    assert!(w["intervalos"].as_u64().unwrap() >= 5, "{i}");
+    let h = w["intervaloMedio"].as_f64().unwrap();
+    assert!((40.0..80.0).contains(&h), "intervalo ~60 s: {h}");
+    assert!(n.sim.as_ref().unwrap().stop_info("nao-existe").is_null());
+    // a série por minuto traz a velocidade dos ônibus na 6ª coluna
+    let s = n.sim.as_ref().unwrap().metrics.series_flat();
+    assert!(s.chunks(6).any(|r| r[5] > 0.0), "velocidade dos ônibus na série");
+}

@@ -18,6 +18,8 @@ use std::rc::Rc;
 pub const BUS_BASE: i64 = 300 << 40;
 /// Parada a até essa distância do caminho encaixado entra nele.
 const PARADA_RAIO_M: f64 = 30.0;
+/// Parada criada pelo usuário entra nos trechos cujo caminho passa a até essa distância dela.
+const PARADA_NOVA_M: f64 = 15.0;
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
@@ -105,6 +107,108 @@ impl TransitData {
     }
 }
 
+/// Edição de uma linha pelo usuário: desligada e fator de frequência por hora do dia sobre o GTFS (1 = como no GTFS).
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct LineEdit {
+    pub off: bool,
+    pub factor: Vec<f32>,
+}
+
+/// Edição de uma parada do GTFS: removida, movida (`pos` = [lat, lon]) ou com o tipo trocado.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct StopEdit {
+    pub removed: bool,
+    pub pos: Option<[f64; 2]>,
+    pub baia: Option<bool>,
+}
+
+/// Parada criada pelo usuário: vale para todo trecho encaixado que passa a até `PARADA_NOVA_M` dela.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct AddedStop {
+    pub id: String,
+    pub nome: String,
+    pub pos: [f64; 2],
+    pub baia: bool,
+}
+
+/// Edições das linhas e paradas (separadas das edições da rede: não reconstroem a rede, só o encaixe).
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct TransitEdits {
+    pub lines: HashMap<String, LineEdit>,
+    pub stops: HashMap<String, StopEdit>,
+    pub added: Vec<AddedStop>,
+}
+
+impl TransitEdits {
+    pub fn parse(json: &str) -> Result<TransitEdits, String> {
+        if json.trim().is_empty() {
+            return Ok(TransitEdits::default());
+        }
+        serde_json::from_str(json).map_err(|e| format!("edições das linhas inválidas: {e}"))
+    }
+
+    /// Fator da hora `h` (0..23) da linha `id` (1 sem edição).
+    pub fn factor(&self, id: &str, h: usize) -> f32 {
+        self.lines.get(id).and_then(|l| l.factor.get(h).copied()).unwrap_or(1.0).max(0.0)
+    }
+
+    pub fn line_off(&self, id: &str) -> bool {
+        self.lines.get(id).is_some_and(|l| l.off)
+    }
+}
+
+/// Partidas reamostradas por hora com o fator da hora: as `n` partidas de cada hora viram `round(n·f)`, interpoladas
+/// no índice entre as reais (mantém o desenho dos horários do GTFS). Hora com uma partida só e f > 1 espalha as novas
+/// pelo intervalo médio do trecho. Saída em ordem.
+pub fn scale_departures(partidas: &[u32], factor: &dyn Fn(usize) -> f32) -> Vec<u32> {
+    let mut deps: Vec<u32> = partidas.to_vec();
+    deps.sort_unstable();
+    if deps.is_empty() {
+        return deps;
+    }
+    let mean_h = if deps.len() > 1 { (deps[deps.len() - 1] - deps[0]) as f64 / (deps.len() - 1) as f64 } else { 3600.0 };
+    let mut out = Vec::with_capacity(deps.len());
+    let mut k = 0;
+    while k < deps.len() {
+        let hour = (deps[k] / 3600) as usize;
+        let end = k + deps[k..].iter().take_while(|&&p| (p / 3600) as usize == hour).count();
+        let src = &deps[k..end];
+        let f = factor(hour % 24);
+        let m = (src.len() as f64 * f as f64).round() as usize;
+        if (f - 1.0).abs() < 1e-6 {
+            out.extend_from_slice(src);
+        } else if m > 0 {
+            if src.len() == 1 {
+                // uma partida na hora: as novas em volta dela, no intervalo médio dividido pelo fator
+                let step = mean_h / f as f64;
+                let lo = (hour * 3600) as f64;
+                let hi = lo + 3599.0;
+                for j in 0..m {
+                    let t = src[0] as f64 + (j as f64 - (m - 1) as f64 / 2.0) * step;
+                    out.push(t.clamp(lo, hi).round() as u32);
+                }
+            } else {
+                // m pontos igualmente espaçados no índice [0, n − 1], interpolando entre as partidas reais (a primeira
+                // e a última da hora ficam onde estão)
+                let n = src.len();
+                for j in 0..m {
+                    let x = if m == 1 { (n - 1) as f64 / 2.0 } else { j as f64 * (n - 1) as f64 / (m - 1) as f64 };
+                    let (i0, fr) = (x.floor() as usize, x - x.floor());
+                    let t = if i0 + 1 < n { src[i0] as f64 * (1.0 - fr) + src[i0 + 1] as f64 * fr } else { src[n - 1] as f64 };
+                    out.push(t.round() as u32);
+                }
+            }
+        }
+        k = end;
+    }
+    out.sort_unstable();
+    out
+}
+
 fn set_tag(tags: &mut Vec<(String, String)>, k: &str, v: &str) {
     match tags.iter_mut().find(|t| t.0 == k) {
         Some(t) => t.1 = v.to_string(),
@@ -185,6 +289,8 @@ pub struct ParadaFit {
     pub lane: u32,
     pub s: f64,
     pub baia: bool,
+    /// ponto no eixo do trecho (metros locais), para desenhar
+    pub pos: V2,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -232,7 +338,7 @@ fn travel_pts(net: &Net, seg: u32, d: u8) -> Vec<V2> {
 
 /// Encaixa todos os trechos de todos os padrões na rede atual. Usa `net.conns` quando já existem; senão calcula as
 /// conexões dos nós visitados.
-pub fn fit(net: &Net, raw: &RawOsm, restr: &HashMap<i64, Vec<usize>>, edits: &Edits, t: &TransitData) -> TransitFit {
+pub fn fit(net: &Net, raw: &RawOsm, restr: &HashMap<i64, Vec<usize>>, edits: &Edits, t: &TransitData, ed: &TransitEdits) -> TransitFit {
     // way -> trechos da rede
     let mut way_segs: HashMap<i64, Vec<u32>> = HashMap::new();
     for (i, s) in net.segs.iter().enumerate() {
@@ -302,7 +408,7 @@ pub fn fit(net: &Net, raw: &RawOsm, restr: &HashMap<i64, Vec<usize>>, edits: &Ed
                         Ok(c) => {
                             r.ok = true;
                             r.caminho = c;
-                            stops(net, t, tr, &mut r);
+                            stops(net, t, ed, tr, &mut r);
                         }
                         Err(e) => r.aviso = Some(e),
                     }
@@ -455,48 +561,75 @@ fn search(
 }
 
 /// Paradas do trecho projetadas em ordem no caminho encaixado, na faixa mais à direita do sentido (a de ônibus, se
-/// houver).
-fn stops(net: &Net, t: &TransitData, tr: &Trecho, r: &mut TrechoFit) {
-    // pedaços do caminho: (passo, a, b, s no início do pedaço dentro do passo)
-    let mut pecas: Vec<(u32, V2, V2, f64)> = Vec::new();
+/// houver). Com as edições: paradas removidas saem, movidas usam a posição nova, o tipo pode ser trocado, e as criadas
+/// pelo usuário entram em todo trecho que passa perto delas, na ordem do caminho.
+fn stops(net: &Net, t: &TransitData, ed: &TransitEdits, tr: &Trecho, r: &mut TrechoFit) {
+    // pedaços do caminho: (passo, a, b, s no início do pedaço dentro do passo, metros desde o início do caminho)
+    let mut pecas: Vec<(u32, V2, V2, f64, f64)> = Vec::new();
+    let mut total = 0.0;
     for (i, &(s, d)) in r.caminho.iter().enumerate() {
         let pts = travel_pts(net, s, d);
         let mut acc = 0.0;
         for w in pts.windows(2) {
-            pecas.push((i as u32, w[0], w[1], acc));
-            acc += len(sub(w[1], w[0]));
+            let l = len(sub(w[1], w[0]));
+            pecas.push((i as u32, w[0], w[1], acc, total));
+            acc += l;
+            total += l;
         }
     }
-    let mut desde = 0usize;
-    for (id, _) in &tr.paradas {
-        let Some(p) = t.paradas.get(id) else { continue };
-        if p.removida {
-            continue;
-        }
-        let q = latlon_to_xy(&net.geo, p.lat, p.lon);
-        let dist = |j: usize| {
-            let (_, a, b, _) = pecas[j];
-            let v = sub(b, a);
-            let l2 = dot(v, v);
-            let f = if l2 > 0.0 { (dot(sub(q, a), v) / l2).clamp(0.0, 1.0) } else { 0.0 };
-            (len(sub(add(a, mul(v, f)), q)), f)
-        };
-        // primeiro pedaço a até 30 m, descendo até o mínimo local
-        let Some(mut j) = (desde..pecas.len()).find(|&j| dist(j).0 <= PARADA_RAIO_M) else {
-            r.paradas_fora += 1;
-            continue;
-        };
-        while j + 1 < pecas.len() && dist(j + 1).0 < dist(j).0 {
-            j += 1;
-        }
-        let (passo, a, b, s0) = pecas[j];
-        let f = dist(j).1;
+    let dist = |q: V2, j: usize| {
+        let (_, a, b, _, _) = pecas[j];
+        let v = sub(b, a);
+        let l2 = dot(v, v);
+        let f = if l2 > 0.0 { (dot(sub(q, a), v) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        (len(sub(add(a, mul(v, f)), q)), f)
+    };
+    // (metros no caminho, parada)
+    let mut out: Vec<(f64, ParadaFit)> = Vec::new();
+    let mut put = |j: usize, f: f64, id: &str, baia: bool, out: &mut Vec<(f64, ParadaFit)>| {
+        let (passo, a, b, s0, c0) = pecas[j];
         let (seg, d) = r.caminho[passo as usize];
         let ls: Vec<u32> = lanes_of(net, seg, d).collect();
         let lane = ls.iter().rev().find(|&&l| net.lanes[l as usize].bus).or(ls.last()).copied().unwrap_or(0);
-        r.paradas.push(ParadaFit { id: id.clone(), passo, lane, s: s0 + f * len(sub(b, a)), baia: p.baia });
+        let l = len(sub(b, a));
+        let pos = add(a, mul(sub(b, a), f));
+        out.push((c0 + f * l, ParadaFit { id: id.to_string(), passo, lane, s: s0 + f * l, baia, pos }));
+    };
+    let mut desde = 0usize;
+    for (id, _) in &tr.paradas {
+        let Some(p) = t.paradas.get(id) else { continue };
+        let e = ed.stops.get(id);
+        if p.removida || e.is_some_and(|e| e.removed) {
+            continue;
+        }
+        let (lat, lon) = e.and_then(|e| e.pos).map_or((p.lat, p.lon), |q| (q[0], q[1]));
+        let q = latlon_to_xy(&net.geo, lat, lon);
+        // primeiro pedaço a até 30 m, descendo até o mínimo local
+        let Some(mut j) = (desde..pecas.len()).find(|&j| dist(q, j).0 <= PARADA_RAIO_M) else {
+            r.paradas_fora += 1;
+            continue;
+        };
+        while j + 1 < pecas.len() && dist(q, j + 1).0 < dist(q, j).0 {
+            j += 1;
+        }
+        let baia = e.and_then(|e| e.baia).unwrap_or(p.baia);
+        put(j, dist(q, j).1, id, baia, &mut out);
         desde = j;
     }
+    for a in &ed.added {
+        let q = latlon_to_xy(&net.geo, a.pos[0], a.pos[1]);
+        let best = (0..pecas.len()).map(|j| (j, dist(q, j))).min_by(|x, y| x.1 .0.total_cmp(&y.1 .0));
+        if let Some((j, (dmin, f))) = best {
+            if dmin <= PARADA_NOVA_M {
+                let baia = ed.stops.get(&a.id).and_then(|e| e.baia).unwrap_or(a.baia);
+                if !ed.stops.get(&a.id).is_some_and(|e| e.removed) {
+                    put(j, f, &a.id, baia, &mut out);
+                }
+            }
+        }
+    }
+    out.sort_by(|x, y| x.0.total_cmp(&y.0));
+    r.paradas = out.into_iter().map(|x| x.1).collect();
 }
 
 impl TransitFit {

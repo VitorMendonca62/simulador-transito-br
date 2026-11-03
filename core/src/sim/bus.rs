@@ -12,10 +12,22 @@ pub struct BusRoute {
     pub padrao: String,
     /// trechos dirigidos (trecho da rede, 0 = from→to, 1 = contrário)
     pub caminho: Vec<(u32, u8)>,
-    /// paradas em ordem: (passo, faixa, metros desde o início do trecho da rede no sentido)
-    pub paradas: Vec<(u32, u32, f64)>,
+    /// paradas em ordem
+    pub paradas: Vec<BusStopIn>,
     /// segundos do dia em que cada viagem entra no trecho
     pub partidas: Vec<u32>,
+}
+
+/// Parada de um trecho encaixado: no passo `passo`, na faixa `lane`, a `s` metros do início do trecho da rede (no
+/// sentido); `id`/`nome` da parada (a mesma parada aparece em várias linhas).
+#[derive(Clone, Debug, Default)]
+pub struct BusStopIn {
+    pub passo: u32,
+    pub lane: u32,
+    pub s: f64,
+    pub id: String,
+    pub nome: String,
+    pub baia: bool,
 }
 
 pub(super) struct StopRt {
@@ -23,6 +35,18 @@ pub(super) struct StopRt {
     pub lane: u32,
     /// posição na faixa (m desde o começo dela) onde a frente do ônibus para
     pub s: f32,
+    /// índice da parada em `Sim::stop_ids` (a mesma em todas as linhas)
+    pub id: u32,
+    pub baia: bool,
+}
+
+/// Passagens de uma linha por uma parada: última passagem e intervalos (contagem, soma, soma dos quadrados).
+#[derive(Default, Clone, Copy)]
+pub(super) struct StopLineHw {
+    pub last: f32,
+    pub n: u32,
+    pub sum: f64,
+    pub sq: f64,
 }
 
 pub(super) struct BusPlan {
@@ -74,6 +98,9 @@ const SHORT_STOP: f32 = 10.0;
 const BUS_LEN: f32 = 12.0;
 /// fora da faixa do ponto, o ônibus espera brecha para entrar nela parado antes do ponto até este tempo (s)
 const STOP_MERGE_WAIT: f32 = 30.0;
+/// ônibus que cabem na baia e deslocamento lateral (m) dela em relação ao centro da faixa
+const BAY_CAP: u8 = 2;
+const BAY_OFF: f32 = 3.0;
 
 impl Sim {
     /// Monta os planos, as partidas e o índice de paradas por faixa. Chamado no fim de `Sim::new_ext`.
@@ -143,8 +170,18 @@ impl Sim {
             let mut stops: Vec<StopRt> = r
                 .paradas
                 .iter()
-                .filter(|p| (p.0 as usize) < n && p.1 >= lo[p.0 as usize] && p.1 < hi[p.0 as usize])
-                .map(|&(step, lane, s)| {
+                .filter(|p| (p.passo as usize) < n && p.lane >= lo[p.passo as usize] && p.lane < hi[p.passo as usize])
+                .map(|p| {
+                    let (step, lane, s, baia) = (p.passo, p.lane, p.s, p.baia);
+                    let id = match self.stop_id_of.get(&p.id) {
+                        Some(&k) => k,
+                        None => {
+                            self.stop_ids.push(p.id.clone());
+                            self.stop_names.push(p.nome.clone());
+                            self.stop_id_of.insert(p.id.clone(), self.stop_ids.len() as u32 - 1);
+                            self.stop_ids.len() as u32 - 1
+                        }
+                    };
                     let (seg, d) = r.caminho[step as usize];
                     let sg = &net.segs[seg as usize];
                     let cut = if d == 0 { sg.cut_from } else { sg.cut_to };
@@ -156,11 +193,11 @@ impl Sim {
                         let k = step as usize - 1;
                         let pl = hi[k] - 1;
                         let plen = self.lanes[pl as usize].len;
-                        return StopRt { step: step - 1, lane: pl, s: (plen - 3.0).max(0.5) };
+                        return StopRt { step: step - 1, lane: pl, s: (plen - 3.0).max(0.5), id, baia };
                     }
                     // a frente para na posição da parada, sem encostar no nó do fim da faixa
                     let top = (len - 3.0).max(0.5);
-                    StopRt { step, lane, s: s.clamp(12f32.min(len * 0.5).min(top), top) }
+                    StopRt { step, lane, s: s.clamp(12f32.min(len * 0.5).min(top), top), id, baia }
                 })
                 .collect();
             stops.sort_by(|a, b| a.step.cmp(&b.step).then(a.s.total_cmp(&b.s)));
@@ -320,6 +357,10 @@ impl Sim {
     pub(super) fn stop_update(&mut self, i: usize, dt: f32) {
         let e = self.edge[i] as usize;
         let bus = self.route[i] != NONE;
+        if self.in_bay[i] != 0 && self.dwell[i] <= 0.0 {
+            self.bay_merge(i);
+            return;
+        }
         if self.dwell[i] > 0.0 {
             self.dwell[i] -= dt;
             if self.dwell[i] <= 0.0 {
@@ -400,7 +441,50 @@ impl Sim {
                 }
             }
             self.stop_last[r][k] = now;
+            let (sid, baia) = (self.bus_plans[r].stops[k].id, self.bus_plans[r].stops[k].baia);
+            let h = self.stop_hw.entry((sid, line as u32)).or_insert(StopLineHw { last: f32::NEG_INFINITY, ..Default::default() });
+            if h.last.is_finite() {
+                let hw = (now - h.last) as f64;
+                h.n += 1;
+                h.sum += hw;
+                h.sq += hw * hw;
+            }
+            h.last = now;
+            // baia: sai da faixa para embarcar (quem vem atrás passa); cheia, embarca na faixa
+            let e = self.edge[i] as usize;
+            if baia && e < self.nl && *self.bay_occ.get(&sid).unwrap_or(&0) < BAY_CAP {
+                *self.bay_occ.entry(sid).or_insert(0) += 1;
+                self.unlink(e, i);
+                self.in_bay[i] = sid + 1;
+                self.v[i] = 0.0;
+                self.acc[i] = 0.0;
+                let l = &self.lanes[e];
+                self.lat[i] = if l.dir == 0 { BAY_OFF } else { -BAY_OFF };
+            }
         }
+    }
+
+    /// Ônibus na baia, embarque terminado: volta à faixa quando há brecha (regra da fusão: o seguidor não precisa frear
+    /// mais que `MERGE_BRAKE`; vão à frente para arrancar).
+    fn bay_merge(&mut self, i: usize) {
+        let e = self.edge[i] as usize;
+        let (ld, fl) = self.around(e, self.s[i], i);
+        if ld.is_some_and(|j| self.s[j] - self.vlen[j] - self.s[i] < 3.0) {
+            return;
+        }
+        if let Some(f) = fl {
+            let gap = self.s[i] - self.vlen[i] - self.s[f];
+            if gap < 1.0 || self.idm(f, Some((gap, 0.0))) < -MERGE_BRAKE {
+                return;
+            }
+        }
+        let sid = self.in_bay[i] - 1;
+        if let Some(o) = self.bay_occ.get_mut(&sid) {
+            *o = o.saturating_sub(1);
+        }
+        self.in_bay[i] = 0;
+        self.insert_sorted(e as u32, i);
+        // o `lat` volta a 0 aos poucos (saída da baia desenhada como troca de faixa)
     }
 
     /// Ônibus chegou ao fim do caminho.
@@ -497,6 +581,76 @@ impl Sim {
     /// Trecho dirigido de cada passo do plano `p` e (de, para) de cada conversão: para conferir que o ônibus não sai do caminho.
     pub fn bus_plan_dirsegs(&self, p: usize) -> Vec<u32> {
         self.bus_plans[p].dirseg.clone()
+    }
+
+    /// Parada `id` na simulação: linhas que passam, próximos ônibus (até 8, com a chegada estimada em fluxo livre) e
+    /// espera média por linha (E[h²] / 2E[h] dos intervalos medidos ali). `null` se a parada não está em nenhuma linha.
+    pub fn stop_info(&self, id: &str) -> serde_json::Value {
+        use serde_json::json;
+        let Some(&sid) = self.stop_id_of.get(id) else { return serde_json::Value::Null };
+        let mut lines: Vec<u32> = self.bus_plans.iter().filter(|p| p.stops.iter().any(|s| s.id == sid)).map(|p| p.line).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        let mut next: Vec<(f32, usize, f32)> = Vec::new();
+        for i in (0..self.alive.len()).filter(|&i| self.alive[i] && self.route[i] != NONE) {
+            let p = &self.bus_plans[self.route[i] as usize];
+            let Some(st) = p.stops.iter().skip(self.bstop[i] as usize).find(|s| s.id == sid) else { continue };
+            // distância e tempo livre: resto da faixa atual, passos até o da parada, posição na faixa dela
+            let e = self.edge[i] as usize;
+            let k0 = self.bstep[i] as usize;
+            let (mut d, mut t) = if e < self.nl {
+                let l = &self.lanes[e];
+                if st.step as usize == k0 {
+                    let x = (st.s - self.s[i]).max(0.0);
+                    (x, x / (l.vfree * 0.85))
+                } else {
+                    let x = (l.len - self.s[i]).max(0.0);
+                    (x, x / (l.vfree * 0.85))
+                }
+            } else {
+                (0.0, 0.0)
+            };
+            for k in (k0 + 1)..=(st.step as usize) {
+                let l = p.lo[k] as usize;
+                let part = if k == st.step as usize { st.s } else { self.lanes[l].len };
+                d += part;
+                t += self.lrouter.time[l] * part / self.lanes[l].len.max(1.0);
+            }
+            next.push((t, i, d));
+        }
+        next.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let next: Vec<serde_json::Value> = next
+            .iter()
+            .take(8)
+            .map(|&(t, i, d)| json!({ "veh": i, "linha": self.bus_lines[self.bus_plans[self.route[i] as usize].line as usize].numero, "dist": d, "eta": t, "embarcando": self.dwell[i] > 0.0 }))
+            .collect();
+        let wait: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|&l| {
+                let h = self.stop_hw.get(&(sid, l)).copied().unwrap_or_default();
+                let w = if h.n > 0 && h.sum > 0.0 { Some(h.sq / (2.0 * h.sum)) } else { None };
+                json!({ "linha": self.bus_lines[l as usize].numero, "intervalos": h.n, "intervaloMedio": if h.n > 0 { Some(h.sum / h.n as f64) } else { None }, "esperaMedia": w })
+            })
+            .collect();
+        json!({
+            "id": id,
+            "nome": self.stop_names[sid as usize],
+            "linhas": lines.iter().map(|&l| self.bus_lines[l as usize].numero.clone()).collect::<Vec<_>>(),
+            "proximos": next,
+            "espera": wait,
+            "naBaia": self.bay_occ.get(&sid).copied().unwrap_or(0),
+        })
+    }
+
+    /// Nome da próxima parada do ônibus `i` (vazio se não há).
+    pub(super) fn next_stop_name(&self, i: usize) -> String {
+        let p = &self.bus_plans[self.route[i] as usize];
+        p.stops.get(self.bstop[i] as usize).map_or(String::new(), |st| self.stop_names[st.id as usize].clone())
+    }
+
+    /// Diagnóstico para testes: ônibus agora numa baia.
+    pub fn buses_in_bay(&self) -> usize {
+        self.in_bay.iter().zip(&self.alive).filter(|(b, a)| **a && **b != 0).count()
     }
 
     /// Diagnóstico para testes: tempo parado (`wait`, s) de cada ônibus de linha em circulação.

@@ -38,6 +38,8 @@ pub struct Network {
     transit: Option<transit::TransitData>,
     transit_avisos: Vec<String>,
     transit_fit: Option<transit::TransitFit>,
+    /// edições das linhas e paradas pelo usuário (não reconstroem a rede, só o encaixe; valem na próxima simulação)
+    transit_edits: transit::TransitEdits,
     /// pesos do último lote de rotas tomado (`sim_route_take`), entregues por `sim_route_pen`/`sim_route_cm`
     route_w: (Vec<f32>, Vec<f32>),
     /// edições aplicadas pelo caminho rápido (diagnóstico e testes)
@@ -87,7 +89,7 @@ fn build_network_with(data: &[u8], lazy: bool, ext: &[extsig::ExtSignal], transi
     let net = build_parts(&raw, &base, &edits, lazy, ext_signals.as_ref())?;
     let (tiles, delta) = render::update_tiles(&net, None);
     let restr = conn::restriction_index(&raw);
-    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, transit, transit_avisos, transit_fit: None, route_w: Default::default(), fast_edits: 0 })
+    Ok(Network { raw, base, edits, net, tiles, delta, restr, sim: None, lazy, ext_signals, transit, transit_avisos, transit_fit: None, transit_edits: Default::default(), route_w: Default::default(), fast_edits: 0 })
 }
 
 /// Rede com conexões por nó sob demanda (como no navegador).
@@ -191,7 +193,7 @@ impl Network {
     pub fn transit_fit(&mut self) -> Option<&transit::TransitFit> {
         let t = self.transit.as_ref()?;
         if self.transit_fit.is_none() {
-            self.transit_fit = Some(transit::fit(&self.net, &self.raw, &self.restr, &self.edits, t));
+            self.transit_fit = Some(transit::fit(&self.net, &self.raw, &self.restr, &self.edits, t, &self.transit_edits));
         }
         self.transit_fit.as_ref()
     }
@@ -202,21 +204,62 @@ impl Network {
             return Vec::new();
         }
         let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return Vec::new() };
+        let ed = &self.transit_edits;
+        let nome = |id: &str| t.paradas.get(id).and_then(|p| p.nome.clone()).or_else(|| ed.added.iter().find(|a| a.id == id).map(|a| a.nome.clone())).unwrap_or_else(|| id.to_string());
         f.trechos
             .iter()
-            .filter(|r| r.ok)
+            .filter(|r| r.ok && !ed.line_off(&t.linhas[r.linha].id))
             .map(|r| {
                 let (l, p) = (&t.linhas[r.linha], &t.linhas[r.linha].padroes[r.padrao]);
                 sim::bus::BusRoute {
                     linha: if l.numero.is_empty() { l.id.clone() } else { l.numero.clone() },
                     padrao: p.id.clone(),
                     caminho: r.caminho.clone(),
-                    // baia ainda é tratada como parada na faixa (versão 2, fase 6)
-                    paradas: r.paradas.iter().map(|q| (q.passo, q.lane, q.s)).collect(),
-                    partidas: p.trechos[r.trecho].partidas.clone(),
+                    paradas: r.paradas.iter().map(|q| sim::bus::BusStopIn { passo: q.passo, lane: q.lane, s: q.s, id: q.id.clone(), nome: nome(&q.id), baia: q.baia }).collect(),
+                    partidas: transit::scale_departures(&p.trechos[r.trecho].partidas, &|h| ed.factor(&l.id, h)),
                 }
             })
             .collect()
+    }
+
+    /// Troca as edições das linhas e paradas (JSON de `TransitEdits`; vazio = nenhuma). Refaz só o encaixe, sob demanda.
+    pub fn set_transit_edits_str(&mut self, json: &str) -> Result<(), String> {
+        let ed = transit::TransitEdits::parse(json)?;
+        if ed != self.transit_edits {
+            self.transit_edits = ed;
+            self.transit_fit = None;
+        }
+        Ok(())
+    }
+
+    /// Polilinhas dos trechos encaixados no eixo da faixa da direita (x, y planos) e o início de cada uma (em pontos,
+    /// mais o total no fim).
+    fn transit_geom(&mut self) -> (Vec<f32>, Vec<u32>) {
+        let (mut pts, mut off) = (Vec::new(), vec![0u32]);
+        if self.transit_fit().is_none() {
+            return (pts, Vec::new());
+        }
+        let net = &self.net;
+        for r in self.transit_fit.as_ref().unwrap().trechos.iter().filter(|r| r.ok) {
+            let mut line: Vec<geo::V2> = Vec::new();
+            for &(sg, d) in &r.caminho {
+                let s = &net.segs[sg as usize];
+                let n = if d == 0 { s.lf } else { s.lb };
+                let mut p = geo::offset(&s.poly.pts, s.lane_off(d, n.saturating_sub(1)));
+                if d == 1 {
+                    p.reverse();
+                }
+                // pula o ponto repetido na junção dos passos
+                let skip = usize::from(line.last().zip(p.first()).is_some_and(|(a, b)| geo::len(geo::sub(*a, *b)) < 0.5));
+                line.extend(p.into_iter().skip(skip));
+            }
+            for q in &line {
+                pts.push(q[0] as f32);
+                pts.push(q[1] as f32);
+            }
+            off.push((pts.len() / 2) as u32);
+        }
+        (pts, off)
     }
 
     /// Avisos das exceções para ônibus que não couberam no mapa.
@@ -287,6 +330,98 @@ impl Network {
         }
         let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return "{}".into() };
         f.summary_json(t, &self.transit_avisos)
+    }
+
+    /// Edições das linhas e paradas (JSON de `TransitEdits`). Valem a partir da próxima simulação.
+    pub fn set_transit_edits(&mut self, json: &str) -> Result<(), JsError> {
+        self.set_transit_edits_str(json).map_err(|e| JsError::new(&e))
+    }
+
+    /// Linhas para a interface (`[]` sem linhas): por linha, os padrões e, por trecho, se encaixou, o aviso e quantas
+    /// paradas; `pts` indexa `transit_off_u32` (−1 = sem desenho).
+    pub fn transit_lines_json(&mut self) -> String {
+        if self.transit_fit().is_none() {
+            return "[]".into();
+        }
+        let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return "[]".into() };
+        let mut lines: Vec<serde_json::Value> = Vec::with_capacity(t.linhas.len());
+        let mut k = 0usize;
+        let mut pts_i = 0i64;
+        for l in &t.linhas {
+            let mut pads = Vec::new();
+            for p in &l.padroes {
+                let mut trs = Vec::new();
+                for _ in &p.trechos {
+                    let r = &f.trechos[k];
+                    k += 1;
+                    let idx = if r.ok { pts_i += 1; pts_i - 1 } else { -1 };
+                    trs.push(json!({ "ok": r.ok, "aviso": r.aviso, "paradas": r.paradas.len(), "pts": idx }));
+                }
+                pads.push(json!({ "id": p.id, "destino": p.destino, "trechos": trs }));
+            }
+            lines.push(json!({ "id": l.id, "numero": l.numero, "nome": l.nome, "padroes": pads }));
+        }
+        serde_json::Value::Array(lines).to_string()
+    }
+
+    /// Polilinhas dos trechos encaixados (x, y planos em metros locais), na ordem de `transit_lines_json`.
+    pub fn transit_pts_f32(&mut self) -> Vec<f32> {
+        self.transit_geom().0
+    }
+
+    /// Início de cada polilinha em `transit_pts_f32` (em pontos), mais o total no fim.
+    pub fn transit_off_u32(&mut self) -> Vec<u32> {
+        self.transit_geom().1
+    }
+
+    /// Paradas para a interface: `[{id, nome, x, y, baia, linhas, editada, nova}]`; posição no caminho encaixado (ou a
+    /// do GTFS, se nenhum caminho passa por ela).
+    pub fn transit_stops_json(&mut self) -> String {
+        if self.transit_fit().is_none() {
+            return "[]".into();
+        }
+        let (Some(t), Some(f)) = (&self.transit, &self.transit_fit) else { return "[]".into() };
+        let ed = &self.transit_edits;
+        // id -> (posição, baia, linhas)
+        let mut at: std::collections::BTreeMap<&str, (geo::V2, bool, std::collections::BTreeSet<&str>)> = Default::default();
+        for r in f.trechos.iter().filter(|r| r.ok) {
+            let num = t.linhas[r.linha].numero.as_str();
+            for p in &r.paradas {
+                at.entry(p.id.as_str()).or_insert((p.pos, p.baia, Default::default())).2.insert(num);
+            }
+        }
+        let mut out = Vec::new();
+        let mut push = |id: &str, nome: &str, ll: (f64, f64), baia: bool, nova: bool| {
+            let e = ed.stops.get(id);
+            if e.is_some_and(|e| e.removed) {
+                return;
+            }
+            let (pos, baia, lines) = match at.get(id) {
+                Some((p, b, ls)) => (*p, *b, ls.iter().copied().collect::<Vec<_>>()),
+                None => (geo::latlon_to_xy(&self.net.geo, ll.0, ll.1), e.and_then(|e| e.baia).unwrap_or(baia), Vec::new()),
+            };
+            out.push(json!({ "id": id, "nome": nome, "x": pos[0], "y": pos[1], "baia": baia, "linhas": lines, "editada": e.is_some(), "nova": nova }));
+        };
+        let mut ids: Vec<&String> = t.paradas.keys().collect();
+        ids.sort();
+        for id in ids {
+            let p = &t.paradas[id];
+            if p.removida {
+                continue;
+            }
+            let ll = ed.stops.get(id.as_str()).and_then(|e| e.pos).map_or((p.lat, p.lon), |q| (q[0], q[1]));
+            // só as do mapa: as que algum trecho encaixado usa, ou dentro dos limites da rede
+            let xy = geo::latlon_to_xy(&self.net.geo, ll.0, ll.1);
+            let b = self.net.bounds;
+            if !at.contains_key(id.as_str()) && !(xy[0] >= b[0] && xy[0] <= b[2] && xy[1] >= b[1] && xy[1] <= b[3]) {
+                continue;
+            }
+            push(id, p.nome.as_deref().unwrap_or(id), ll, p.baia, false);
+        }
+        for a in &ed.added {
+            push(&a.id, &a.nome, (a.pos[0], a.pos[1]), a.baia, true);
+        }
+        serde_json::Value::Array(out).to_string()
     }
 
     pub fn meta_json(&self) -> String {
@@ -600,6 +735,13 @@ impl Network {
         }
     }
     /// Métricas dos ônibus por linha (JSON; `{}` sem simulação ou sem linhas).
+    /// Parada `id` na simulação (JSON: linhas, próximos ônibus, espera média; `null` sem simulação ou fora das linhas).
+    pub fn sim_stop_info(&self, id: &str) -> String {
+        match &self.sim {
+            Some(s) => s.stop_info(id).to_string(),
+            None => "null".to_string(),
+        }
+    }
     pub fn sim_bus_report(&self) -> String {
         match &self.sim {
             Some(s) => s.bus_report().to_string(),
