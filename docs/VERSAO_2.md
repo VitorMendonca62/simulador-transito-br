@@ -147,14 +147,34 @@ validado como acima.
 
 ### Fase 3 — Dados
 Script `scripts/onibus_recife/` → `public/data/onibus_recife.json` (mesmo padrão dos semáforos da CTTU e da OD).
-- **Itinerários e paradas**: relações `route=bus` (PTv2) do OSM via Overpass: sequência de ways por sentido e paradas
-  (`public_transport=platform` / `stop_position`, `highway=bus_stop`).
-- **Frequência por hora**: verificar se há GTFS público do Grande Recife Consórcio. Sem GTFS, usar intervalo sintético
-  por classe de linha (ex.: troncal 5 min no pico, alimentadora 15 min), documentado como estimativa.
-- Relatório de cobertura: quantas linhas, quantas com itinerário contínuo, quantas paradas ficaram sem linha.
-- Ajustes manuais num `ajustes_manuais.json` próprio, como na CTTU.
 
-**Pronto quando**: o JSON existe, gera de novo sem baixar nada (só mescla ajustes), e a cobertura está registrada.
+**Concluída (2026-11-02).** A fonte mudou do plano: o OSM tem só 87 relações `route=bus` no Recife, mas o Grande
+Recife publica um **GTFS oficial** (`granderecife.pe.gov.br/gtfs/gtfs.zip`, 38 MB, `v2026.10.26`: 395 rotas de
+ônibus, 1.424 shapes, 7.239 paradas, horário de cada viagem). O GTFS é a fonte única de itinerário, paradas e
+**horários reais** (sem intervalo sintético); as relações do OSM não são usadas. Detalhes em
+`data/onibus_recife/metodologia_onibus.md`.
+- Dia útil de referência (quarta sem exceção no calendário); um padrão por `shape_id`.
+- Itinerário recortado pelo mapa do app e **já casado com os ways do `mapa-recife.osm.gz`** (Viterbi com rumo e mão
+  única do núcleo; buracos curtos ligados pelo menor caminho dirigido). Saem `ways` com sinal = sentido, polilinha
+  simplificada, paradas como distância no trecho e o instante de entrada de cada viagem no trecho.
+- Ajustes em `ajustes_manuais.json` (desligar linha/padrão, trocar `ways` de um trecho, parada baia/mover/remover),
+  reaplicados por `aplicar_ajustes.py` sem baixar nada; rodar o gerador sem rede dá o mesmo JSON (conferido).
+
+Cobertura (`data/onibus_recife/relatorio_onibus.md`):
+| Medida | Valor |
+|---|---|
+| Linhas com trecho no Recife | 292 (de 388 com viagem no dia) |
+| Padrões no mapa | 999 (82 saem e voltam ao mapa) |
+| Padrões contínuos (sem lacuna) | 700 (70 %) |
+| Lacunas | 92 pares de ways, 511 ocorrências: 62 desvio longo (conversão que o mapa não permite), 17 sem ligação no mapa, 13 só contra a mão única |
+| Amostras a ≤ 20 m de um way compatível (mediana por padrão) | 97 % |
+| Paradas usadas | 2.868 (0 baias: o OSM do Recife não marca `bus_bay`; 1.179 sem nome) |
+| Entradas de ônibus em trechos no dia / às 7h | 32.095 / 2.037 |
+| `onibus_recife.json` | 2,7 MB (~0,5 MB comprimido) |
+
+O que sobra para a fase 4: as lacunas (`lacunas.csv`, ordenadas por padrões afetados) viram ajustes ou avisos por
+linha; contramão de ônibus pede ler exceção de mão única para ônibus (`oneway:bus`/`oneway:psv`), que o mapa atual
+não traz.
 
 ### Fase 4 — Núcleo: encaixe na rede
 - `core/src/transit.rs`: encaixar cada itinerário na rede (por id de way; onde o way foi dividido ou editado, pelo
@@ -167,8 +187,8 @@ Script `scripts/onibus_recife/` → `public/data/onibus_recife.json` (mesmo padr
 - Testes: itinerário encaixa no mapa de exemplo; linha com via demolida gera aviso; encaixe estável depois de rebuild.
 
 ### Fase 5 — Simulação
-- **Geração por linha**: um ônibus parte do terminal a cada intervalo da hora (com pequena variação sorteada pela
-  semente), segue a rota fixa até o fim e termina no terminal. Substitui o `bus_share` quando há linhas carregadas;
+- **Geração por linha**: cada viagem entra no trecho no horário do GTFS (`partidas`, com pequena variação sorteada
+  pela semente), segue a rota fixa até o fim e termina no terminal ou na borda do mapa. Substitui o `bus_share` quando há linhas carregadas;
   mapa sem linhas mantém o comportamento atual.
 - **Parada**: desacelera até a posição da parada, fica parado o tempo de embarque (tempo fixo + parte proporcional à
   demanda da hora, sorteada), sinaliza e retorna ao fluxo. Na baia: entra e sai cedendo a vez (mesma lógica de fusão
@@ -249,7 +269,7 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 |---|---|
 | 1 — Remover A/B | concluída (2026-10-31) |
 | 2 — Desempenho | concluída (2026-11-02); falta só perfilar o desenho do mapa com o painel visível |
-| 3 — Dados de ônibus | pendente |
+| 3 — Dados de ônibus | concluída (2026-11-02): GTFS oficial, 292 linhas, 70 % dos padrões contínuos |
 | 4 — Encaixe na rede | pendente |
 | 5 — Simulação de ônibus | pendente |
 | 6 — Interface de linhas | pendente |

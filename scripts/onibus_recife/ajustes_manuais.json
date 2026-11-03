@@ -1,0 +1,6 @@
+{
+  "_sobre": "Linhas de ônibus conferidas à mão (aplicar_ajustes.py mescla em public/data/onibus_recife.json). linhas/padroes: desligar = a linha ou o padrão (shape do GTFS) não entra na simulação. padroes.ways = itinerário conferido no mapa, uma lista por trecho de ids de way com sinal = sentido de passagem (null mantém o casado). paradas: baia (true/false), lat/lon (mover), remover. Cada item leva uma nota com o motivo.",
+  "linhas": [],
+  "padroes": [],
+  "paradas": []
+}

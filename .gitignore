@@ -5,4 +5,6 @@ core/pkg
 *.log
 data/od_recife/_brutos/
 data/semaforos_recife/_brutos/
+data/onibus_recife/_brutos/
+data/onibus_recife/inspecao.geojson
 .claude/settings.local.json
