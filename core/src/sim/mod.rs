@@ -3346,6 +3346,24 @@ impl Sim {
             }).collect()
         };
         let e = self.edge[i] as usize;
+        // motorista da projeção: para o ônibus, o passo do plano e a parada pendente avançam junto com o traçado
+        // (o `bus_stay` só enxerga `PLAN_LOOK` passos à frente do passo dado)
+        let mut d = self.drv(i);
+        let mut d_stop = self.bstop[i] as usize;
+        let advance = |d: &mut Drv, d_stop: &mut usize, l: usize| {
+            if !bus {
+                return;
+            }
+            let p = &self.bus_plans[d.route as usize];
+            let k = d.step as usize;
+            if k + 1 < p.dirseg.len() && p.dirseg[k + 1] == self.lanes[l].dirseg {
+                d.step += 1;
+            }
+            while d.stop_step != NONE && d.stop_step < d.step {
+                *d_stop += 1;
+                (d.stop_step, d.stop_lane) = p.stops.get(*d_stop).map_or((NONE, NONE), |st| (st.step, st.lane));
+            }
+        };
         // faixa onde o traçado continua depois da parte atual
         let mut cur: Option<usize> = None;
         if e < self.nl {
@@ -3357,7 +3375,7 @@ impl Sim {
                 let (lo, hi) = self.lanes_of(e);
                 let mut best = (f32::INFINITY, NONE);
                 for cl in lo..hi {
-                    let r = self.stay_cost(self.drv(i), cl);
+                    let r = self.stay_cost(d, cl);
                     if r.0 < best.0 {
                         best = r;
                     }
@@ -3374,12 +3392,15 @@ impl Sim {
             pts.extend(curve_pts(c, (self.s[i] / c.len).clamp(0.0, 1.0)));
             cur = Some(c.to as usize);
         }
+        // o ônibus percorre o plano inteiro (até o fim da linha); o carro, até o destino
+        let max_guard = if bus { self.bus_plans[d.route as usize].dirseg.len() * 2 + 10 } else { 600 };
         let mut guard = 0;
         while let Some(l) = cur {
             guard += 1;
-            if guard > 600 {
+            if guard > max_guard {
                 break;
             }
+            advance(&mut d, &mut d_stop, l);
             pts.extend(lane_pts(&self.lanes[l], 0.0));
             if !bus && self.lanes[l].to_node == self.targets[dest].node {
                 break;
@@ -3389,7 +3410,7 @@ impl Sim {
             let w = self.lane_w[l];
             let mut best = (f32::INFINITY, NONE);
             for cl in lo..hi {
-                let r = self.stay_cost(self.drv(i), cl);
+                let r = self.stay_cost(d, cl);
                 let tot = r.0 + w * (cl as i32 - l as i32).unsigned_abs() as f32;
                 if tot < best.0 {
                     best = (tot, r.1);

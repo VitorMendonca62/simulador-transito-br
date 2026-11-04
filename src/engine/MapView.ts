@@ -10,6 +10,7 @@ import { makeDots, makeMesh } from './meshes'
 import { SignalLayer } from './SignalLayer'
 import { HEAT_PALETTE, HeatLayer } from './HeatLayer'
 import { BusLayer } from './BusLayer'
+import { LineMesh } from './lineMesh'
 import type { TransitData, TransitRecord } from '../model/transit'
 import { VehicleLayer } from './VehicleLayer'
 import { SignLayer, type Approach } from './SignLayer'
@@ -103,6 +104,9 @@ export class MapView {
   private turnsG = new Graphics()
   private hoverG = new Graphics()
   private trackG = new Graphics()
+  /** parte fixa da rota do veículo acompanhado (do 2º ponto ao destino): malha refeita só quando a rota muda */
+  private trackOutline = new LineMesh({ widthPx: 7, alpha: 0.55 })
+  private trackLine = new LineMesh({ widthPx: 3.5, alpha: 0.95 })
   private trackId: number | null = null
   private trackPts: Float32Array | null = null
   private trackBlocker: number | null = null
@@ -211,7 +215,7 @@ export class MapView {
     app.canvas.style.touchAction = 'none'
 
     app.stage.addChild(this.gridG, this.world)
-    this.world.addChild(this.zonesG, this.roads, this.markings, this.roadsHi, this.markingsHi, this.heat.container, this.buses.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
+    this.world.addChild(this.zonesG, this.roads, this.markings, this.roadsHi, this.markingsHi, this.heat.container, this.buses.container, this.vehicles.container, this.trackOutline.container, this.trackLine.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
     this.bindEvents()
 
     this.ro = new ResizeObserver(() => {
@@ -850,7 +854,16 @@ export class MapView {
   setTrack(id: number | null, pts: ArrayLike<number> | null, blocker: number | null = null) {
     this.trackId = id
     this.trackBlocker = blocker
-    this.trackPts = pts && pts.length >= 4 ? Float32Array.from(pts) : null
+    const np = pts && pts.length >= 4 ? Float32Array.from(pts) : null
+    const old = this.trackPts
+    // o 1º ponto é a posição do veículo (desenhada a cada quadro): só o resto entra na malha
+    const same = !!np && !!old && np.length === old.length && np.every((x, i) => i < 2 || x === old[i])
+    this.trackPts = np
+    if (!same) {
+      const rest = np ? [{ pts: np, a: 1, b: np.length / 2, color: 0 }] : []
+      this.trackOutline.set(rest.map((r) => ({ ...r, color: 0x0b1220 })))
+      this.trackLine.set(rest.map((r) => ({ ...r, color: 0x22d3ee })))
+    }
     this.drawTrack()
     this.requestRender()
   }
@@ -863,11 +876,8 @@ export class MapView {
     const me = this.vehicles.find(this.trackId)
     const p = this.trackPts
     if (p) {
-      const poly = () => {
-        // a rota nasce na posição atual do veículo
-        g.moveTo(me ? me.x : p[0], me ? me.y : p[1])
-        for (let i = 2; i < p.length; i += 2) g.lineTo(p[i], p[i + 1])
-      }
+      // a rota nasce na posição atual do veículo; daí ao 2º ponto vai aqui, o resto está na malha
+      const poly = () => g.moveTo(me ? me.x : p[0], me ? me.y : p[1]).lineTo(p[2], p[3])
       poly()
       g.stroke({ width: 7 * px, color: 0x0b1220, alpha: 0.55, cap: 'round', join: 'round' })
       poly()
@@ -1342,6 +1352,8 @@ export class MapView {
     if (this.zones.length || this.zoneDraw.length) this.drawZones()
     this.vehicles.rezoom(z)
     this.buses.rezoom(z)
+    this.trackOutline.rezoom(z)
+    this.trackLine.rezoom(z)
     if (this.trackId != null) this.drawTrack()
     this.labels?.reposition(this.cam)
     this.signs?.reposition(this.cam)

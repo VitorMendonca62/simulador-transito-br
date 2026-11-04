@@ -2663,6 +2663,49 @@ fn bus_lines_are_deterministic() {
     assert_eq!(snap(), snap());
 }
 
+/// A rota mostrada do ônibus (`track`) vai até o fim da linha, não só `PLAN_LOOK` passos à frente do passo atual:
+/// numa avenida de sete trechos, o fim do traçado fica no último nó desde o nascimento até a chegada.
+#[test]
+fn bus_track_reaches_end_of_plan() {
+    let mut nodes = String::new();
+    let mut ways = String::new();
+    for k in 1..=8 {
+        let lon = -34.9000 + 0.0018 * (k - 1) as f64;
+        nodes += &format!(r#"<node id="{k}" lat="-8.0600" lon="{lon:.4}"/>"#);
+        if (2..=7).contains(&k) {
+            nodes += &format!(r#"<node id="{}" lat="-8.0591" lon="{lon:.4}"/>"#, 10 + k);
+            ways += &format!(r#"<way id="{}"><nd ref="{k}"/><nd ref="{}"/><tag k="highway" v="residential"/><tag k="name" v="Rua {k}"/></way>"#, 200 + k, 10 + k);
+        }
+    }
+    let osm = format!(
+        r#"<osm>{nodes}{ways}<way id="300"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="6"/><nd ref="7"/><nd ref="8"/><tag k="highway" v="secondary"/><tag k="name" v="Avenida"/><tag k="lanes" v="4"/></way></osm>"#
+    );
+    let fim = [-8.0600, -34.9000 + 0.0018 * 7.0];
+    let t = bus_line_at(&[300], AV1, fim, serde_json::json!([]), AV_STOP, &deps(1, 60));
+    let mut n = crate::build_network_transit(osm.as_bytes(), &[], t, false).unwrap();
+    avenue_sim(&mut n, 0.0, r#","busDwellMin":10,"busDwellMax":10,"busJitter":0"#);
+    let plan = n.sim.as_ref().unwrap().bus_plan_dirsegs(0);
+    assert_eq!(plan.len(), 7, "sete trechos de 1 a 8");
+    let end = n.net.nodes.iter().find(|x| x.osm_id == 8).unwrap().pos;
+    let (mut seen, mut steps) = (0, std::collections::BTreeSet::new());
+    for _ in 0..(15.0 * 60.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for (_, k, _, _) in s.bus_states() {
+            steps.insert(k);
+        }
+        for id in s.bus_ids_waiting(-1.0, f32::MAX) {
+            let (pts, ..) = s.track(&n.net, id).unwrap();
+            let (x, y) = (pts[pts.len() - 2] as f64, pts[pts.len() - 1] as f64);
+            let d = ((x - end[0]).powi(2) + (y - end[1]).powi(2)).sqrt();
+            assert!(d < 25.0, "fim do traçado a {d:.0} m do fim da linha (passos vistos {steps:?})");
+            seen += 1;
+        }
+    }
+    assert!(seen > 0 && steps.contains(&0) && steps.contains(&6), "o ônibus percorreu a linha: {steps:?}");
+    assert_eq!(bus_rep(&n)["concluidas"], 1);
+}
+
 /// Ônibus parado no ponto bloqueia a faixa da direita: os carros atrás ultrapassam pela esquerda ou esperam, sem
 /// sobreposição na fila e sem colisão nos cruzamentos.
 #[test]
