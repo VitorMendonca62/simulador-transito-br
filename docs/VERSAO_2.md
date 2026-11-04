@@ -290,6 +290,47 @@ parâmetros de embarque no painel), baia, e o critério "parados > 120 s = 0" no
 **Pronto quando**: Recife abre com as linhas, a simulação roda sem travas de ônibus nas paradas (`recife_behavior`
 com linhas: parados > 120 s = 0), desempenho dentro das metas da fase 2 com as linhas ligadas, `CONTEXT.md` atualizado.
 
+**Concluída (2026-11-03)**, com a simulação da baia (adiada da fase 5) e a frequência como **fator sobre o GTFS** por
+linha e hora (decisões do usuário).
+- **Núcleo**: `TransitEdits` (`set_transit_edits`, sem reconstruir a rede; só refaz o encaixe e vale na próxima
+  simulação): linha desligada, fator por hora (as partidas da hora são reamostradas no índice entre as reais,
+  `transit::scale_departures`), paradas removidas, movidas, com o tipo trocado e criadas (entram nos trechos que passam
+  a até 15 m, na ordem do caminho). Para a interface: `transit_lines_json`, `transit_pts_f32`/`transit_off_u32`
+  (itinerário na faixa da direita), `transit_stops_json` (parada no centro da faixa dela), `sim_stop_info` (próximos
+  ônibus com chegada em fluxo livre e espera média por linha, E[h²]/2E[h]). 6ª coluna da série por minuto =
+  velocidade média dos ônibus de linha.
+- **Baia**: o ônibus sai da lista da faixa para embarcar (quem vem atrás passa sem trocar de faixa), desenhado 3 m ao
+  lado; volta só com brecha (vão à frente e seguidor sem frear mais que `MERGE_BRAKE`). Cabem 2; cheia, embarca na
+  faixa. Carros da parcela que param no ponto param na faixa também em baia.
+- **Worker**: `import_osm_full` com `transitSource: "recife"` no payload (baixa `onibus_recife.json`; trocar remonta a
+  rede, como a CTTU); `transit` do payload vai a `set_transit_edits`; chamadas `transit`, `stopInfo`, `transitEdits`,
+  `simBus` (relatório por linha a 1 Hz só com o painel Linhas aberto).
+- **Store/persistência**: `transitSource` e `transitRecord` (linhas: desligada, fator, cor; paradas) em IDB
+  (`transit-source`, `transit-edits`) e no cenário `.json` (`transitSource`, `transit`); parâmetros `busLines`,
+  `busDwellMin/Max`, `busPaxPeak`, `busJitter`, `busLaneCarPct`, `busStopCarPct` (típicos do Recife, estimativas: 8/90 s,
+  6 pax, ±60 s, 10 %, 2 %). Desfazer cobre criar, mover, remover e trocar o tipo de parada (o histórico de paradas não
+  volta depois de recarregar a página; as edições, sim).
+- **Interface**: diálogo do Recife com "Linhas de ônibus"; camada **Linhas de ônibus** (`BusLayer`: itinerários por
+  cor, linha selecionada realçada, paradas a partir de 0,5 px/m); painel **Linhas de ônibus** no trilho (resumo do
+  encaixe e trechos desligados, busca, ligar/desligar, cor, fator por hora em grade de 24, padrões, métricas da
+  simulação; ferramenta **Editar paradas**: clique na via cria, arrastar move); cartão da parada (tipo faixa/baia,
+  linhas, próximos ônibus, espera média, remover/restaurar); cartão do ônibus com linha, trecho, próxima parada e
+  atraso; estatísticas e gráfico "Velocidade dos ônibus de linha" no painel da simulação; parâmetros dos ônibus no
+  painel de demanda.
+- Testes novos: `transit_stop_edits_change_fit`, `transit_scale_departures_keeps_gtfs_shape`,
+  `transit_line_off_and_factor_apply_to_sim`, `bus_bay_lets_cars_pass_and_remerges`, `sim_stop_info_lists_next_buses`.
+
+| Medida | Valor |
+|---|---|
+| `recife_behavior` (CTTU) sem linhas / com linhas | idêntico à base / parados > 120 s = 0 |
+| App, Recife + OD + CTTU + linhas | 290 linhas, 871 de 1.077 trechos encaixados, 2.867 paradas |
+| App, OD 15 % às 7h, 10× | acompanha 10×; ~375 ônibus, 19,6 km/h de velocidade comercial, 0,8 % de paradas perdidas |
+| App, OD 100 %, 30× pedidos, min 15 (painel do navegador oculto) | 15,1× sem linhas, **14,1× com linhas (−7 %)** |
+
+A meta de 20× com a OD a 100 % não foi conferida nesta fase: a medida acima foi feita com o painel do navegador oculto
+(página em segundo plano), que baixa as duas velocidades igualmente; a da fase 2 (21,3×) foi com o painel visível.
+Falta repetir com o painel visível.
+
 ---
 
 ## Fases 7 a 9 — Motos
@@ -348,7 +389,7 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | 3 — Dados de ônibus | concluída (2026-11-02): GTFS oficial, 290 linhas, 86 % dos padrões contínuos (com as exceções da fase 4) |
 | 4 — Encaixe na rede | concluída (2026-11-03): exceções para ônibus, 81 % dos trechos encaixados |
 | 5 — Simulação de ônibus | concluída (2026-11-03): rota fixa, partidas do GTFS, embarque nos pontos, métricas por linha (só no núcleo) |
-| 6 — Interface de linhas | pendente |
+| 6 — Interface de linhas | concluída (2026-11-03): camada, painel, paradas editáveis, baia; falta medir 30× com o painel visível |
 | 7 — Moto como tipo | pendente |
 | 8 — Corredor | pendente |
 | 9 — Motos por parcela | pendente |

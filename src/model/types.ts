@@ -123,10 +123,16 @@ export type WorkerIn =
   | { type: 'simStepBy'; seconds: number }
   | { type: 'simStuck'; id: number; n: number }
   | { type: 'simHist'; id: number; bucket: number }
+  /** linhas de ônibus para desenhar e para o painel (resposta: json `{lines, stops, summary}`, f32 pontos, u32 inícios) */
+  | { type: 'transit'; id: number }
+  | { type: 'stopInfo'; id: number; stop: string }
+  | { type: 'transitEdits'; json: string }
+  /** relatório por linha junto das estatísticas (1 Hz), só enquanto o painel Linhas está aberto */
+  | { type: 'simBus'; on: boolean }
 export type WorkerOut =
   | { type: 'done'; data: NetworkData; ms: number }
   | { type: 'error'; message: string }
-  | { type: 'sim'; time: number; stats: SimStats; buf: Float32Array; heat?: Uint8Array; series?: Float32Array; histLen?: number; track?: string }
+  | { type: 'sim'; time: number; stats: SimStats; buf: Float32Array; heat?: Uint8Array; series?: Float32Array; histLen?: number; track?: string; bus?: string }
   | { type: 'simEnded'; reason: string }
   | { type: 'simReady'; error?: string }
   /** uma vez por segundo: tempo acumulado calculando a simulação e memória do WASM */
@@ -179,15 +185,38 @@ export interface SimStats {
   junctionOverlapsGeom?: number
   /** impasses dentro do cruzamento desfeitos ignorando a ocupação */
   occDeadlocks?: number
+  /** ônibus de linha: em circulação, viagens concluídas, velocidade comercial (km/h), paradas atendidas e perdidas */
+  busesActive?: number
+  busTripsDone?: number
+  busSpeedKmh?: number
+  busStops?: number
+  busStopsMissed?: number
+  /** carros da parcela que pararam no ponto de ônibus */
+  carsAtBusStop?: number
+}
+
+/** Ônibus de linha no `explain`. */
+export interface BusVehInfo {
+  linha: string
+  passo: number
+  passos: number
+  proximaParada: number
+  paradas: number
+  proximaParadaNome: string
+  embarcando: number
+  tempoEmbarcando: number
+  naBaia: boolean
 }
 
 /** Estado detalhado de um veículo (depuração), vindo de `Sim::explain`. */
 export interface VehicleInfo {
   id: number
   kind: string
-  origin: number
-  dest: number
-  targetNode: number
+  /** ônibus de linha: sem zonas (null) e com `bus` */
+  origin: number | null
+  dest: number | null
+  targetNode: number | null
+  bus?: BusVehInfo | null
   where: string
   way: number
   street: string

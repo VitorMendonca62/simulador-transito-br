@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { hexColor, PROFILES, profileById, TYPICAL_PARAMS, ZONE_COLORS, type Zone } from '../model/demand'
+import { useState, type ChangeEvent } from 'react'
+import { hexColor, PROFILES, profileById, TYPICAL_PARAMS, ZONE_COLORS, type DemandParams, type Zone } from '../model/demand'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -309,14 +309,23 @@ export function ZonePanel() {
 
 /** Hora, escolha de destino e comportamento dos motoristas: entram na geração de viagens e na simulação. */
 export function DemandParamsPanel() {
-  const { zones, demandParams, setDemandParams, demand } = useStore(useShallow((s) => ({ zones: s.zones, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand })))
+  const { zones, demandParams, setDemandParams, demand, transitSource } = useStore(
+    useShallow((s) => ({ zones: s.zones, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand, transitSource: s.transitSource })),
+  )
+  const lines = transitSource !== 'none' && (demandParams.busLines ?? true)
+  const num = (k: keyof DemandParams, lo: number, hi: number) => (e: ChangeEvent<HTMLInputElement>) => setDemandParams({ [k]: Math.min(hi, Math.max(lo, Number(e.target.value))) })
   const total = demand ? demand.zones.reduce((a, z) => a + z.genNow, 0) : 0
   const typical = (Object.keys(TYPICAL_PARAMS) as (keyof typeof TYPICAL_PARAMS)[]).every((k) => demandParams[k] === TYPICAL_PARAMS[k])
   return (
     <section className="panel params">
       <h2>Parâmetros de demanda</h2>
       <div className="row tight">
-        <button className="btn sm" disabled={typical} onClick={() => setDemandParams(TYPICAL_PARAMS)} title="Ônibus 3 %, app de navegação 50 %, ignoram a sinalização 5 %, fecham o cruzamento 20 %, viagens na mesma zona. Mantém a hora e a semente.">
+        <button
+          className="btn sm"
+          disabled={typical}
+          onClick={() => setDemandParams(TYPICAL_PARAMS)}
+          title="Ônibus 3 % (sem linhas), app de navegação 50 %, ignoram a sinalização 5 %, fecham o cruzamento 20 %, viagens na mesma zona; linhas de ônibus: 8–90 s no ponto, 6 passageiros no pico, 10 % na faixa de ônibus, 2 % param no ponto. Mantém a hora e a semente."
+        >
           {typical ? 'Valores típicos do Recife' : 'Usar valores típicos do Recife'}
         </button>
       </div>
@@ -338,10 +347,45 @@ export function DemandParamsPanel() {
         <input type="checkbox" checked={demandParams.intrazone} onChange={(e) => setDemandParams({ intrazone: e.target.checked })} />
         <span>Permitir viagens dentro da mesma zona</span>
       </label>
-      <label className="field">
-        <span>Ônibus no fluxo (%)</span>
-        <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
-      </label>
+      {transitSource !== 'none' && (
+        <label className="check" title="Os ônibus nascem nos horários do GTFS e seguem os itinerários, parando nos pontos. Desligado, voltam a ser uma parcela do fluxo entre zonas.">
+          <input type="checkbox" checked={demandParams.busLines ?? true} onChange={(e) => setDemandParams({ busLines: e.target.checked })} />
+          <span>Ônibus pelas linhas</span>
+        </label>
+      )}
+      {!lines && (
+        <label className="field">
+          <span>Ônibus no fluxo (%)</span>
+          <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
+        </label>
+      )}
+      {lines && (
+        <>
+          <label className="field" title="Tempo parado no ponto: o mínimo (abrir e fechar as portas) mais 2,5 s por passageiro embarcando, até o máximo.">
+            <span>Tempo no ponto (s), mín.–máx.</span>
+            <span className="inline">
+              <input className="num" type="number" min={0} max={120} step={1} value={demandParams.busDwellMin ?? 8} onChange={num('busDwellMin', 0, 120)} aria-label="Tempo mínimo no ponto" />
+              <input className="num" type="number" min={0} max={600} step={5} value={demandParams.busDwellMax ?? 90} onChange={num('busDwellMax', 0, 600)} aria-label="Tempo máximo no ponto" />
+            </span>
+          </label>
+          <label className="field" title="Média de passageiros embarcando por parada na hora de pico; nas outras horas segue o perfil da matriz OD (ou um perfil de dia útil).">
+            <span>Passageiros por parada no pico</span>
+            <input className="num" type="number" min={0} max={40} step={1} value={demandParams.busPaxPeak ?? 6} onChange={num('busPaxPeak', 0, 40)} />
+          </label>
+          <label className="field" title="Cada viagem parte até tantos segundos antes ou depois do horário do GTFS (sorteio pela semente).">
+            <span>Variação da partida (± s)</span>
+            <input className="num" type="number" min={0} max={600} step={10} value={demandParams.busJitter ?? 60} onChange={num('busJitter', 0, 600)} />
+          </label>
+          <label className="field" title="Parcela dos motoristas que trafegam pela faixa exclusiva de ônibus. 0 = ninguém.">
+            <span>Usam a faixa de ônibus (%)</span>
+            <input className="num" type="number" min={0} max={100} step={5} value={demandParams.busLaneCarPct ?? 0} onChange={num('busLaneCarPct', 0, 100)} />
+          </label>
+          <label className="field" title="Parcela dos motoristas que param uma vez no ponto de ônibus (embarque e desembarque de passageiros, apps), de 10 a 30 s. 0 = ninguém.">
+            <span>Param no ponto de ônibus (%)</span>
+            <input className="num" type="number" min={0} max={100} step={1} value={demandParams.busStopCarPct ?? 0} onChange={num('busStopCarPct', 0, 100)} />
+          </label>
+        </>
+      )}
       <label className="check" title="Durante a simulação, as rotas são recalculadas com a velocidade medida em cada trecho; quem usa app desvia de congestionamentos no caminho.">
         <input type="checkbox" checked={demandParams.reroute ?? true} onChange={(e) => setDemandParams({ reroute: e.target.checked })} />
         <span>Rotas em tempo real (estilo Waze)</span>

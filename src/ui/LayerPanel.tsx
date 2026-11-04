@@ -12,6 +12,7 @@ const ITEMS: [LayerKey, string, string][] = [
   ['signals', 'Semáforos', ''],
   ['turns', 'Conversões do nó', 'Visualização estilo TM:PE'],
   ['zones', 'Zonas de demanda', 'Áreas de geração/atração de viagens'],
+  ['buses', 'Linhas de ônibus', 'Itinerários das linhas ligadas e paradas'],
   ['grid', 'Grade', ''],
 ]
 

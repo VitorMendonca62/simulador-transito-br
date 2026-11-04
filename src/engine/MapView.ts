@@ -9,11 +9,13 @@ import { LabelLayer } from './LabelLayer'
 import { makeDots, makeMesh } from './meshes'
 import { SignalLayer } from './SignalLayer'
 import { HEAT_PALETTE, HeatLayer } from './HeatLayer'
+import { BusLayer } from './BusLayer'
+import type { TransitData, TransitRecord } from '../model/transit'
 import { VehicleLayer } from './VehicleLayer'
 import { SignLayer, type Approach } from './SignLayer'
 import { drawHover, drawTurns, nodeLanes, pickConn, pickDst, pickSrc, type NodeLanes } from './TurnOverlay'
 
-export type LayerKey = 'vehicles' | 'roads' | 'markings' | 'labels' | 'nodes' | 'shapes' | 'signals' | 'turns' | 'grid' | 'zones'
+export type LayerKey = 'vehicles' | 'roads' | 'markings' | 'labels' | 'nodes' | 'shapes' | 'signals' | 'turns' | 'grid' | 'zones' | 'buses'
 export type LayerState = Record<LayerKey, boolean>
 
 const MIN_Z = 0.04
@@ -109,6 +111,7 @@ export class MapView {
   private signs!: SignLayer
   private vehicles = new VehicleLayer()
   private heat = new HeatLayer()
+  private buses = new BusLayer()
   private segG = new Graphics()
   private buildG = new Graphics()
   private badge!: HTMLDivElement
@@ -116,7 +119,7 @@ export class MapView {
   private buildCurve = false
   private draw: DrawState = { start: null, ctrl: null, lastDir: null, newChain: true }
   private cursorSnap: Snap | null = null
-  private mode: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal' = 'nodes'
+  private mode: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal' | 'stops' = 'nodes'
   private zonesG = new Graphics()
   private zoneEl!: HTMLDivElement
   private zones: Zone[] = []
@@ -136,10 +139,15 @@ export class MapView {
   /** clique no modo Semáforo: nó existente ou ponto no corpo de uma via */
   onSignalPlace: (p: { kind: 'node' | 'way'; x: number; y: number; node?: number; way?: number }) => void = () => {}
   onErase: (seg: number) => void = () => {}
+  /** clique numa parada de ônibus (camada Ônibus) ou no vazio do modo Paradas (null) */
+  onStopPick: (id: string | null) => void = () => {}
+  /** modo Paradas: clique no corpo de uma via cria uma parada; arrastar uma parada a move (posição na via) */
+  onStopAdd: (x: number, y: number) => void = () => {}
+  onStopMove: (id: string, x: number, y: number) => void = () => {}
   private signals = new SignalLayer()
   private data: NetworkData | null = null
   private cam = { x: 0, y: 0, z: 1 }
-  private user: LayerState = { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true, zones: true, vehicles: true }
+  private user: LayerState = { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true, zones: true, vehicles: true, buses: true }
   private selectable = new Uint32Array(0)
   private selected: number | null = null
   private hover: number | null = null
@@ -203,7 +211,7 @@ export class MapView {
     app.canvas.style.touchAction = 'none'
 
     app.stage.addChild(this.gridG, this.world)
-    this.world.addChild(this.zonesG, this.roads, this.markings, this.roadsHi, this.markingsHi, this.heat.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
+    this.world.addChild(this.zonesG, this.roads, this.markings, this.roadsHi, this.markingsHi, this.heat.container, this.buses.container, this.vehicles.container, this.trackG, this.segG, this.buildG, this.shapes, this.nodes, this.signals.g, this.turnsG, this.hoverG)
     this.bindEvents()
 
     this.ro = new ResizeObserver(() => {
@@ -388,7 +396,7 @@ export class MapView {
   }
 
   /** Alterna entre editar conversões (nós) e faixas (trechos). */
-  setMode(m: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal') {
+  setMode(m: 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal' | 'stops') {
     this.mode = m
     this.selected = null
     this.lanes = null
@@ -407,7 +415,7 @@ export class MapView {
     this.signs.clear()
     this.hoverG.clear()
     this.drawSeg()
-    this.app.canvas.style.cursor = m === 'build' || m === 'zones' ? 'crosshair' : 'grab'
+    this.app.canvas.style.cursor = m === 'build' || m === 'zones' || m === 'stops' ? 'crosshair' : 'grab'
     this.requestRender()
   }
 
@@ -688,6 +696,19 @@ export class MapView {
     this.requestRender()
   }
 
+  /** Modo Paradas: onde a parada nova (ou arrastada) vai ficar; só no corpo de uma via. */
+  private drawStopCursor() {
+    const g = this.buildG
+    g.clear()
+    const sn = this.cursorSnap
+    if (this.mode === 'stops' && sn && sn.kind === 'way') {
+      const px = 1 / this.cam.z
+      g.circle(sn.x, sn.y, 8 * px).fill({ color: 0x0b1220, alpha: 0.6 }).stroke({ width: 2 * px, color: 0xff9a3d })
+      g.circle(sn.x, sn.y, 3.2 * px).fill(0xf8fafc)
+    }
+    this.requestRender()
+  }
+
   /** Prévia da via (largura real), marcadores de encaixe e rótulo de comprimento. */
   private drawBuild() {
     const g = this.buildG
@@ -875,6 +896,21 @@ export class MapView {
   }
 
 
+  /** Linhas de ônibus (itinerários e paradas) com as edições, a linha e a parada selecionadas. */
+  setTransit(data: TransitData | null, rec: TransitRecord, line: string | null, stop: string | null) {
+    this.buses.set(data, rec, line, stop, this.cam.z)
+    this.requestRender()
+  }
+
+  /** Centraliza a câmera em (x, y) metros locais, aproximando até ver as paradas. */
+  centerOn(x: number, y: number) {
+    this.cam.z = Math.min(Math.max(this.cam.z, 2), 12)
+    const f = insets()
+    this.cam.x = (f.left + this.host.clientWidth - f.right) / 2 - x * this.cam.z
+    this.cam.y = (f.top + this.host.clientHeight - f.bottom) / 2 - y * this.cam.z
+    this.camChanged()
+  }
+
   setLayer(key: LayerKey, on: boolean) {
     this.user[key] = on
     this.applyLayers()
@@ -943,6 +979,8 @@ export class MapView {
     let src: { lane: number; sx: number; sy: number; moved: boolean } | null = null
     /** arrasto de vértice de zona */
     let zv: { id: number; idx: number; moved: boolean } | null = null
+    /** arrasto de parada (modo Paradas) */
+    let sd: { id: string; sx: number; sy: number; moved: boolean } | null = null
     const world = (e: PointerEvent): [number, number] => {
       const r = cv.getBoundingClientRect()
       return [(e.clientX - r.left - this.cam.x) / this.cam.z, (e.clientY - r.top - this.cam.y) / this.cam.z]
@@ -984,6 +1022,14 @@ export class MapView {
           return
         }
       }
+      if (this.mode === 'stops' && this.user.buses) {
+        const [wx, wy] = world(e)
+        const id = this.buses.pickStop(wx, wy, 10 / this.cam.z)
+        if (id != null) {
+          sd = { id, sx: e.clientX, sy: e.clientY, moved: false }
+          return
+        }
+      }
       if (this.selected != null && this.data && this.lanes && this.user.turns) {
         const [wx, wy] = world(e)
         const lane = pickSrc(this.data, this.lanes, wx, wy, 13 / this.cam.z)
@@ -1000,6 +1046,13 @@ export class MapView {
     })
     cv.addEventListener('pointermove', (e) => {
       const r = cv.getBoundingClientRect()
+      if (sd) {
+        if (!sd.moved && Math.hypot(e.clientX - sd.sx, e.clientY - sd.sy) < 4) return
+        sd.moved = true
+        this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        this.drawStopCursor()
+        return
+      }
       if (zv) {
         zv.moved = true
         const [wx, wy] = world(e)
@@ -1038,6 +1091,14 @@ export class MapView {
         this.drawSignalCursor()
         return
       }
+      if (this.mode === 'stops' && this.data) {
+        const [wx, wy] = world(e)
+        const over = this.user.buses ? this.buses.pickStop(wx, wy, 10 / this.cam.z) : null
+        this.cursorSnap = over != null ? null : this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        cv.style.cursor = over != null ? 'move' : 'crosshair'
+        this.drawStopCursor()
+        return
+      }
       if (this.mode === 'zones') {
         if (this.zoneDraw.length) {
           this.zoneCursor = [(e.clientX - r.left - this.cam.x) / this.cam.z, (e.clientY - r.top - this.cam.y) / this.cam.z]
@@ -1071,6 +1132,17 @@ export class MapView {
       }
     })
     const end = (e: PointerEvent) => {
+      if (sd) {
+        const d = sd
+        sd = null
+        const sn = this.cursorSnap
+        this.cursorSnap = null
+        this.buildG.clear()
+        this.requestRender()
+        if (!d.moved) this.onStopPick(d.id)
+        else if (sn && sn.kind !== 'free') this.onStopMove(d.id, sn.x, sn.y)
+        return
+      }
       if (zv) {
         const v = zv
         zv = null
@@ -1105,6 +1177,14 @@ export class MapView {
         else if (sn.kind === 'way') this.onSignalPlace({ kind: 'way', x: sn.x, y: sn.y, way: sn.way })
         return
       }
+      if (wasClick && this.mode === 'stops' && this.data) {
+        const r = cv.getBoundingClientRect()
+        const sn = this.snapAt(e.clientX - r.left, e.clientY - r.top)
+        // parada nova só no corpo de uma via (o encaixe projeta no caminho das linhas que passam ali)
+        if (sn.kind === 'way') this.onStopAdd(sn.x, sn.y)
+        else this.onStopPick(null)
+        return
+      }
       if (wasClick && this.mode === 'build') {
         const r = cv.getBoundingClientRect()
         this.cursorSnap = this.snapAt(e.clientX - r.left, e.clientY - r.top)
@@ -1129,6 +1209,14 @@ export class MapView {
         this.onSegSelect(sg)
         return
       }
+      if (wasClick && this.user.buses) {
+        const [wx, wy] = world(e)
+        const id = this.buses.pickStop(wx, wy, 8 / this.cam.z)
+        if (id != null) {
+          this.onStopPick(id)
+          return
+        }
+      }
       if (wasClick && this.user.vehicles) {
         const [wx, wy] = world(e)
         const vid = this.vehicles.pick(wx, wy, Math.max(4, 10 / this.cam.z))
@@ -1151,6 +1239,7 @@ export class MapView {
     cv.addEventListener('pointerup', end)
     cv.addEventListener('pointercancel', () => {
       drag = null
+      sd = null
       if (src) {
         src = null
         this.connDrag = null
@@ -1164,6 +1253,7 @@ export class MapView {
   private onKey = (e: KeyboardEvent) => {
     if (this.mode === 'zones' && e.key === 'Enter' && this.zoneDraw.length >= 3) return this.finishZone()
     if (e.key !== 'Escape') return
+    if (this.mode === 'stops') return this.onStopPick(null)
     if (this.mode === 'zones') {
       if (this.zoneDraw.length) {
         this.zoneDraw = []
@@ -1251,6 +1341,7 @@ export class MapView {
     if (this.mode === 'build') this.drawBuild()
     if (this.zones.length || this.zoneDraw.length) this.drawZones()
     this.vehicles.rezoom(z)
+    this.buses.rezoom(z)
     if (this.trackId != null) this.drawTrack()
     this.labels?.reposition(this.cam)
     this.signs?.reposition(this.cam)
@@ -1275,6 +1366,7 @@ export class MapView {
     this.gridG.visible = this.user.grid
     this.zonesG.visible = this.user.zones
     this.vehicles.container.visible = this.user.vehicles
+    this.buses.container.visible = this.user.buses
     if (this.zoneEl) this.zoneEl.style.display = this.user.zones ? '' : 'none'
     this.requestRender()
   }

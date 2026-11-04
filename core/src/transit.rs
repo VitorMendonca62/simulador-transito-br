@@ -592,7 +592,10 @@ fn stops(net: &Net, t: &TransitData, ed: &TransitEdits, tr: &Trecho, r: &mut Tre
         let ls: Vec<u32> = lanes_of(net, seg, d).collect();
         let lane = ls.iter().rev().find(|&&l| net.lanes[l as usize].bus).or(ls.last()).copied().unwrap_or(0);
         let l = len(sub(b, a));
-        let pos = add(a, mul(sub(b, a), f));
+        // no centro da faixa da parada (o deslocamento da faixa é à direita do sentido from→to do trecho)
+        let ln = &net.lanes[lane as usize];
+        let off = net.segs[seg as usize].lane_off(d, ln.idx) * if d == 0 { 1.0 } else { -1.0 };
+        let pos = add(add(a, mul(sub(b, a), f)), mul(right(norm(sub(b, a))), off));
         out.push((c0 + f * l, ParadaFit { id: id.to_string(), passo, lane, s: s0 + f * l, baia, pos }));
     };
     let mut desde = 0usize;

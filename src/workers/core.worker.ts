@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import init, { import_osm, import_osm_signals, type Network } from '../../core/pkg/core.js'
+import init, { import_osm_full, type Network } from '../../core/pkg/core.js'
 import type { NetworkData, NetworkMeta, RouterIn, RouterOut, SimStats, TileData, TileUpdate, WorkerIn, WorkerOut } from '../model/types'
 
 let ready: Promise<unknown> | null = null
@@ -24,13 +24,38 @@ const loadCttu = () =>
     throw e
   })
 
-/** Origem dos semáforos pedida nas edições (JSON do núcleo). */
-const sourceOf = (edits?: string): 'osm' | 'cttu' => (edits && /"signalSource"\s*:\s*"cttu"/.test(edits) ? 'cttu' : 'osm')
-/** origem com que `current` foi montada */
-let currentSource: 'osm' | 'cttu' = 'osm'
+/**
+ * Linhas de ônibus do Recife (geradas por scripts/onibus_recife/). Quando as edições pedem `transitSource: "recife"`,
+ * entram na importação: as exceções para ônibus mudam a rede bruta, por isso trocar de linhas remonta a rede.
+ */
+const TRANSIT_URL = `${import.meta.env.BASE_URL}data/onibus_recife.json`
+let transitData: Promise<string> | null = null
+const loadTransit = () =>
+  (transitData ??= fetch(new URL(TRANSIT_URL, self.location.origin)).then((r) => {
+    if (!r.ok) throw new Error(`não foi possível ler ${TRANSIT_URL} (${r.status})`)
+    return r.text()
+  })).catch((e) => {
+    transitData = null
+    throw e
+  })
 
-async function importNet(bytes: Uint8Array, source: 'osm' | 'cttu'): Promise<Network> {
-  return source === 'cttu' ? import_osm_signals(bytes, await loadCttu()) : import_osm(bytes)
+/** Origem dos semáforos e das linhas pedida nas edições (JSON do núcleo), como chave (`cttu|recife`, `osm|`…). */
+const sourceOf = (edits?: string): string =>
+  `${edits && /"signalSource"\s*:\s*"cttu"/.test(edits) ? 'cttu' : 'osm'}|${edits && /"transitSource"\s*:\s*"recife"/.test(edits) ? 'recife' : ''}`
+/** origem com que `current` foi montada */
+let currentSource = 'osm|'
+
+async function importNet(bytes: Uint8Array, source: string): Promise<Network> {
+  const [sig, tr] = source.split('|')
+  const [cttu, lines] = await Promise.all([sig === 'cttu' ? loadCttu() : '', tr === 'recife' ? loadTransit() : ''])
+  return import_osm_full(bytes, cttu, lines)
+}
+
+/** Edições das linhas e paradas (campo `transit` do payload de edições), para `set_transit_edits`. */
+function applyTransitEdits(net: Network, edits?: string) {
+  if (!edits || !edits.includes('"transit"')) return net.set_transit_edits('')
+  const t = (JSON.parse(edits) as { transit?: unknown }).transit
+  net.set_transit_edits(t ? JSON.stringify(t) : '')
 }
 
 /** Ladrilhos sujos: buffers concatenados fatiados por visões (sem cópia), um conjunto de malhas por ladrilho. */
@@ -138,6 +163,8 @@ let simStatsAt = 0
 let simHeatKind = 0 // -1 desligado
 let simTrackId: number | null = null
 let simTrackAt = 0
+/** manda o relatório por linha a 1 Hz (painel Linhas aberto) */
+let simBus = false
 const SIM_DT = 0.2
 /** intervalo entre quadros enviados à UI (15 Hz); a UI interpola entre eles */
 const SIM_FRAME_MS = 66
@@ -282,12 +309,14 @@ function simSlice() {
     let heat: Uint8Array | undefined
     let series: Float32Array | undefined
     let histLen: number | undefined
+    let bus: string | undefined
     if (now - simStatsAt > 1000) {
       simStatsAt = now
       stats = lastStats = JSON.parse(current.sim_stats())
       if (simHeatKind >= 0) heat = current.sim_heat(simHeatKind)
       series = current.sim_series()
       histLen = current.sim_hist_len()
+      if (simBus) bus = current.sim_bus_report()
     }
     let track: string | undefined
     if (simTrackId != null && now - simTrackAt > 250) {
@@ -297,7 +326,7 @@ function simSlice() {
     const tr: Transferable[] = [buf.buffer as ArrayBuffer]
     if (heat) tr.push(heat.buffer as ArrayBuffer)
     if (series) tr.push(series.buffer as ArrayBuffer)
-    postSim({ type: 'sim', time: current.sim_time(), stats, buf, heat, series, histLen, track }, tr)
+    postSim({ type: 'sim', time: current.sim_time(), stats, buf, heat, series, histLen, track, bus }, tr)
   }
   simTimer = self.setTimeout(simLoop, 4)
 }
@@ -420,6 +449,30 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       current?.set_prio_edits(msg.json)
       return
     }
+    if (msg.type === 'transitEdits') {
+      current?.set_transit_edits(msg.json)
+      return
+    }
+    if (msg.type === 'transit') {
+      try {
+        if (!current) throw new Error('Nenhum mapa carregado')
+        const json = `{"lines":${current.transit_lines_json()},"stops":${current.transit_stops_json()},"summary":${current.transit_json()}}`
+        const f32 = current.transit_pts_f32()
+        const u32 = current.transit_off_u32()
+        post({ type: 'result', id: msg.id, json, f32, u32 }, [f32.buffer as ArrayBuffer, u32.buffer as ArrayBuffer])
+      } catch (e) {
+        post({ type: 'result', id: msg.id, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+    if (msg.type === 'stopInfo') {
+      post({ type: 'result', id: msg.id, json: current && current.sim_active() ? current.sim_stop_info(msg.stop) : 'null' })
+      return
+    }
+    if (msg.type === 'simBus') {
+      simBus = msg.on
+      return
+    }
     const t0 = performance.now()
     if (msg.type === 'import') {
       current?.free()
@@ -427,17 +480,19 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       currentSource = sourceOf(msg.edits)
       current = await importNet(sourceBytes, currentSource)
       if (msg.edits && msg.edits !== '[]') current.apply_edits(msg.edits)
+      applyTransitEdits(current, msg.edits)
     } else if (msg.type === 'edit') {
       if (!current || !sourceBytes) throw new Error('Nenhum mapa carregado')
       const src = sourceOf(msg.edits)
       if (src !== currentSource) {
-        // os semáforos externos mudam os nós da rede bruta: remonta a partir dos bytes do mapa
+        // semáforos externos e linhas de ônibus mudam a rede bruta: remonta a partir dos bytes do mapa
         const next = await importNet(sourceBytes, src)
         current.free()
         current = next
         currentSource = src
       }
       current.apply_edits(msg.edits)
+      applyTransitEdits(current, msg.edits)
     } else return
     const data = extract(current)
     current.clear_delta()

@@ -100,6 +100,27 @@ export function SimPanel() {
             <dt>Viagem média</dt>
             <dd>{st.meanTravel ? `${(st.meanTravel / 60).toFixed(1)} min` : '—'}</dd>
           </div>
+          {st.busTripsDone != null && (st.busesActive || st.busTripsDone || st.busStops) ? (
+            <>
+              <div title="Ônibus de linha em circulação e viagens concluídas (não entram nas contagens dos carros)">
+                <dt>Ônibus de linha</dt>
+                <dd>
+                  {(st.busesActive ?? 0).toLocaleString('pt-BR')} na rede · {st.busTripsDone.toLocaleString('pt-BR')} concluídas
+                </dd>
+              </div>
+              <div title="Distância ÷ tempo total das viagens de ônibus concluídas, incluindo paradas e cruzamentos">
+                <dt>Velocidade comercial</dt>
+                <dd>{st.busTripsDone ? `${(st.busSpeedKmh ?? 0).toFixed(1)} km/h` : '—'}</dd>
+              </div>
+              <div title="Paradas atendidas; entre parênteses, as que o ônibus não conseguiu alcançar na faixa do ponto">
+                <dt>Paradas</dt>
+                <dd>
+                  {(st.busStops ?? 0).toLocaleString('pt-BR')}
+                  {st.busStopsMissed ? ` (${st.busStopsMissed.toLocaleString('pt-BR')} perdidas)` : ''}
+                </dd>
+              </div>
+            </>
+          ) : null}
         </dl>
       )}
       <StepControls />
@@ -126,6 +147,9 @@ export function SimPanel() {
           <LineChart title="Velocidade média" unit=" km/h" lines={[{ values: col(sim.series, 3), color: '#34d399' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
           <LineChart title="Concluídos por minuto" lines={[{ values: col(sim.series, 2), color: '#fbbf24' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
           <LineChart title="Fila de entrada" lines={[{ values: col(sim.series, 4), color: '#f472b6' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
+          {col(sim.series, 5).some((v) => v > 0) && (
+            <LineChart title="Velocidade dos ônibus de linha" unit=" km/h" lines={[{ values: col(sim.series, 5), color: '#60a5fa' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
+          )}
           {sim.histLen > 1 && sim.heat !== 'off' && (
             <label className="field col">
               <span>

@@ -6,7 +6,8 @@ import { applyOdImport, buildOdImport, OD2018_URL, type OdImport, type OdSource 
 
 import { HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
 import type { VehicleInfo } from './types'
-import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, importMap, onSim, resolveDemand, sendConnEdits, sendPrioEdits, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
+import { simTrack, editNetwork, fetchHist, fetchApproaches, fetchNodeConns, fetchStopInfo, fetchTransit, importMap, onSim, resolveDemand, sendConnEdits, sendPrioEdits, sendTransitEdits, simBusReport, simHeatKind, simRun, simStart, simStop, type DemandResult } from './importer'
+import { emptyTransit, transitEditsJson, xyToLatLon, type AddedStopRec, type BusReport, type StopEditRec, type StopInfo, type TransitData, type TransitRecord } from './transit'
 import {
   clearAll,
   dropLegacyScenarios,
@@ -20,6 +21,8 @@ import {
   loadRoads,
   loadSigConfigs,
   loadSignalSource,
+  loadTransit,
+  loadTransitSource,
   loadMap,
   loadSegEdits,
   saveConnEdits,
@@ -28,6 +31,8 @@ import {
   saveRoads,
   saveSigConfigs,
   saveSignalSource,
+  saveTransit,
+  saveTransitSource,
   saveMap,
   saveSegEdits,
   segEditKey,
@@ -39,6 +44,7 @@ import {
   type SegKeyTuple,
   type SigConfigs,
   type SignalSource,
+  type TransitSource,
   type SegEdit,
   type SegEdits,
 } from './persistence'
@@ -49,7 +55,7 @@ import { CONN_ABSENT, CONN_ALLOWED, connOn, type NetworkData, type NodeConns, ty
 /** recorte do Recife do OpenStreetMap (outubro de 2026), comprimido */
 const RECIFE_URL = `${import.meta.env.BASE_URL}data/mapa-recife.osm.gz`
 
-export type EditMode = 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal'
+export type EditMode = 'nodes' | 'lanes' | 'build' | 'erase' | 'zones' | 'signal' | 'stops'
 export type EditScope = 'seg' | 'way'
 
 interface State {
@@ -90,6 +96,16 @@ interface State {
   /** origem dos semáforos: base oficial da CTTU (Recife) ou tags do OSM */
   signalSource: SignalSource
   signalsImporting: boolean
+  /** linhas de ônibus: origem, dados do encaixe para desenhar e para o painel, edições, seleção */
+  transitSource: TransitSource
+  transitImporting: boolean
+  transit: TransitData | null
+  transitEdits: TransitRecord
+  selectedLine: string | null
+  selectedStop: string | null
+  /** parada selecionada na simulação em andamento (1 Hz) e relatório por linha (com o painel Linhas aberto) */
+  stopInfo: StopInfo | null
+  busReport: BusReport | null
   selectedZone: number | null
   demand: DemandResult | null
   /** simulação de tráfego: ocioso, pausada ou rodando */
@@ -137,6 +153,22 @@ interface State {
   clearOdImport: () => void
   /** troca os semáforos da rede: `cttu` = base oficial da CTTU no lugar dos do OSM; `osm` = volta aos do OSM */
   setSignalSource: (src: SignalSource) => Promise<void>
+  setTransitSource: (src: TransitSource) => Promise<void>
+  /** painel Linhas aberto/fechado (liga a camada e o relatório por linha) */
+  setLinesPanel: (open: boolean) => void
+  setLineOn: (id: string, on: boolean) => void
+  setAllLines: (on: boolean) => void
+  setLineColor: (id: string, color: number | null) => void
+  /** fator de frequência da hora `hour` (null = todas as horas) */
+  setLineFactor: (id: string, hour: number | null, f: number) => void
+  resetLine: (id: string) => void
+  selectLine: (id: string | null) => void
+  selectStop: (id: string | null, focus?: boolean) => void
+  addStop: (x: number, y: number) => void
+  moveStop: (id: string, x: number, y: number) => void
+  removeStop: (id: string) => void
+  setStopBaia: (id: string, baia: boolean) => void
+  restoreStop: (id: string) => void
   setLayer: (k: LayerKey, on: boolean) => void
   setMode: (m: EditMode) => void
   setScope: (s: EditScope) => void
@@ -159,7 +191,7 @@ interface State {
   openFile: (file: File) => Promise<void>
   loadUrl: (url: string, name: string) => Promise<void>
   /** mapa do Recife embutido no app; opcionalmente já com as zonas da Pesquisa OD 2018 e os semáforos da CTTU */
-  loadRecife: (opts: { zones: boolean; signals: boolean }) => Promise<void>
+  loadRecife: (opts: { zones: boolean; signals: boolean; lines: boolean }) => Promise<void>
   restore: () => Promise<void>
   toggleConns: (conns: number[]) => void
   /** Arrasto origem -> destino no nó selecionado: liga a conversão ou, se já ligada, remove. */
@@ -206,7 +238,8 @@ let sigRecord: SigConfigs = {}
 /** Vias criadas e trechos demolidos (ordem de criação importa: encaixes dependem das anteriores). */
 let roadRecord: NewRoad[] = []
 let removedRecord: SegKeyTuple[] = []
-type Action = { t: 'road'; id: number } | { t: 'removed'; key: SegKeyTuple }
+/** edição de parada: o estado anterior dela (edição de parada do GTFS e/ou parada criada), para desfazer */
+type Action = { t: 'road'; id: number } | { t: 'removed'; key: SegKeyTuple } | { t: 'stop'; id: string; stop?: StopEditRec; added?: AddedStopRec }
 let history: Action[] = []
 let chainName = ''
 /** Demanda (fonte da verdade fora do React, como os demais registros). */
@@ -216,12 +249,27 @@ let odRecord: Record<string, number> = {}
 let odImportRecord: OdImport | null = null
 /** origem dos semáforos da rede (vai junto das edições para o núcleo) */
 let sigSourceRecord: SignalSource = 'osm'
+/** linhas de ônibus carregadas e as edições delas (linhas, frequência, cor, paradas) */
+let trSourceRecord: TransitSource = 'none'
+let transitRecord: TransitRecord = emptyTransit()
+let transitSave = 0
 /** matriz fixada por hora enviada à simulação (só com importação ativa) */
 let odHourly: Record<string, number>[] | undefined
 let demandTimer = 0
 let demandSave = 0
 const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
-const editPayload = () => JSON.stringify({ segments: Object.values(segRecord), signals: Object.values(sigRecord), roads: roadRecord, removed: removedRecord, connections: connRecord, priorities: prioRecord, signalSource: sigSourceRecord })
+const editPayload = () =>
+  JSON.stringify({
+    segments: Object.values(segRecord),
+    signals: Object.values(sigRecord),
+    roads: roadRecord,
+    removed: removedRecord,
+    connections: connRecord,
+    priorities: prioRecord,
+    signalSource: sigSourceRecord,
+    transitSource: trSourceRecord,
+    transit: JSON.parse(transitEditsJson(transitRecord)),
+  })
 export const getSegRecord = () => segRecord
 
 /** Registra (ou apaga, se voltou ao padrão) a edição da conversão `c` do nó carregado. */
@@ -293,6 +341,40 @@ export const useStore = create<State>((set, get) => {
     }, 150)
   }
 
+  /** Pede ao núcleo as linhas encaixadas na rede atual e redesenha (só com linhas carregadas). */
+  let transitReq = 0
+  const refreshTransit = async () => {
+    if (trSourceRecord === 'none' || !get().data) {
+      viewRef.current?.setTransit(null, transitRecord, null, null)
+      return set({ transit: null })
+    }
+    const req = ++transitReq
+    try {
+      const t = await fetchTransit()
+      if (req !== transitReq) return
+      set({ transit: t })
+      viewRef.current?.setTransit(t, transitRecord, get().selectedLine, get().selectedStop)
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  /** Edição de linha ou parada: salva (debounce), manda ao núcleo e redesenha; `refit` refaz o encaixe (paradas). */
+  const afterTransitEdit = (refit: boolean) => {
+    set({ transitEdits: { ...transitRecord }, historyLen: history.length })
+    sendTransitEdits(transitEditsJson(transitRecord))
+    clearTimeout(transitSave)
+    const snap = structuredClone(transitRecord)
+    transitSave = window.setTimeout(() => saveTransit(snap), 300)
+    if (refit) void refreshTransit()
+    else viewRef.current?.setTransit(get().transit, transitRecord, get().selectedLine, get().selectedStop)
+  }
+  /** Guarda no desfazer o estado atual da parada `id` antes de mudá-la. */
+  const noteStop = (id: string) => {
+    const stop = transitRecord.stops[id]
+    const added = transitRecord.added.find((a) => a.id === id)
+    history.push({ t: 'stop', id, stop: stop ? { ...stop } : undefined, added: added ? { ...added } : undefined })
+  }
+
   /** Instala dados novos (importação ou reconstrução). */
   const install = (data: NetworkData, opts: { fit: boolean }) => {
     const view = viewRef.current
@@ -312,6 +394,7 @@ export const useStore = create<State>((set, get) => {
       segEdits: Object.keys(segRecord).length,
     }))
     refreshDemand()
+    void refreshTransit()
     const sel = get().selected
     if (sel != null) void loadNodeConns(sel)
   }
@@ -344,7 +427,7 @@ export const useStore = create<State>((set, get) => {
   }
 
   /** Importa o mapa; numa importação nova (`persist`), já com os semáforos de `signals` (sem remontar depois). */
-  const run = async (buffer: ArrayBuffer, name: string, persist: boolean, signals: SignalSource = 'osm') => {
+  const run = async (buffer: ArrayBuffer, name: string, persist: boolean, signals: SignalSource = 'osm', lines: TransitSource = 'none') => {
     set({ loading: true, error: null })
     try {
       if (persist) {
@@ -362,13 +445,17 @@ export const useStore = create<State>((set, get) => {
         odImportRecord = null
         odHourly = undefined
         sigSourceRecord = signals
-        set({ selectedZone: null, demand: null })
+        trSourceRecord = lines
+        transitRecord = emptyTransit()
+        set({ selectedZone: null, demand: null, selectedLine: null, selectedStop: null, transit: null })
       } else {
         connRecord = await loadConnEdits()
         prioRecord = await loadPrioEdits()
         segRecord = await loadSegEdits()
         sigRecord = await loadSigConfigs()
         sigSourceRecord = await loadSignalSource()
+        trSourceRecord = await loadTransitSource()
+        transitRecord = { ...emptyTransit(), ...((await loadTransit()) ?? {}) }
         dropLegacyScenarios()
         roadRecord = await loadRoads()
         removedRecord = await loadRemoved()
@@ -389,7 +476,8 @@ export const useStore = create<State>((set, get) => {
           signalNotice(signals, sigSourceRecord, data)
         }
       }
-      set({ signalSource: sigSourceRecord })
+      if (persist) saveTransitSource(trSourceRecord)
+      set({ signalSource: sigSourceRecord, transitSource: trSourceRecord, transitEdits: { ...transitRecord } })
       set({ fileName: name, importMs: ms, loading: false, selected: null, selectedSeg: null })
       install(data, { fit: true })
     } catch (e) {
@@ -452,7 +540,7 @@ export const useStore = create<State>((set, get) => {
     rebuilding: false,
     error: null,
     importMs: 0,
-    layers: { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true, zones: true, vehicles: true },
+    layers: { roads: true, markings: true, labels: true, nodes: true, shapes: false, signals: true, turns: true, grid: true, zones: true, vehicles: true, buses: true },
     mode: 'nodes',
     selected: null,
     nodeConns: null,
@@ -476,6 +564,14 @@ export const useStore = create<State>((set, get) => {
     odImporting: false,
     signalSource: 'osm',
     signalsImporting: false,
+    transitSource: 'none',
+    transitImporting: false,
+    transit: null,
+    transitEdits: emptyTransit(),
+    selectedLine: null,
+    selectedStop: null,
+    stopInfo: null,
+    busReport: null,
     selectedZone: null,
     demand: null,
     sim: { phase: 'idle', speed: 5, stats: null, starting: false, heat: 'off', series: null, histLen: 0, replay: null, track: null, follow: false, rate: null },
@@ -512,12 +608,32 @@ export const useStore = create<State>((set, get) => {
         const dp = demandPayload(zoneRecord, paramsRecord, odRecord)
         await simStart({
           zones: dp.zones,
-          params: { seed: paramsRecord.seed, hour: paramsRecord.hour, busShare: paramsRecord.busShare, illegalPct: paramsRecord.illegalPct ?? 0, boxBlockPct: paramsRecord.boxBlockPct ?? 0, reroute: paramsRecord.reroute ?? true, appPct: paramsRecord.appPct ?? 60, perception: paramsRecord.perception ?? 0.3, beta: paramsRecord.beta, intrazone: paramsRecord.intrazone, odManual: odRecord, odHourly },
+          params: {
+            seed: paramsRecord.seed,
+            hour: paramsRecord.hour,
+            busShare: paramsRecord.busShare,
+            illegalPct: paramsRecord.illegalPct ?? 0,
+            boxBlockPct: paramsRecord.boxBlockPct ?? 0,
+            reroute: paramsRecord.reroute ?? true,
+            appPct: paramsRecord.appPct ?? 60,
+            perception: paramsRecord.perception ?? 0.3,
+            beta: paramsRecord.beta,
+            intrazone: paramsRecord.intrazone,
+            odManual: odRecord,
+            odHourly,
+            busLines: paramsRecord.busLines ?? true,
+            busDwellMin: paramsRecord.busDwellMin ?? 8,
+            busDwellMax: paramsRecord.busDwellMax ?? 90,
+            busPaxPeak: paramsRecord.busPaxPeak ?? 6,
+            busJitter: paramsRecord.busJitter ?? 60,
+            busLaneCarPct: paramsRecord.busLaneCarPct ?? 0,
+            busStopCarPct: paramsRecord.busStopCarPct ?? 0,
+          },
         })
         simHeatKind(get().sim.heat === 'off' ? -1 : get().sim.heat === 'speed' ? 0 : 1)
         simRun(true, get().sim.speed)
         rateAt = null
-        set((s) => ({ sim: { ...s.sim, phase: 'running', starting: false, stats: null, replay: null, series: null, histLen: 0, rate: null } }))
+        set((s) => ({ sim: { ...s.sim, phase: 'running', starting: false, stats: null, replay: null, series: null, histLen: 0, rate: null }, busReport: null, stopInfo: null }))
       } catch (e) {
         set((s) => ({ sim: { ...s.sim, starting: false }, error: e instanceof Error ? e.message : String(e) }))
       }
@@ -628,6 +744,126 @@ export const useStore = create<State>((set, get) => {
         set({ signalsImporting: false })
       }
     },
+    setTransitSource: async (src) => {
+      if (!get().data || get().transitImporting) return
+      const prev = trSourceRecord
+      trSourceRecord = src
+      set({ transitImporting: true })
+      try {
+        // as exceções para ônibus mudam a rede bruta: o worker remonta a rede
+        const { data } = await editNetwork(editPayload())
+        saveTransitSource(src)
+        set({ transitSource: src, selectedLine: null, selectedStop: null })
+        install(data, { fit: false })
+        if (src === 'recife') {
+          const t = await fetchTransit()
+          get().notify(t ? `${t.lines.length} linhas de ônibus: ${t.summary.ok} de ${t.summary.trechos} trechos encaixados na rede.` : 'Nenhuma linha de ônibus cai neste mapa (as linhas cobrem o Recife).')
+        } else get().notify('Linhas de ônibus removidas: os ônibus voltam a ser uma parcela do fluxo.')
+      } catch (e) {
+        trSourceRecord = prev
+        set({ error: e instanceof Error ? e.message : String(e) })
+      } finally {
+        set({ transitImporting: false })
+      }
+    },
+    setLinesPanel: (open) => {
+      simBusReport(open)
+      if (open && !get().layers.buses) get().setLayer('buses', true)
+      if (!open) set({ busReport: null })
+    },
+    setLineOn: (id, on) => {
+      const l = { ...transitRecord.lines[id] }
+      if (on) delete l.off
+      else l.off = true
+      transitRecord = { ...transitRecord, lines: { ...transitRecord.lines, [id]: l } }
+      afterTransitEdit(false)
+    },
+    setAllLines: (on) => {
+      const lines: TransitRecord['lines'] = {}
+      for (const l of get().transit?.lines ?? []) {
+        const r = { ...transitRecord.lines[l.id] }
+        if (on) delete r.off
+        else r.off = true
+        lines[l.id] = r
+      }
+      transitRecord = { ...transitRecord, lines }
+      afterTransitEdit(false)
+    },
+    setLineColor: (id, color) => {
+      const l = { ...transitRecord.lines[id] }
+      if (color == null) delete l.color
+      else l.color = color
+      transitRecord = { ...transitRecord, lines: { ...transitRecord.lines, [id]: l } }
+      afterTransitEdit(false)
+    },
+    setLineFactor: (id, hour, f) => {
+      const l = { ...transitRecord.lines[id] }
+      const v = Math.min(10, Math.max(0, Number.isFinite(f) ? Math.round(f * 100) / 100 : 1))
+      const factor = [...(l.factor ?? Array.from({ length: 24 }, () => 1))]
+      if (hour == null) factor.fill(v)
+      else factor[hour] = v
+      l.factor = factor
+      transitRecord = { ...transitRecord, lines: { ...transitRecord.lines, [id]: l } }
+      afterTransitEdit(false)
+    },
+    resetLine: (id) => {
+      const lines = { ...transitRecord.lines }
+      delete lines[id]
+      transitRecord = { ...transitRecord, lines }
+      afterTransitEdit(false)
+    },
+    selectLine: (id) => {
+      set({ selectedLine: id })
+      viewRef.current?.setTransit(get().transit, transitRecord, id, get().selectedStop)
+    },
+    selectStop: (id, focus = false) => {
+      set({ selectedStop: id, stopInfo: null })
+      viewRef.current?.setTransit(get().transit, transitRecord, get().selectedLine, id)
+      const st = id != null ? get().transit?.stops.find((x) => x.id === id) : undefined
+      if (st && focus) viewRef.current?.centerOn(st.x, st.y)
+      if (id != null && get().sim.phase !== 'idle') void fetchStopInfo(id).then((info) => get().selectedStop === id && set({ stopInfo: info }))
+    },
+    addStop: (x, y) => {
+      const { data } = get()
+      if (!data) return
+      const n = transitRecord.added.reduce((m, a) => Math.max(m, Number(/^u(\d+)$/.exec(a.id)?.[1] ?? 0)), 0) + 1
+      const id = `u${n}`
+      noteStop(id)
+      transitRecord = { ...transitRecord, added: [...transitRecord.added, { id, nome: `Parada nova ${n}`, pos: xyToLatLon(data.meta.geo, x, y), baia: false }] }
+      afterTransitEdit(true)
+      set({ selectedStop: id })
+    },
+    moveStop: (id, x, y) => {
+      const { data } = get()
+      if (!data) return
+      noteStop(id)
+      const pos = xyToLatLon(data.meta.geo, x, y)
+      const added = transitRecord.added.find((a) => a.id === id)
+      if (added) transitRecord = { ...transitRecord, added: transitRecord.added.map((a) => (a.id === id ? { ...a, pos } : a)) }
+      else transitRecord = { ...transitRecord, stops: { ...transitRecord.stops, [id]: { ...transitRecord.stops[id], pos } } }
+      afterTransitEdit(true)
+    },
+    removeStop: (id) => {
+      noteStop(id)
+      if (transitRecord.added.some((a) => a.id === id)) transitRecord = { ...transitRecord, added: transitRecord.added.filter((a) => a.id !== id) }
+      else transitRecord = { ...transitRecord, stops: { ...transitRecord.stops, [id]: { ...transitRecord.stops[id], removed: true } } }
+      set({ selectedStop: null })
+      afterTransitEdit(true)
+    },
+    setStopBaia: (id, baia) => {
+      noteStop(id)
+      if (transitRecord.added.some((a) => a.id === id)) transitRecord = { ...transitRecord, added: transitRecord.added.map((a) => (a.id === id ? { ...a, baia } : a)) }
+      else transitRecord = { ...transitRecord, stops: { ...transitRecord.stops, [id]: { ...transitRecord.stops[id], baia } } }
+      afterTransitEdit(true)
+    },
+    restoreStop: (id) => {
+      if (!transitRecord.stops[id]) return
+      noteStop(id)
+      const stops = { ...transitRecord.stops }
+      delete stops[id]
+      transitRecord = { ...transitRecord, stops }
+      afterTransitEdit(true)
+    },
     clearOdImport: () => {
       odImportRecord = null
       odRecord = {}
@@ -677,6 +913,16 @@ export const useStore = create<State>((set, get) => {
     undo: () => {
       const a = history.pop()
       if (!a) return
+      if (a.t === 'stop') {
+        // volta a parada ao estado anterior (sem reconstruir a rede: só o encaixe)
+        const stops = { ...transitRecord.stops }
+        if (a.stop) stops[a.id] = a.stop
+        else delete stops[a.id]
+        const added = transitRecord.added.filter((x) => x.id !== a.id)
+        if (a.added) added.push(a.added)
+        transitRecord = { ...transitRecord, stops, added }
+        return afterTransitEdit(true)
+      }
       if (a.t === 'road') roadRecord = roadRecord.filter((r) => r.id !== a.id)
       else removedRecord = removedRecord.filter((k) => !(k[0] === a.key[0] && k[1] === a.key[1] && k[2] === a.key[2]))
       set({ selectedSeg: null })
@@ -710,7 +956,11 @@ export const useStore = create<State>((set, get) => {
           sigRecord = Object.fromEntries((sc.signalConfigs ?? []).map((c) => [String(c.node), c]))
           sigSourceRecord = sc.signalSource === 'cttu' ? 'cttu' : 'osm'
           saveSignalSource(sigSourceRecord)
-          set({ signalSource: sigSourceRecord })
+          trSourceRecord = sc.transitSource === 'recife' ? 'recife' : 'none'
+          transitRecord = { ...emptyTransit(), ...(sc.transit ?? {}) }
+          saveTransitSource(trSourceRecord)
+          saveTransit(structuredClone(transitRecord))
+          set({ signalSource: sigSourceRecord, transitSource: trSourceRecord, transitEdits: { ...transitRecord }, selectedLine: null, selectedStop: null })
           roadRecord = sc.roads ?? []
           removedRecord = sc.removed ?? []
           history = [...roadRecord.map((r): Action => ({ t: 'road', id: r.id })), ...removedRecord.map((key): Action => ({ t: 'removed', key }))]
@@ -747,7 +997,7 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    loadRecife: async ({ zones, signals }) => {
+    loadRecife: async ({ zones, signals, lines }) => {
       const name = 'mapa-recife.osm'
       set({ loading: true, error: null })
       try {
@@ -757,7 +1007,7 @@ export const useStore = create<State>((set, get) => {
         const raw = new Uint8Array(await res.arrayBuffer())
         const gz = raw[0] === 0x1f && raw[1] === 0x8b
         const buf = gz ? await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer() : raw.buffer
-        await run(buf, name, true, signals ? 'cttu' : 'osm')
+        await run(buf, name, true, signals ? 'cttu' : 'osm', lines ? 'recife' : 'none')
       } catch (e) {
         set({ loading: false, error: `Não foi possível carregar ${name}: ${e instanceof Error ? e.message : e}` })
         return
@@ -947,7 +1197,7 @@ export const useStore = create<State>((set, get) => {
 
     exportScenario: () => {
       const { data, fileName } = get()
-      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...prioRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord }, sigSourceRecord)
+      if (data) exportScenario(fileName, { ...sigRecord }, { ...connRecord }, { ...prioRecord }, { ...segRecord }, [...roadRecord], [...removedRecord], { zones: zoneRecord, params: paramsRecord, odManual: odRecord, odImport: odImportRecord }, sigSourceRecord, trSourceRecord, structuredClone(transitRecord))
     },
     notify: (msg) => {
       set({ toast: msg })
@@ -974,6 +1224,9 @@ onSim((m) => {
       else if (now > rateAt.wall + 500) rate = (m.time - rateAt.sim) / ((now - rateAt.wall) / 1000)
       rateAt = { sim: m.time, wall: now }
       st.setState((s) => ({ sim: { ...s.sim, stats: m.stats, series: m.series ?? s.sim.series, histLen: m.histLen ?? s.sim.histLen, rate } }))
+      if (m.bus) st.setState({ busReport: JSON.parse(m.bus) as BusReport })
+      const stop = st.getState().selectedStop
+      if (m.series && stop != null) void fetchStopInfo(stop).then((info) => st.getState().selectedStop === stop && st.setState({ stopInfo: info }))
     }
     if (m.track != null && cur.track) {
       const t = JSON.parse(m.track) as { id?: number; alive: boolean; zone: number; kind: number; v: number; wait: number; pts: number[]; info?: VehicleInfo }

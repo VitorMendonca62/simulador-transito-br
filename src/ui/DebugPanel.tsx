@@ -35,10 +35,31 @@ export function VehicleCard() {
       {!t.alive && <div>Chegou ao destino (ou saiu da rede).</div>}
       {t.alive && info && (
         <dl className="veh-grid">
-          <dt>Viagem</dt>
-          <dd>
-            {zoneName(info.origin)} → {zoneName(info.dest)} (nó {info.targetNode})
-          </dd>
+          {info.bus ? (
+            <>
+              <dt>Linha</dt>
+              <dd>
+                <b>{info.bus.linha}</b> · trecho {info.bus.passo + 1} de {info.bus.passos}
+              </dd>
+              <dt>Próxima parada</dt>
+              <dd>
+                {info.bus.proximaParada < info.bus.paradas ? `${info.bus.proximaParadaNome} (${info.bus.proximaParada + 1} de ${info.bus.paradas})` : 'nenhuma (fim do itinerário)'}
+                {info.bus.embarcando > 0 && ` · embarcando, mais ${f(info.bus.embarcando, 0)} s`}
+                {info.bus.naBaia && ' · na baia'}
+              </dd>
+              <dt>Atraso</dt>
+              <dd>
+                {f(info.delay / 60, 1)} min sobre o tempo livre, dos quais {f(info.bus.tempoEmbarcando / 60, 1)} min nas paradas
+              </dd>
+            </>
+          ) : (
+            <>
+              <dt>Viagem</dt>
+              <dd>
+                {zoneName(info.origin ?? -1)} → {zoneName(info.dest ?? -1)} (nó {info.targetNode})
+              </dd>
+            </>
+          )}
           <dt>Onde</dt>
           <dd>
             {info.street || `via ${info.way}`} · {info.where}

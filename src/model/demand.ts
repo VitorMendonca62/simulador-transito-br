@@ -24,7 +24,7 @@ export interface DemandParams {
   intrazone: boolean
   /** hora do dia mostrada/simulada (0–24) */
   hour: number
-  /** % de ônibus no fluxo gerado (reservado para a simulação) */
+  /** % de ônibus no fluxo gerado (sem linhas de ônibus carregadas) */
   busShare: number
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
@@ -37,6 +37,19 @@ export interface DemandParams {
   appPct?: number
   /** erro de percepção (0–1) que espalha motoristas entre caminhos parecidos */
   perception?: number
+  /** com linhas carregadas: os ônibus seguem as linhas (desligado, volta ao % de ônibus no fluxo) */
+  busLines?: boolean
+  /** tempo no ponto (s): mínimo e máximo; entre eles, 2,5 s por passageiro embarcando */
+  busDwellMin?: number
+  busDwellMax?: number
+  /** passageiros embarcando por parada no pico (a hora segue o perfil da OD) */
+  busPaxPeak?: number
+  /** variação (± s) do horário de partida */
+  busJitter?: number
+  /** % de motoristas que usam a faixa exclusiva de ônibus */
+  busLaneCarPct?: number
+  /** % de motoristas que param no ponto de ônibus (uma vez por viagem) */
+  busStopCarPct?: number
 }
 
 /** Comportamento típico do trânsito do Recife (estimativas, não medições):
@@ -44,8 +57,26 @@ export interface DemandParams {
  * - viagens na mesma zona: as zonas da OD são do tamanho de bairros e têm viagens de carro internas
  * - ônibus 3 % dos veículos: ~2,8 mil ônibus no sistema, 4–6 % nos corredores e menos nas vias locais
  * - app de navegação 50 %: a maioria dos motoristas tem Waze/Google Maps, mas no trajeto diário só parte segue a rota em tempo real
- * - ignoram a sinalização 5 %; fecham o cruzamento 20 %: infrações comuns nos cruzamentos do centro e da Agamenon */
-export const TYPICAL_PARAMS = { beta: 0.08, intrazone: true, busShare: 3, illegalPct: 5, boxBlockPct: 20, reroute: true, appPct: 50, perception: 0.3 } satisfies Partial<DemandParams>
+ * - ignoram a sinalização 5 %; fecham o cruzamento 20 %: infrações comuns nos cruzamentos do centro e da Agamenon
+ * - ônibus de linha: 8–90 s no ponto, 6 passageiros por parada no pico, partidas ±60 s do horário
+ * - usam a faixa exclusiva de ônibus 10 %; param no ponto (embarque/desembarque, apps) 2 % */
+export const TYPICAL_PARAMS = {
+  beta: 0.08,
+  intrazone: true,
+  busShare: 3,
+  illegalPct: 5,
+  boxBlockPct: 20,
+  reroute: true,
+  appPct: 50,
+  perception: 0.3,
+  busLines: true,
+  busDwellMin: 8,
+  busDwellMax: 90,
+  busPaxPeak: 6,
+  busJitter: 60,
+  busLaneCarPct: 10,
+  busStopCarPct: 2,
+} satisfies Partial<DemandParams>
 
 export const DEFAULT_PARAMS: DemandParams = { ...TYPICAL_PARAMS, hour: 7, seed: 1 }
 

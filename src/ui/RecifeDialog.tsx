@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../model/store'
-import { IconPin, IconSignal, IconZones } from './Icons'
+import { IconBus, IconPin, IconSignal, IconZones } from './Icons'
 
-/** Pergunta, antes de abrir o mapa do Recife, se já entram as zonas da Pesquisa OD 2018 e os semáforos da CTTU. */
+/** Pergunta, antes de abrir o mapa do Recife, se já entram as zonas da Pesquisa OD 2018, os semáforos da CTTU e as linhas de ônibus. */
 export function RecifeDialog({ onClose }: { onClose: () => void }) {
   const [zones, setZones] = useState(true)
   const [signals, setSignals] = useState(true)
+  const [lines, setLines] = useState(true)
   const dlg = useRef<HTMLDialogElement>(null)
   const hasMap = useStore((s) => s.data != null)
   useEffect(() => {
@@ -13,7 +14,7 @@ export function RecifeDialog({ onClose }: { onClose: () => void }) {
   }, [])
   const go = () => {
     onClose()
-    void useStore.getState().loadRecife({ zones, signals })
+    void useStore.getState().loadRecife({ zones, signals, lines })
   }
   return (
     <dialog ref={dlg} className="dialog" onClose={onClose} onClick={(e) => e.target === dlg.current && dlg.current?.close()}>
@@ -40,12 +41,20 @@ export function RecifeDialog({ onClose }: { onClose: () => void }) {
             <i>Base oficial da prefeitura no lugar dos semáforos do OSM, com os cruzamentos conferidos à mão</i>
           </span>
         </label>
+        <label className="opt">
+          <input type="checkbox" checked={lines} onChange={(e) => setLines(e.target.checked)} />
+          <IconBus size={18} />
+          <span>
+            <b>Linhas de ônibus</b>
+            <i>Itinerários, paradas e horários do GTFS do Grande Recife; os ônibus da simulação seguem as linhas</i>
+          </span>
+        </label>
         <div className="row end">
           <button type="button" className="btn" onClick={() => dlg.current?.close()}>
             Cancelar
           </button>
           <button type="submit" className="btn primary" autoFocus>
-            {zones || signals ? 'Importar mapa e selecionados' : 'Importar só o mapa'}
+            {zones || signals || lines ? 'Importar mapa e selecionados' : 'Importar só o mapa'}
           </button>
         </div>
       </form>

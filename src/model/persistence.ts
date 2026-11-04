@@ -1,6 +1,7 @@
 import { del, get, set } from 'idb-keyval'
 import type { DemandParams, Zone } from './demand'
 import type { OdImport } from './odImport'
+import type { TransitRecord } from './transit'
 import type { NetworkData, SignalDef } from './types'
 
 /** Configuração de um semáforo (enviada ao núcleo e salva): liga/desliga e fases. */
@@ -72,6 +73,9 @@ export interface ScenarioFile {
   demand?: DemandFile
   /** origem dos semáforos: `cttu` = base oficial da CTTU (Recife), `osm` (padrão) = tags do OpenStreetMap */
   signalSource?: SignalSource
+  /** linhas de ônibus carregadas e as edições delas (linhas, frequência, cor, paradas) */
+  transitSource?: TransitSource
+  transit?: TransitRecord
 }
 
 export type SignalSource = 'osm' | 'cttu'
@@ -96,6 +100,8 @@ const K_DEMAND = 'demand'
 /** chave antiga dos cenários A/B (removidos na versão 2) */
 const K_SCEN = 'scenarios'
 const K_SIGSRC = 'signal-source'
+const K_TRSRC = 'transit-source'
+const K_TRANSIT = 'transit-edits'
 
 const safe = async <T>(f: () => Promise<T>, fallback: T): Promise<T> => {
   try {
@@ -121,12 +127,18 @@ export const loadRoads = () => safe(async () => (await get<NewRoad[]>(K_ROADS)) 
 export const loadRemoved = () => safe(async () => (await get<SegKeyTuple[]>(K_REMOVED)) ?? [], [] as SegKeyTuple[])
 export const saveSignalSource = (s: SignalSource) => safe(() => set(K_SIGSRC, s), undefined)
 export const loadSignalSource = () => safe(async () => ((await get<SignalSource>(K_SIGSRC)) === 'cttu' ? 'cttu' : 'osm') as SignalSource, 'osm' as SignalSource)
+/** linhas de ônibus: `recife` = as do GTFS do Grande Recife (`public/data/onibus_recife.json`), `none` = sem linhas */
+export type TransitSource = 'none' | 'recife'
+export const saveTransitSource = (s: TransitSource) => safe(() => set(K_TRSRC, s), undefined)
+export const loadTransitSource = () => safe(async () => ((await get<TransitSource>(K_TRSRC)) === 'recife' ? 'recife' : 'none') as TransitSource, 'none' as TransitSource)
+export const saveTransit = (t: TransitRecord) => safe(() => set(K_TRANSIT, t), undefined)
+export const loadTransit = () => safe(() => get<TransitRecord>(K_TRANSIT), undefined)
 export const saveDemand = (d: DemandFile) => safe(() => set(K_DEMAND, d), undefined)
 export const loadDemand = () => safe(() => get<DemandFile>(K_DEMAND), undefined)
 export const dropLegacyScenarios = () => safe(() => del(K_SCEN), undefined)
 export const clearAll = () =>
   safe(async () => {
-    for (const k of [K_MAP, K_SIGSRC, K_SIGS, K_CONNS, K_PRIOS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)
+    for (const k of [K_MAP, K_SIGSRC, K_TRSRC, K_TRANSIT, K_SIGS, K_CONNS, K_PRIOS, K_SEGS, K_ROADS, K_REMOVED, K_DEMAND, K_SCEN, 'conn-edits', 'signal-edits']) await del(k)
   }, undefined)
 
 /** Identidade estável de uma faixa: trecho (way:de:para) + sentido + posição. */
@@ -154,7 +166,7 @@ export function configFromDef(def: SignalDef): SigConfig {
   }
 }
 
-export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, priorities: PrioEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[], demand: DemandFile, signalSource: SignalSource) {
+export function exportScenario(name: string, sigs: SigConfigs, connections: ConnEdits, priorities: PrioEdits, segments: SegEdits, roads: NewRoad[], removed: SegKeyTuple[], demand: DemandFile, signalSource: SignalSource, transitSource: TransitSource, transit: TransitRecord) {
   const file: ScenarioFile = {
     version: 1,
     app: 'simulador-transito',
@@ -168,6 +180,8 @@ export function exportScenario(name: string, sigs: SigConfigs, connections: Conn
     removed,
     demand,
     signalSource,
+    transitSource,
+    transit,
   }
   const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
   const a = document.createElement('a')

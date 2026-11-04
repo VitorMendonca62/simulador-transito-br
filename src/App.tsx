@@ -56,6 +56,9 @@ export function App() {
     view.onZoneEdit = (id, poly) => useStore.getState().updateZone(id, { poly })
     view.onZoom = (z) => useStore.getState().setZoom(z)
     view.onVehiclePick = (id) => useStore.getState().pickVehicle(id)
+    view.onStopPick = (id) => useStore.getState().selectStop(id)
+    view.onStopAdd = (x, y) => useStore.getState().addStop(x, y)
+    view.onStopMove = (id, x, y) => useStore.getState().moveStop(id, x, y)
     view.onConnClick = (c) => useStore.getState().toggleConns([c])
     view.onConnEdit = (from, to) => useStore.getState().connectLanes(from, to)
     let alive = true

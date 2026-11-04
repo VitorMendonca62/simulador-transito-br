@@ -1,5 +1,6 @@
 import { perf } from '../engine/perf'
 import type { Approach } from '../engine/SignLayer'
+import type { StopInfo, TransitData } from './transit'
 import type { NetworkData, NodeConns, SimStats, WorkerIn, WorkerOut } from './types'
 
 let worker: Worker | null = null
@@ -54,7 +55,14 @@ export function watchWorkerPerf() {
 }
 
 let callSeq = 0
-type CallMsg = { type: 'demand'; json: string } | { type: 'nodeConns'; node: number } | { type: 'approaches'; node: number } | { type: 'simHist'; bucket: number } | { type: 'simStuck'; n: number }
+type CallMsg =
+  | { type: 'demand'; json: string }
+  | { type: 'nodeConns'; node: number }
+  | { type: 'approaches'; node: number }
+  | { type: 'simHist'; bucket: number }
+  | { type: 'simStuck'; n: number }
+  | { type: 'transit' }
+  | { type: 'stopInfo'; stop: string }
 type CallResult = Extract<WorkerOut, { type: 'result' }>
 
 /** Chamada avulsa ao núcleo (demanda, conexões do nó…); várias podem estar em voo. */
@@ -105,6 +113,27 @@ export async function fetchApproaches(node: number): Promise<Approach[]> {
 export function sendPrioEdits(record: Record<string, number>) {
   getWorker().postMessage({ type: 'prioEdits', json: JSON.stringify(record) } satisfies WorkerIn)
 }
+
+/** Linhas de ônibus da rede atual (encaixe refeito no núcleo se a rede ou as edições mudaram); `null` sem linhas. */
+export async function fetchTransit(): Promise<TransitData | null> {
+  const r = await call({ type: 'transit' })
+  const j = JSON.parse(r.json ?? '{}') as Partial<TransitData>
+  if (!j.lines?.length) return null
+  return { lines: j.lines, stops: j.stops ?? [], summary: j.summary as TransitData['summary'], pts: r.f32 ?? new Float32Array(0), off: r.u32 ?? new Uint32Array(0) }
+}
+
+/** Parada na simulação em andamento (linhas, próximos ônibus, espera média); `null` sem simulação. */
+export async function fetchStopInfo(stop: string): Promise<StopInfo | null> {
+  return JSON.parse((await call({ type: 'stopInfo', stop })).json ?? 'null') as StopInfo | null
+}
+
+/** Atualiza no núcleo as edições das linhas e paradas (valem a partir da próxima simulação). */
+export function sendTransitEdits(json: string) {
+  getWorker().postMessage({ type: 'transitEdits', json } satisfies WorkerIn)
+}
+
+/** Liga/desliga o relatório por linha junto das estatísticas da simulação. */
+export const simBusReport = (on: boolean) => getWorker().postMessage({ type: 'simBus', on } satisfies WorkerIn)
 
 /** Atualiza no núcleo as conversões editadas (sem reconstruir a rede). */
 export function sendConnEdits(record: Record<string, number>) {

@@ -119,3 +119,11 @@ export const IconSearch = (p: P) => (
     <path d="M20 20l-4.2-4.2" />
   </Svg>
 )
+export const IconBus = (p: P) => (
+  <Svg {...p}>
+    <rect x="5" y="3.5" width="14" height="15" rx="2.5" />
+    <path d="M5 11h14M8 18.5V21M16 18.5V21" />
+    <circle cx="8.5" cy="15" r="1" />
+    <circle cx="15.5" cy="15" r="1" />
+  </Svg>
+)

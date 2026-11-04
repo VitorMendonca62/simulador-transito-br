@@ -3,15 +3,16 @@ import { useShallow } from 'zustand/react/shallow'
 import { useStore, type EditMode } from '../model/store'
 import { BuildPanel, ErasePanel } from './BuildPanel'
 import { CttuSignalBox } from './CttuSignalBox'
-import { IconChevron, IconClose, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
+import { IconBus, IconChevron, IconClose, IconLayers, IconLanes, IconSignal, IconSim, IconTurns, IconWorks, IconZones } from './Icons'
 import { Inspector } from './Inspector'
 import { LayerPanel } from './LayerPanel'
+import { LinesPanel } from './LinesPanel'
 import { SegmentPanel } from './SegmentPanel'
 import { SignalPanel } from './SignalPanel'
 import { SimPanel } from './SimPanel'
 import { DemandParamsPanel, ZonePanel } from './ZonePanel'
 
-export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'layers'
+export type DockId = 'turns' | 'lanes' | 'works' | 'signals' | 'zones' | 'lines' | 'layers'
 
 type Item = {
   id: DockId
@@ -75,6 +76,17 @@ const ITEMS: Item[] = [
     guide: <>Desenhe zonas de geração e atração de viagens no mapa (clique nos vértices) ou importe as da Pesquisa OD 2018.</>,
   },
   {
+    id: 'lines',
+    label: 'Linhas de ônibus',
+    icon: IconBus,
+    guide: (
+      <>
+        Ligue ou desligue linhas, ajuste a <b>frequência por hora</b> e a cor. Clique numa parada no mapa para ver as linhas e os próximos ônibus. Em <b>Editar paradas</b>,
+        clique numa via para criar uma parada e arraste as existentes. As mudanças valem na próxima simulação.
+      </>
+    ),
+  },
+  {
     id: 'layers',
     label: 'Camadas',
     icon: IconLayers,
@@ -118,6 +130,8 @@ function Body({ id }: { id: DockId }) {
       )
     case 'zones':
       return <ZonePanel />
+    case 'lines':
+      return <LinesPanel />
     case 'layers':
       return <LayerPanel />
   }
@@ -128,6 +142,17 @@ export function Dock() {
   const { mode, setMode } = useStore(useShallow((s) => ({ mode: s.mode, setMode: s.setMode })))
   const [open, setOpen] = useState<DockId | null>('turns')
   const item = ITEMS.find((i) => i.id === open)
+  const selectedStop = useStore((s) => s.selectedStop)
+  // parada clicada no mapa: o cartão dela fica no painel Linhas
+  useEffect(() => {
+    if (selectedStop != null) setOpen('lines')
+  }, [selectedStop])
+  // painel Linhas aberto: liga a camada e o relatório por linha da simulação; ao fechar, sai da edição de paradas
+  useEffect(() => {
+    const st = useStore.getState()
+    st.setLinesPanel(open === 'lines')
+    if (open !== 'lines' && st.mode === 'stops') st.setMode('nodes')
+  }, [open])
   // ícone da ferramenta ativa no mapa: o painel aberto, se é dele; senão o primeiro que a usa
   const active = item?.modes?.includes(mode) ? item.id : ITEMS.find((i) => i.modes?.includes(mode))?.id
 
@@ -143,7 +168,7 @@ export function Dock() {
       <nav className="rail" aria-label="Ferramentas">
         {ITEMS.map((it, k) => (
           <span key={it.id} className="rail-slot">
-            {(k === 4 || k === 6) && <span className="rail-sep" aria-hidden="true" />}
+            {(k === 4 || k === 7) && <span className="rail-sep" aria-hidden="true" />}
             <button className="rail-btn" aria-pressed={open === it.id} aria-label={it.label} data-tip={it.label} onClick={() => toggle(it)}>
               <it.icon size={20} />
               {active === it.id && open !== it.id && <i className="rail-on" title="Ferramenta ativa no mapa" aria-hidden="true" />}
