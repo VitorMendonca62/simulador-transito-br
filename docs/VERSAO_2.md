@@ -369,6 +369,21 @@ medidas no `CONTEXT.md` (seção "Motos como tipo de veículo").
 - Em via de 1 faixa por sentido, não há corredor (contramão fica na fase 9, por parcela).
 - Testes: moto no corredor nunca sobrepõe carro, conservação, fila de semáforo com motos: elas saem na frente.
 
+**Concluída (2026-11-22).** Corredor = par de faixas vizinhas do mesmo trecho e sentido (`corr_ok`), com lista própria
+de motos (`corr_veh`) fora da fila da faixa; a faixa da moto (`edge`) vira a "de referência" (conversão, retenção,
+métricas). Código em `core/src/sim/corridor.rs`; parâmetro `motoCorridor` (padrão ligado, campo "Corredor de motos").
+Decisões tomadas nas medidas:
+- Em nó **com semáforo** (e saída da rede) o corredor vai até a linha e a moto entra direto na conversão de uma das
+  duas faixas. Em nó **sem semáforo** ela volta para uma faixa antes (os outros acessos só enxergam a frente das
+  faixas); sem vão, pede passagem com a seta (cortesia).
+- Sai na frente do primeiro carro **parado** só nos 3 primeiros segundos do verde; depois, só entra na frente de carro
+  que freie até 1,5 m/s² por ela. Sem esse limite, cada moto que chegava parava o carro de novo.
+- Entra abaixo de 20 km/h e só volta para a faixa acima de 40 km/h (com 25 km/h o entra-e-sai custava aos carros).
+- Na saturação, o ganho das motos sai em parte do tempo dos carros: a linha de retenção continua de fila única por
+  faixa (passar a moto em paralelo pela conversão fica para depois). Medidas no `CONTEXT.md`.
+- Testes novos: `corridor_motos_filter_to_the_front_without_overlap`, `corridor_off_or_no_motos_is_identical`,
+  `no_corridor_on_single_lane_or_beside_bus_lane`; medição `corridor_measure` (ignorada).
+
 ### Fase 9 — Comportamento por parcela
 Sempre % configurável dos motociclistas, padrão 0 (como `illegalPct` e `boxBlockPct`):
 - Avançar o vermelho com o cruzamento livre.
@@ -399,5 +414,5 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | 5 — Simulação de ônibus | concluída (2026-11-03): rota fixa, partidas do GTFS, embarque nos pontos, métricas por linha (só no núcleo) |
 | 6 — Interface de linhas | concluída (2026-11-03): camada, painel, paradas editáveis, baia; falta medir 30× com o painel visível |
 | 7 — Moto como tipo | concluída (2026-11-22): tipo explícito, matriz OD de motos (microdados), `motoShare`, desenho e métricas |
-| 8 — Corredor | pendente |
+| 8 — Corredor | concluída (2026-11-22): corredor entre faixas, saída na frente no semáforo, sem sobreposição; Recife sem impasses novos |
 | 9 — Motos por parcela | pendente |

@@ -1133,8 +1133,15 @@ fn recife_behavior() {
         let t = std::time::Instant::now();
         // ônibus parados há mais de 120 s (fora do embarque), contados a cada 5 s; o maior tempo parado visto
         let (mut bus_stuck, mut bus_wait_max) = (0usize, 0.0f32);
+        // motos paradas há mais de 120 s e sobreposições moto do corredor × veículo da faixa, contadas a cada 5 s
+        let (mut moto_stuck, mut corr_ovl) = (0usize, 0usize);
         for k in 0..(15 * 60 * 5) {
             n.sim.as_mut().unwrap().step(&n.net);
+            if k % 25 == 0 {
+                let s = n.sim.as_ref().unwrap();
+                moto_stuck += s.moto_waits().iter().filter(|&&x| x > 120.0).count();
+                corr_ovl += s.corridor_conflicts().len();
+            }
             if bus && k % 25 == 0 {
                 let w = n.sim.as_ref().unwrap().bus_waits();
                 bus_stuck += w.iter().filter(|&&x| x > 120.0).count();
@@ -1176,6 +1183,12 @@ fn recife_behavior() {
             eprintln!(
                 "   ônibus: partidas {}  concluídas {}  na rede {}  fila {}  paradas {} (perdidas {})  velocidade comercial {:.1} km/h  parados > 120 s {bus_stuck} (maior espera {bus_wait_max:.0} s)",
                 b["partidas"], b["concluidas"], b["ativos"], b["naFila"], b["paradas"], b["paradasPerdidas"], b["velocidadeKmh"].as_f64().unwrap_or(0.0)
+            );
+        }
+        if s.stats.moto_spawned > 0 {
+            eprintln!(
+                "   motos: nascidas {}  concluídas {}  viagem média {:.0} s  entradas no corredor {}  no corredor {:.0} moto·s  paradas > 120 s {moto_stuck}  sobreposições no corredor {corr_ovl}",
+                s.stats.moto_spawned, s.stats.moto_finished, s.stats.moto_travel_sum / s.stats.moto_finished.max(1) as f64, s.stats.corridor_entries, s.stats.corridor_s
             );
         }
         eprintln!("   cruzamento: sobreposições {} (+{} geometria)  parados dentro {}  espera por ocupação {:.0} veíc·s  impasses {}", s.stats.junction_overlaps, s.stats.junction_overlaps_geom, s.stats.box_stops, s.stats.box_wait_s, s.stats.occ_deadlocks);
@@ -2598,8 +2611,9 @@ fn avenue_sim(n: &mut Network, gen: f64, extra: &str) {
     let (w, e) = (square(at(n, 1), 30.0), square(at(n, 4), 30.0));
     let json = format!(
         r#"{{"zones":[{{"id":1,"gen":{gen},"attr":0,"poly":{w}}},{{"id":2,"gen":0,"attr":1,"poly":{e}}}],
-          "params":{{"seed":5,"hour":7,{share}"beta":0,"odManual":{{"1>2":{gen}}}{extra}}}}}"#,
-        share = if extra.contains("busShare") { "" } else { r#""busShare":0,"# }
+          "params":{{{seed}"hour":7,{share}"beta":0,"odManual":{{"1>2":{gen}}}{extra}}}}}"#,
+        share = if extra.contains("busShare") { "" } else { r#""busShare":0,"# },
+        seed = if extra.contains("\"seed\"") { "" } else { r#""seed":5,"# }
     );
     n.start_sim(&json).unwrap();
 }
@@ -3039,3 +3053,139 @@ fn snapshot_kind_field() {
         assert!((2.0..=2.3).contains(&c[5]), "comprimento da moto: {}", c[5]);
     }
 }
+
+// ---- corredor de motos (versão 2, fase 8)
+
+/// Avenida de mão única com 3 faixas e semáforo no nó 3 (fila de carros no vermelho).
+fn corridor_avenue(lanes: u8) -> Network {
+    let osm = avenue(&format!(r#"<tag k="oneway" v="yes"/>"#)).replace(r#"<tag k="lanes" v="4"/>"#, &format!(r#"<tag k="lanes" v="{lanes}"/>"#)).replace(
+        r#"<node id="3" lat="-8.0600" lon="-34.8964"/>"#,
+        r#"<node id="3" lat="-8.0600" lon="-34.8964"><tag k="highway" v="traffic_signals"/></node>"#,
+    );
+    build_network(osm.as_bytes()).unwrap()
+}
+
+/// Roda a avenida com `gen` veíc./h e `pct` % de motos, checando a cada passo que nada se sobrepõe.
+fn corridor_run(lanes: u8, gen: f64, extra: &str, seconds: f64) -> (Network, usize) {
+    let mut n = corridor_avenue(lanes);
+    avenue_sim(&mut n, gen, extra);
+    let mut ahead = 0;
+    let mut hist: std::collections::VecDeque<Vec<String>> = Default::default();
+    for _ in 0..(seconds / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        if std::env::var("CORR_HIST").is_ok() {
+            hist.push_back((0..s.debug_slots()).map(|i| s.dbg_veh(i)).collect());
+            if hist.len() > 8 { hist.pop_front(); }
+        }
+        if let Some(&(m, j)) = s.corridor_conflicts().first() {
+            for h in &hist { eprintln!("  {} / {}", h.get(m as usize).cloned().unwrap_or_default(), h.get(j as usize).cloned().unwrap_or_default()); }
+            panic!("moto no corredor sobreposta a veículo da faixa (t={:.1}): {} / {}", s.time, s.dbg_veh(m as usize), s.dbg_veh(j as usize));
+        }
+        for list in s.edge_lists().iter().chain(s.corridor_lists().iter()) {
+            for w in list.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+            }
+        }
+        ahead += s.corridor_ahead_at_line();
+    }
+    (n, ahead)
+}
+
+/// Fila no semáforo com motos: elas usam o corredor sem sobrepor ninguém, param à frente do primeiro carro, a
+/// simulação conserva os veículos, é determinística e as motos andam mais rápido do que sem o corredor.
+#[test]
+fn corridor_motos_filter_to_the_front_without_overlap() {
+    let (n, ahead) = corridor_run(3, 2400.0, r#","motoShare":30"#, 1200.0);
+    let s = n.sim.as_ref().unwrap();
+    let st = s.stats.clone();
+    assert!(st.corridor_entries > 20, "motos entram no corredor: {st:?}");
+    assert!(ahead > 0, "moto parada na linha à frente do primeiro carro");
+    assert_eq!(st.spawned, st.finished + st.lost + s.n_alive as u64, "conservação: {st:?}");
+    assert_eq!(st.junction_overlaps, 0, "{st:?}");
+    assert_eq!(st.red_runs, 0, "{st:?}");
+    // determinismo
+    let (n2, _) = corridor_run(3, 2400.0, r#","motoShare":30"#, 1200.0);
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    s.snapshot(&n.net, &mut a);
+    n2.sim.as_ref().unwrap().snapshot(&n2.net, &mut b);
+    assert_eq!(a, b, "mesma semente => mesmo resultado");
+    // com fila pesada, as motos levam menos tempo com o corredor (média de 4 sementes: uma só varia demais)
+    let moto_time = |extra: &str| {
+        (1..=4)
+            .map(|seed| {
+                let (n, ahead) = corridor_run(3, 2400.0, &format!(r#",{extra}"seed":{seed}"#), 1200.0);
+                let st = n.sim.as_ref().unwrap().stats.clone();
+                if extra.contains("false") {
+                    assert_eq!((st.corridor_entries, ahead), (0, 0), "desligado, ninguém usa o corredor");
+                }
+                st.moto_travel_sum / st.moto_finished as f64
+            })
+            .sum::<f64>()
+            / 4.0
+    };
+    let (m_on, m_off) = (moto_time(r#""motoShare":30,"#), moto_time(r#""motoShare":30,"motoCorridor":false,"#));
+    eprintln!("viagem média das motos: com corredor {m_on:.1} s, sem {m_off:.1} s");
+    assert!(m_on < m_off, "corredor encurta a viagem das motos: {m_on:.1} vs {m_off:.1}");
+}
+
+/// Desligado (ou sem motos), o corredor não muda nada.
+#[test]
+fn corridor_off_or_no_motos_is_identical() {
+    let snap = |extra: &str| {
+        let (n, _) = corridor_run(3, 2400.0, extra, 300.0);
+        let mut v = Vec::new();
+        n.sim.as_ref().unwrap().snapshot(&n.net, &mut v);
+        v
+    };
+    assert_eq!(snap(""), snap(r#","motoCorridor":false"#));
+    assert_ne!(snap(r#","motoShare":30"#), snap(r#","motoShare":30,"motoCorridor":false"#), "o corredor muda a simulação com motos");
+}
+
+/// Via de 1 faixa por sentido e corredor ao lado de faixa de ônibus: sem corredor.
+#[test]
+fn no_corridor_on_single_lane_or_beside_bus_lane() {
+    let (n, _) = corridor_run(1, 1200.0, r#","motoShare":40"#, 600.0);
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.moto_spawned > 20, "{st:?}");
+    assert_eq!(st.corridor_entries, 0, "{st:?}");
+    // 2 faixas, a da direita só de ônibus: o único par tem faixa de ônibus
+    let mut n = build_network(
+        avenue(r#"<tag k="oneway" v="yes"/><tag k="bus:lanes" v="|designated"/>"#)
+            .replace(r#"<tag k="lanes" v="4"/>"#, r#"<tag k="lanes" v="2"/>"#)
+            .replace(r#"<node id="3" lat="-8.0600" lon="-34.8964"/>"#, r#"<node id="3" lat="-8.0600" lon="-34.8964"><tag k="highway" v="traffic_signals"/></node>"#)
+            .as_bytes(),
+    )
+    .unwrap();
+    assert!(n.net.lanes.iter().any(|l| l.bus), "a avenida tem faixa de ônibus");
+    avenue_sim(&mut n, 1200.0, r#","motoShare":40"#);
+    run(&mut n, 600.0);
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.moto_spawned > 20, "{st:?}");
+    assert_eq!(st.corridor_entries, 0, "{st:?}");
+}
+
+/// Medição (não é teste): viagem média de motos e carros com e sem o corredor na avenida com semáforo, 12 sementes
+/// por demanda (`GENS=1800,2100,...` veíc./h).
+#[test]
+#[ignore]
+fn corridor_measure() {
+    let gens: Vec<f64> = std::env::var("GENS").unwrap_or("1800,2100,2400,2700".into()).split(',').map(|x| x.parse().unwrap()).collect();
+    for gen in gens {
+        for extra in [r#","motoShare":30"#, r#","motoShare":30,"motoCorridor":false"#] {
+            let mut acc = [0.0f64; 4];
+            for seed in 1..=12 {
+                let (n, _) = corridor_run(3, gen, &format!(r#"{extra},"seed":{seed}"#), 1200.0);
+                let st = &n.sim.as_ref().unwrap().stats;
+                acc[0] += st.moto_travel_sum / st.moto_finished as f64 / 12.0;
+                acc[1] += (st.travel_sum - st.moto_travel_sum) / (st.finished - st.moto_finished) as f64 / 12.0;
+                acc[2] += st.harsh_brakes as f64 / 12.0;
+                acc[3] += st.corridor_entries as f64 / 12.0;
+            }
+            eprintln!("{gen} veíc./h {extra}: moto {:.1} s, carro {:.1} s, freadas bruscas {:.0}, entradas no corredor {:.0}", acc[0], acc[1], acc[2], acc[3]);
+        }
+    }
+}
+

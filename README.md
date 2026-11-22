@@ -59,6 +59,7 @@ Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.o
 **Demanda e simulação**
 - **Zonas de demanda**: desenhe zonas de geração e atração. A matriz origem-destino sai de um modelo gravitacional com perfis horários, e qualquer célula pode ser fixada à mão.
 - **Simulação microscópica** de carros, motos e ônibus: modelo de seguimento IDM, troca de faixa planejada pela rota, amarelo e esquerda permissiva no semáforo, preferência por aceitação de brecha, rotatórias e a regra da direita do CTB.
+- **Corredor de motos**: no trânsito lento, as motos andam entre as faixas e param na linha do semáforo à frente dos carros.
 - **Comportamento ajustável**: % de ônibus e de motos, motoristas com app de navegação desviando em tempo real (estilo Waze), quem ignora a sinalização e quem "fecha o cruzamento" (CTB art. 45). Já vem com valores típicos do Recife.
 - **Determinística por semente**: o mesmo cenário dá sempre o mesmo resultado.
 

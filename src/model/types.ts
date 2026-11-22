@@ -200,6 +200,9 @@ export interface SimStats {
   motosActive?: number
   motoSpawned?: number
   motoFinished?: number
+  /** motos no corredor agora e entradas no corredor desde o início */
+  motosInCorridor?: number
+  corridorEntries?: number
 }
 
 /** Ônibus de linha no `explain`. */

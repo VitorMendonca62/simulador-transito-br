@@ -105,6 +105,7 @@ export function SimPanel() {
               <dt>Motos</dt>
               <dd>
                 {(st.motosActive ?? 0).toLocaleString('pt-BR')} na rede · {(st.motoFinished ?? 0).toLocaleString('pt-BR')} concluídas
+                {st.motosInCorridor ? ` · ${st.motosInCorridor.toLocaleString('pt-BR')} no corredor` : ''}
               </dd>
             </div>
           ) : null}
