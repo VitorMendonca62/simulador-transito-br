@@ -130,7 +130,7 @@ Ao importar, o simulador mantém as zonas que têm vias no mapa. As cidades vizi
 
 Antes de usar, considere três premissas:
 
-- **Só trabalho e educação:** compras, saúde, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do real. As motos (motocicleta + mototáxi) entram por uma matriz própria, com a hipótese de 1 viagem = 1 moto; a versão no repositório distribui as horas de forma aproximada (ver `data/od_recife/metadados_e_limitacoes.md`).
+- **Só trabalho e educação:** compras, saúde, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do real. As motos (motocicleta + mototáxi) entram por uma matriz própria, com a hipótese de 1 viagem = 1 moto.
 - **Pessoas, não veículos:** os números são pessoas expandidas da amostra. Na categoria "carro dirigindo", um condutor equivale a um veículo.
 - **Dados de 2018:** a pesquisa de 2021 não publicou matriz nem microdados.
 
