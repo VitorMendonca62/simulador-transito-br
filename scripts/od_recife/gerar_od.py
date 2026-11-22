@@ -295,13 +295,9 @@ def top_destinos(f: pd.DataFrame, origem: str, destino: str, rotulo=None) -> pd.
     return out.sort_values(["periodo", "total_saidas_carro"], ascending=[True, False])
 
 
-def exportar_simulador(p: pd.DataFrame, zonas: gpd.GeoDataFrame, rotulo, destino: Path):
-    """JSON lido pelo simulador: polígonos (lon/lat) e matrizes de carro dirigindo por hora de partida.
-
-    Valores em veíc./h = pessoas que dirigem e partem até 30 min antes ou depois da hora, ponderadas pela frequência
-    semanal (média de um dia útil). Pernas sem horário (0,6%) ficam de fora.
-    """
-    pc = p[(p.modo == "carro_dirigindo") & p.partida_h.notna()].copy()
+def matriz_horaria(pc: pd.DataFrame) -> list:
+    """24 listas planas [origem, destino, veíc./h, ...] por hora de partida (pernas sem horário ficam de fora)."""
+    pc = pc[pc.partida_h.notna()].copy()
     # Balde h = partidas em [h-0,5; h+0,5): o simulador interpola linearmente entre horas inteiras.
     pc["hora"] = np.floor(pc.partida_h + 0.5).astype(int) % 24
     g = pc.groupby(["hora", "origem_zona", "destino_zona"]).peso_freq.sum().round(2)
@@ -309,6 +305,19 @@ def exportar_simulador(p: pd.DataFrame, zonas: gpd.GeoDataFrame, rotulo, destino
     horas = [[] for _ in range(24)]
     for (h, o, d), v in g.items():
         horas[h] += [int(o), int(d), float(v)]
+    return horas
+
+
+def exportar_simulador(p: pd.DataFrame, zonas: gpd.GeoDataFrame, rotulo, destino: Path):
+    """JSON lido pelo simulador: polígonos (lon/lat) e matrizes de carro dirigindo e de moto por hora de partida.
+
+    Valores em veíc./h = pessoas que dirigem e partem até 30 min antes ou depois da hora, ponderadas pela frequência
+    semanal (média de um dia útil). Pernas sem horário (0,6%) ficam de fora.
+    """
+    horas = matriz_horaria(p[p.modo == "carro_dirigindo"])
+    # Motos: motocicleta + mototáxi, só dos respondentes (como o carro; o filho levado à escola fica de fora).
+    # Hipótese: 1 viagem = 1 moto (a pesquisa não separa piloto e garupa nem traz ocupação).
+    horas_moto = matriz_horaria(p[p.modo.isin(["motocicleta", "mototaxi"]) & (p.motivo != "educacao_dependente")])
     z = zonas.copy()
     z["geometry"] = z.geometry.simplify(15)
     z = z.to_crs("EPSG:4326")
@@ -325,6 +334,8 @@ def exportar_simulador(p: pd.DataFrame, zonas: gpd.GeoDataFrame, rotulo, destino
         "unidade": "veiculos/h por hora de partida, media de dia util (ajuste por frequencia)",
         "zonas": sorted(lista, key=lambda q: q["id"]),
         "horas": horas,
+        "modoMoto": "motocicleta+mototaxi (1 viagem = 1 moto, hipótese)",
+        "horasMoto": horas_moto,
     }
     destino.parent.mkdir(parents=True, exist_ok=True)
     destino.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")))

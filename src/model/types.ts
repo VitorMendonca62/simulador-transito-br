@@ -96,6 +96,9 @@ export interface NetworkData {
   segPtsOff: Uint32Array
 }
 
+/** colunas da série por minuto do núcleo (`SERIES_COLS` em core/src/sim/metrics.rs): t, vivos, concluídos, vel. média,
+ * fila de entrada, vel. dos ônibus de linha, vel. das motos */
+export const SERIES_COLS = 7
 export const SEG_STRIDE = 9
 export const LANE_STRIDE = 6
 export const CONN_STRIDE = 5
@@ -193,6 +196,10 @@ export interface SimStats {
   busStopsMissed?: number
   /** carros da parcela que pararam no ponto de ônibus */
   carsAtBusStop?: number
+  /** motos na rede, nascidas e concluídas (também contadas em alive/spawned/finished) */
+  motosActive?: number
+  motoSpawned?: number
+  motoFinished?: number
 }
 
 /** Ônibus de linha no `explain`. */

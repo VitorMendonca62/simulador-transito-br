@@ -1,3 +1,4 @@
+import { SERIES_COLS } from '../model/types'
 import { useId } from 'react'
 
 export interface Line {
@@ -65,6 +66,6 @@ export function LineChart({ lines, unit = '', height = 54, cursor, onPick, title
 export const col = (series: Float32Array | null, c: number): number[] => {
   if (!series) return []
   const out: number[] = []
-  for (let i = 0; i < series.length / 6; i++) out.push(series[i * 6 + c])
+  for (let i = 0; i < series.length / SERIES_COLS; i++) out.push(series[i * SERIES_COLS + c])
   return out
 }

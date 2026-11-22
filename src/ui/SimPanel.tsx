@@ -100,6 +100,14 @@ export function SimPanel() {
             <dt>Viagem média</dt>
             <dd>{st.meanTravel ? `${(st.meanTravel / 60).toFixed(1)} min` : '—'}</dd>
           </div>
+          {st.motoSpawned ? (
+            <div title="Motos em circulação e viagens concluídas (também entram em Na rede e Concluídos)">
+              <dt>Motos</dt>
+              <dd>
+                {(st.motosActive ?? 0).toLocaleString('pt-BR')} na rede · {(st.motoFinished ?? 0).toLocaleString('pt-BR')} concluídas
+              </dd>
+            </div>
+          ) : null}
           {st.busTripsDone != null && (st.busesActive || st.busTripsDone || st.busStops) ? (
             <>
               <div title="Ônibus de linha em circulação e viagens concluídas (não entram nas contagens dos carros)">
@@ -147,6 +155,9 @@ export function SimPanel() {
           <LineChart title="Velocidade média" unit=" km/h" lines={[{ values: col(sim.series, 3), color: '#34d399' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
           <LineChart title="Concluídos por minuto" lines={[{ values: col(sim.series, 2), color: '#fbbf24' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
           <LineChart title="Fila de entrada" lines={[{ values: col(sim.series, 4), color: '#f472b6' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
+          {col(sim.series, 6).some((v) => v > 0) && (
+            <LineChart title="Velocidade das motos" unit=" km/h" lines={[{ values: col(sim.series, 6), color: '#e2e8f0' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
+          )}
           {col(sim.series, 5).some((v) => v > 0) && (
             <LineChart title="Velocidade dos ônibus de linha" unit=" km/h" lines={[{ values: col(sim.series, 5), color: '#60a5fa' }]} cursor={sim.replay} onPick={(i) => setReplay(i)} />
           )}
@@ -174,6 +185,7 @@ export function SimPanel() {
           <li><i style={{ background: '#facc15' }} />&lt; 40</li>
           <li><i style={{ background: '#34d399' }} />livre</li>
           <li><i style={{ background: '#60a5fa' }} />ônibus</li>
+          <li title="Motos: mesma escala de velocidade, em tom mais claro e mais finas"><i style={{ background: '#f2f2f2', width: 5 }} />moto</li>
         </ul>
       )}
     </section>

@@ -350,6 +350,14 @@ Falta repetir com o painel visível.
 - `VehicleLayer`: malha/cor própria para moto.
 - Testes: determinismo, conservação, com 0 % de motos o resultado é idêntico ao de antes.
 
+**Concluída (2026-11-22).** Decisões do usuário: demanda pela **matriz OD de motos** (motocicleta + mototáxi, somada
+aos carros); `motoShare` só nos mapas sem essa matriz. O snapshot passou a 7 floats (`[..., comprimento, tipo]`) **sem** a
+quantização da 2.2, que segue pendente. A matriz de motos no repositório é **aproximada** (microdados inacessíveis no
+ambiente; `scripts/od_recife/motos_aproximadas.py`). Rodar `gerar_od.py` com os microdados dá a exata. Detalhes e medidas
+no `CONTEXT.md` (seção "Motos como tipo de veículo").
+- Testes novos: `moto_zero_is_identical`, `motos_are_deterministic_conserved_and_never_overlap`,
+  `moto_od_matrix_spawns_motos`, `moto_never_on_bus_lane`, `snapshot_kind_field`.
+
 ### Fase 8 — Corredor
 - **Faixa virtual entre duas faixas vizinhas do mesmo sentido**, só para motos, em vez de posição lateral livre (o
   modelo continua de fila única). Ativa quando as duas faixas estão lentas ou paradas (abaixo de um limite, ex.
@@ -390,6 +398,6 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | 4 — Encaixe na rede | concluída (2026-11-03): exceções para ônibus, 81 % dos trechos encaixados |
 | 5 — Simulação de ônibus | concluída (2026-11-03): rota fixa, partidas do GTFS, embarque nos pontos, métricas por linha (só no núcleo) |
 | 6 — Interface de linhas | concluída (2026-11-03): camada, painel, paradas editáveis, baia; falta medir 30× com o painel visível |
-| 7 — Moto como tipo | pendente |
+| 7 — Moto como tipo | concluída (2026-11-22): tipo explícito, matriz OD de motos (aproximada), `motoShare`, desenho e métricas |
 | 8 — Corredor | pendente |
 | 9 — Motos por parcela | pendente |

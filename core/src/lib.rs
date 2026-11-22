@@ -729,6 +729,9 @@ impl Network {
                 "busStops": s.stats.bus_stops,
                 "busStopsMissed": s.stats.bus_stops_missed,
                 "carsAtBusStop": s.stats.cars_at_bus_stop,
+                "motosActive": s.motos_alive(),
+                "motoSpawned": s.stats.moto_spawned,
+                "motoFinished": s.stats.moto_finished,
             })
             .to_string(),
             None => "{}".to_string(),

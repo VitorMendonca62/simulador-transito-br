@@ -199,5 +199,17 @@ Carro dirigindo, trabalho + educação, um bloco por `periodo`.
   - O balde da hora h reúne as partidas em [h−0,5; h+0,5).
   - Os valores usam `fluxo_pessoas_ajustado_frequencia`, ou seja, a média de um dia útil.
   - Pernas sem horário (0,6%) ficam de fora.
+- **`horasMoto`:** 24 listas no mesmo formato, de **motocicleta + mototáxi**, trabalho + educação dos respondentes
+  (o filho levado à escola fica de fora, como no carro). `modoMoto` descreve a origem.
+  - **Hipótese: 1 viagem = 1 moto.** A pesquisa não separa piloto e garupa nem traz ocupação, então a matriz
+    superestima um pouco o número de motos.
+  - O `gerar_od.py` gera a versão exata a partir dos microdados. A versão no repositório foi feita **sem os
+    microdados** (portal inacessível na hora) por `scripts/od_recife/motos_aproximadas.py`: por par de zonas, as
+    viagens do pico da manhã ([6h, 9h)), do pico da tarde ([17h, 20h)) e do resto do dia, de
+    `fluxos_carro_origem_destino.csv`, distribuídas nas horas de cada parte pela forma horária total dos carros.
+    O mesmo método nos carros erra os totais por hora em 5,9 % do dia (7h: 54,1 mil contra 56,8 mil reais). Por par,
+    a versão aproximada espalha as viagens fora do pico por todas as horas, enquanto a real é esparsa. Rodar o
+    `gerar_od.py` com os microdados substitui pela versão exata.
+  - Total: ~248 mil motos/dia; 40 mil/h às 7h e 33 mil/h às 18h (toda a RMR).
 
 O simulador importa esse arquivo pelo painel de zonas (ver `docs/CONTEXT.md`).
