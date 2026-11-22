@@ -7,6 +7,7 @@
 //! rotatória, direita) por aceitação de brecha, mais *keep-clear*. Tudo determinístico por semente.
 
 pub mod bus;
+pub mod corridor;
 pub mod metrics;
 pub mod route;
 
@@ -75,10 +76,12 @@ pub struct SimParams {
     /// Matriz de motos fixada por hora do dia (24 entradas, veíc./h por "idOrigem>idDestino"), somada aos carros
     /// (importação da Pesquisa OD: motocicleta + mototáxi). Vazia = sem matriz de motos.
     pub od_hourly_moto: Vec<std::collections::HashMap<String, f64>>,
+    /// motos andam no corredor entre duas faixas do mesmo sentido quando o trânsito está lento (fase 8)
+    pub moto_corridor: bool,
 }
 impl Default for SimParams {
     fn default() -> Self {
-        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0, moto_share: 0.0, od_hourly_moto: Vec::new() }
+        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0, moto_share: 0.0, od_hourly_moto: Vec::new(), moto_corridor: true }
     }
 }
 
@@ -286,6 +289,11 @@ pub struct Stats {
     /// motos nascidas e concluídas (também contadas em `spawned`/`finished`)
     pub moto_spawned: u64,
     pub moto_finished: u64,
+    /// entradas de motos no corredor e moto-segundos andando nele
+    pub corridor_entries: u64,
+    pub corridor_s: f64,
+    /// soma dos tempos de viagem das motos concluídas (s)
+    pub moto_travel_sum: f64,
 }
 
 /// floats por veículo no quadro enviado à interface (ver `Sim::snapshot`)
@@ -303,6 +311,7 @@ fn lc_block_text(c: u8) -> &'static str {
         3 => "seta ligada, aguardando",
         4 => "sem vão à frente na faixa vizinha",
         5 => "sem vão atrás na faixa vizinha",
+        6 => "moto no corredor",
         _ => "nenhuma",
     }
 }
@@ -350,6 +359,34 @@ const FAST_BEFORE: f32 = 9.0;
 const LC_SOLID_ZONE: f32 = 12.0;
 /// tempo mínimo de seta ligada antes de mudar de faixa (s)
 const LC_BLINK: f32 = 1.0;
+
+/// Corredor de motos (fase 8): faixa virtual entre duas faixas vizinhas do mesmo sentido. A moto entra quando o fluxo
+/// ao lado anda abaixo de `CORR_VMAX` (m/s, 20 km/h), sai acima de `CORR_VOUT` e anda até `CORR_DV` acima dele.
+const CORR_VMAX: f32 = 5.6;
+const CORR_VOUT: f32 = 11.0;
+const CORR_DV: f32 = 4.2;
+/// distância mínima (m) entre os centros de duas faixas para haver corredor
+const CORR_MIN_W: f32 = 2.8;
+/// até onde (m) se olha à frente o fluxo das faixas ao lado e quem invade o corredor
+const CORR_LOOK: f32 = 40.0;
+/// nó sem semáforo: o corredor acaba a esta distância (m) da linha e a moto volta para uma faixa antes dele
+const CORR_END_FREE: f32 = 6.0;
+/// custo (s) de cada moto já na fila do corredor, na escolha entre os dois corredores de uma faixa
+const CORR_QUEUE_S: f32 = 1.5;
+/// tempo (s) que a carroceria de quem troca de faixa leva para atravessar o corredor (`lat` volta a 1,8 m/s)
+const CORR_SLIDE: f32 = 2.0;
+/// as motos paradas na linha saem na frente do primeiro carro (parado) só nestes primeiros segundos do verde
+const CORR_GREEN_HEAD: f32 = 3.0;
+/// depois disso, a moto só entra na conversão na frente de carro que freie no máximo isto (m/s²) por ela
+const CORR_CUT_BRAKE: f32 = 1.5;
+/// meia largura (m) da carroceria por tipo, para quem invade o corredor
+fn half_w(kind: u8) -> f32 {
+    match kind {
+        KIND_BUS => 1.25,
+        KIND_MOTO => 0.45,
+        _ => 0.9,
+    }
+}
 
 struct RouteBatch {
     zones: Vec<u32>,
@@ -460,6 +497,8 @@ pub struct Sim {
     sigs: Vec<SigRt>,
     end_state: Vec<u8>,
     red_age: Vec<f32>,
+    /// tempo (s) desde que a ponta abriu (verde), para a saída das motos na frente (`corr_pick`)
+    green_age: Vec<f32>,
     /// pontas controladas por algum semáforo (as demais ficam sempre em 0)
     sig_ends: Vec<u32>,
     // veículos (SoA)
@@ -556,6 +595,15 @@ pub struct Sim {
     stop_car: Vec<u8>,
     /// ônibus fora da faixa, numa baia (parada + 1; 0 = não): não está na lista da faixa, não anda, não troca de faixa
     in_bay: Vec<u32>,
+    /// corredor de motos: `corr_ok[l]` = há corredor entre as faixas `l` e `l + 1`; motos em cada corredor (ordenadas
+    /// por `s`, fora de `edge_veh`), bits dos corredores ocupados, ponta de faixa com semáforo e, por veículo, o
+    /// corredor em que está (`NONE` = numa faixa; `edge` segue sendo a faixa de referência)
+    corr_ok: Vec<bool>,
+    corr_veh: Vec<Vec<u32>>,
+    corr_bits: Vec<u64>,
+    end_sig: Vec<bool>,
+    corr: Vec<u32>,
+    corr_act: Vec<u32>,
 }
 
 impl Sim {
@@ -810,6 +858,7 @@ impl Sim {
             next_matrix_at: 0.0,
             sigs,
             end_state: vec![0; net.segs.len() * 2],
+            green_age: vec![0.0; net.segs.len() * 2],
             red_age: vec![0.0; net.segs.len() * 2],
             sig_ends: Vec::new(),
             alive: Vec::new(),
@@ -877,6 +926,12 @@ impl Sim {
             bacc: Vec::new(),
             bus_lane_ok: Vec::new(),
             stop_car: Vec::new(),
+            corr_ok: Vec::new(),
+            corr_veh: vec![Vec::new(); nl],
+            corr_bits: vec![0; nl.div_ceil(64)],
+            end_sig: vec![false; net.segs.len() * 2],
+            corr: Vec::new(),
+            corr_act: Vec::new(),
         };
         sim.start_time = sim.time;
         sim.tree_at = vec![sim.time; nz];
@@ -887,7 +942,19 @@ impl Sim {
         let mut ends: Vec<u32> = sim.sigs.iter().flat_map(|sg| sg.phases.iter().flat_map(|p| p.3.iter().copied())).collect();
         ends.sort_unstable();
         ends.dedup();
+        for &e in &ends {
+            sim.end_sig[e as usize] = true;
+        }
         sim.sig_ends = ends;
+        sim.corr_ok = (0..nl)
+            .map(|l| {
+                let a = &sim.lanes[l];
+                l + 1 < nl && {
+                    let b = &sim.lanes[l + 1];
+                    b.seg == a.seg && b.dir == a.dir && !a.bus && !b.bus && (a.off - b.off).abs() >= CORR_MIN_W
+                }
+            })
+            .collect();
         if with_bus {
             sim.init_buses(net, &init.bus);
         }
@@ -1298,6 +1365,11 @@ impl Sim {
             } else {
                 self.red_age[e] = 0.0;
             }
+            if self.end_state[e] == 3 {
+                self.green_age[e] += dt;
+            } else {
+                self.green_age[e] = 0.0;
+            }
         }
     }
 
@@ -1369,6 +1441,7 @@ impl Sim {
             } else {
                 true
             };
+            let lead_ok = lead_ok && !(self.corr_beside(lane as usize) && self.corr_sliding_in(lane as usize, cand - vlen - 4.0, cand + 6.0));
             if lead_ok && foll_ok {
                 s0 = cand;
                 placed = true;
@@ -1428,6 +1501,7 @@ impl Sim {
                 self.bus_lane_ok.push(false);
                 self.stop_car.push(0);
                 self.in_bay.push(0);
+                self.corr.push(NONE);
                 i
             }
         };
@@ -1455,6 +1529,7 @@ impl Sim {
         self.stop_at[id] = f32::NAN;
         self.bacc[id] = [0.0; 3];
         self.in_bay[id] = 0;
+        self.corr[id] = NONE;
         self.bus_lane_ok[id] = drv.bus_ok && kind == KIND_CAR;
         self.stop_car[id] = if kind == KIND_CAR && ((noise(drv.seed, 0x570B) + 1.0) * 50.0) < self.params.bus_stop_car_pct as f32 { 1 } else { 0 };
         self.origin[id] = origin;
@@ -1592,6 +1667,9 @@ impl Sim {
     }
 
     fn remove_vehicle(&mut self, id: usize) {
+        if self.corr[id] != NONE {
+            self.corr_unlink(id);
+        }
         let e = self.edge[id] as usize;
         if self.edge_veh[e].contains(&(id as u32)) {
             self.unlink(e, id);
@@ -2299,9 +2377,18 @@ impl Sim {
             let j = list[k + 1] as usize;
             return Some((self.s[j] - self.vlen[j] - self.s[i], self.v[j]));
         }
+        if e < self.nl {
+            return self.lane_end_lead(net, i, e, front_decides);
+        }
+        self.conn_lead(net, i, e)
+    }
+
+    /// Líder virtual de quem é o primeiro da faixa `e` (ou a primeira moto do corredor, com `e` = faixa de referência):
+    /// retenção na linha, conversão escolhida, fusão e faixa de destino curta com semáforo fechado.
+    fn lane_end_lead(&mut self, net: &Net, i: usize, e: usize, front_decides: bool) -> Option<(f32, f32)> {
         let elen = self.edge_len[e];
         let rest = elen - self.s[i];
-        if e < self.nl {
+        {
             let cc = self.choice[i];
             if cc == SINK {
                 return None; // sai da rede ao fim da faixa; sem líder virtual
@@ -2363,13 +2450,20 @@ impl Sim {
                 (None, a) => a,
                 (o, _) => o,
             }
-        } else {
+        }
+    }
+
+    /// Líder de quem está à frente na conversão `e`.
+    fn conn_lead(&mut self, net: &Net, i: usize, e: usize) -> Option<(f32, f32)> {
+        let rest = self.edge_len[e] - self.s[i];
+        {
             let to = self.conns[e - self.nl].to;
             let other = self.edge_veh[to as usize].first().map(|&j| {
                 let j = j as usize;
                 (rest + self.s[j] - self.vlen[j], self.v[j])
             });
             let other = min_lead(other, self.merge_ghost(net, i, e as u32, -self.s[i]));
+            let other = if self.corr_beside(to as usize) { min_lead(other, self.corr_lane_intruder(to as usize, i, -rest)) } else { other };
             // já dentro da conversão: a retenção da faixa de destino curta com semáforo fechado continua valendo
             // (senão quem freou antes da conversão volta a acelerar nela e chega à faixa curta sem espaço para parar)
             let tl = &self.lanes[to as usize];
@@ -2516,6 +2610,10 @@ impl Sim {
                         lead = Some(o);
                     }
                 }
+                // moto entrando no corredor ao lado, ainda com a carroceria nesta faixa
+                if e < self.nl && self.corr_beside(e) {
+                    lead = min_lead(lead, self.corr_lane_intruder(e, i, self.s[i]));
+                }
                 if e < self.nl && self.want_lane[e] {
                     if let Some(c) = self.courtesy(i, e, k) {
                         if lead.map_or(true, |l| c.0 < l.0) {
@@ -2569,6 +2667,11 @@ impl Sim {
                 }
                 self.acc[i] = a;
             }
+        }
+        let mut corr_act = std::mem::take(&mut self.corr_act);
+        self.corr_active(&mut corr_act);
+        if !corr_act.is_empty() {
+            self.corridor_accels(net, &corr_act);
         }
         lap!(2);
         // 2) integração
@@ -2647,6 +2750,7 @@ impl Sim {
         lap!(3);
         // 3) sem sobreposição na mesma aresta (do líder para trás)
         self.enforce_gaps();
+        self.corridor_gaps(&corr_act);
         lap!(4);
 
         // 4) mudanças de aresta
@@ -2664,6 +2768,8 @@ impl Sim {
         self.movers = movers;
 
         self.enforce_gaps();
+        self.corridor_gaps(&corr_act);
+        self.corr_act = corr_act;
         if self.overlap_log.is_some() {
             self.hist.resize(self.alive.len(), Default::default());
             for i in 0..self.alive.len() {
@@ -2841,16 +2947,23 @@ impl Sim {
                 return;
             }
             if e < self.nl {
+                if self.corr[i] != NONE {
+                    if !self.corr_to_conn(i) {
+                        return;
+                    }
+                    continue; // a faixa pode ter mudado: refaz com ela
+                }
                 let cc = self.choice[i];
                 if cc == SINK {
                     if self.route[i] != NONE {
                         self.bus_finish(i);
                     } else {
                         self.stats.finished += 1;
+                        let travel = self.time - self.t_spawn[i] as f64;
                         if self.kind[i] == KIND_MOTO {
                             self.stats.moto_finished += 1;
+                            self.stats.moto_travel_sum += travel;
                         }
-                        let travel = self.time - self.t_spawn[i] as f64;
                         self.stats.travel_sum += travel;
                         self.metrics.trip_done(self.origin[i] as usize, self.dest[i] as usize, travel, self.t_free[i] as f64);
                     }
@@ -2909,6 +3022,10 @@ impl Sim {
                 self.edge[i] = cc;
                 self.s[i] = over;
                 self.insert_sorted(cc, i);
+                if self.kind[i] == KIND_MOTO && self.lanes[e].dir == 1 {
+                    // na conversão o deslocamento lateral da moto fica no sistema da viagem (ver `pose_dir`)
+                    self.lat[i] = -self.lat[i];
+                }
                 self.sample_conn_delay(cc as usize - self.nl, self.time as f32 - self.t_due[i]);
                 if !self.left_gate[i] {
                     self.left_gate[i] = true;
@@ -2929,6 +3046,9 @@ impl Sim {
                 self.edge[i] = to;
                 self.s[i] = over;
                 self.insert_sorted(to, i);
+                if self.kind[i] == KIND_MOTO && self.lanes[to as usize].dir == 1 {
+                    self.lat[i] = -self.lat[i];
+                }
                 self.t_due[i] = self.time as f32 + self.free_left(to as usize, over);
                 self.mand[i] = false;
                 self.blink_to[i] = NONE;
@@ -2986,6 +3106,10 @@ impl Sim {
     }
 
     fn consider_lane_change(&mut self, i: usize) {
+        if self.corr[i] != NONE {
+            self.corr_update(i);
+            return;
+        }
         let e = self.edge[i] as usize;
         let rest = self.lanes[e].len - self.s[i];
         // tempo de viagem anormal (voltas sem fim): vira "infrator" e, no limite, desiste
@@ -3033,6 +3157,11 @@ impl Sim {
                 self.remove_vehicle(i);
                 return;
             }
+        }
+        // moto: corredor entre as faixas quando o trânsito ao lado está lento
+        if self.kind[i] == KIND_MOTO && self.params.moto_corridor && self.try_corridor(i, own) {
+            self.cool[i] = 1.0;
+            return;
         }
         // ônibus com parada pendente neste passo: vai para a faixa dela (também no último passo, que termina em `SINK`)
         let stop_here = bus && self.drv(i).stop_step == self.bstep[i];
@@ -3202,6 +3331,12 @@ impl Sim {
         let e = self.edge[i] as usize;
         if !self.compatible(i, to) {
             self.lc_why[i] = 1;
+            return false;
+        }
+        // não atravessa por cima de moto no corredor entre as duas faixas
+        let c = e.min(to);
+        if self.corr_ok[c] && !self.corr_veh[c].is_empty() && self.corr_blocks(c, self.s[i], self.vlen[i], self.v[i]) {
+            self.lc_why[i] = 6;
             return false;
         }
         // linha contínua de aproximação (retenção/zebrado): não se troca de faixa nos últimos metros antes do nó
@@ -3389,7 +3524,8 @@ impl Sim {
             let a = if l.dir == 0 { l.a0 as f64 + s as f64 } else { l.a0 as f64 - s as f64 };
             let (p, t) = seg.poly.at(a);
             let sign = if l.dir == 0 { 1.0 } else { -1.0 };
-            let q = add(p, mul(right(t), (l.off + self.lat[i]) as f64));
+            let off = if self.corr[i] != NONE { self.corr_mid(self.corr[i] as usize) } else { l.off };
+            let q = add(p, mul(right(t), (off + self.lat[i]) as f64));
             (q[0] as f32, q[1] as f32, (t[0] * sign) as f32, (t[1] * sign) as f32)
         } else {
             let c = &self.conns[e - self.nl];
@@ -3398,6 +3534,8 @@ impl Sim {
             let q = bez8(&c.curve, (u + 0.02).min(1.0));
             let p0 = bez8(&c.curve, (u - 0.02).max(0.0));
             let d = norm(sub(q, p0));
+            // moto: deslocamento lateral que sobrou da faixa (ou do corredor) de chegada, no sistema da viagem
+            let p = if self.kind[i] == KIND_MOTO && self.lat[i] != 0.0 { add(p, mul(right(d), self.lat[i] as f64)) } else { p };
             (p[0] as f32, p[1] as f32, d[0] as f32, d[1] as f32)
         }
     }
@@ -3843,6 +3981,9 @@ impl Sim {
     /// Depuração: o que segura o veículo `i` agora (texto, id de quem segura ou -1).
     pub fn who_holds(&mut self, net: &Net, i: usize) -> (String, i64) {
         let e = self.edge[i] as usize;
+        if self.corr[i] != NONE {
+            return (format!("#{i} moto no corredor {} (faixa {e}) resto {:.1} v {:.1}", self.corr[i], self.edge_len[e] - self.s[i], self.v[i]), -1);
+        }
         let list = self.edge_veh[e].clone();
         let k = list.iter().position(|&x| x as usize == i).unwrap_or(0);
         let where_ = if e < self.nl { format!("faixa {} resto {:.1}", e, self.edge_len[e] - self.s[i]) } else { format!("conv {} s {:.1}/{:.1} node {}", e, self.s[i], self.edge_len[e], self.conns[e - self.nl].node) };

@@ -28,6 +28,8 @@ export interface DemandParams {
   busShare: number
   /** % do fluxo gerado que nasce como moto (sem a matriz de motos da Pesquisa OD) */
   motoShare?: number
+  /** motos andam no corredor entre duas faixas do mesmo sentido quando o trânsito está lento (padrão ligado) */
+  motoCorridor?: boolean
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
   /** % de motoristas que entram no cruzamento sem espaço para sair e podem ficar parados nele (CTB art. 45) */

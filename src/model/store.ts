@@ -637,6 +637,7 @@ export const useStore = create<State>((set, get) => {
             odManual: odRecord,
             odHourly,
             motoShare: paramsRecord.motoShare ?? 0,
+            motoCorridor: paramsRecord.motoCorridor ?? true,
             odHourlyMoto: odHourlyMoto ?? [],
             busLines: paramsRecord.busLines ?? true,
             busDwellMin: paramsRecord.busDwellMin ?? 8,

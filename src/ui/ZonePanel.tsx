@@ -371,6 +371,10 @@ export function DemandParamsPanel() {
         <span>Motos no fluxo (%)</span>
         <input className="num" type="number" min={0} max={80} step={1} disabled={odMotos} value={demandParams.motoShare ?? 0} onChange={(e) => setDemandParams({ motoShare: Math.min(80, Math.max(0, Number(e.target.value))) })} />
       </label>
+      <label className="check" title="Com o trânsito lento (abaixo de 20 km/h), as motos andam entre duas faixas do mesmo sentido, até ~15 km/h acima do fluxo, e param na linha do semáforo à frente dos carros. Não há corredor em via de uma faixa nem ao lado de faixa de ônibus.">
+        <input type="checkbox" checked={demandParams.motoCorridor ?? true} onChange={(e) => setDemandParams({ motoCorridor: e.target.checked })} />
+        <span>Corredor de motos</span>
+      </label>
       {lines && (
         <>
           <label className="field" title="Tempo parado no ponto: o mínimo (abrir e fechar as portas) mais 2,5 s por passageiro embarcando, até o máximo.">

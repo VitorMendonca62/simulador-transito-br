@@ -732,6 +732,8 @@ impl Network {
                 "motosActive": s.motos_alive(),
                 "motoSpawned": s.stats.moto_spawned,
                 "motoFinished": s.stats.moto_finished,
+                "motosInCorridor": s.motos_in_corridor(),
+                "corridorEntries": s.stats.corridor_entries,
             })
             .to_string(),
             None => "{}".to_string(),
