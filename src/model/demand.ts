@@ -26,6 +26,8 @@ export interface DemandParams {
   hour: number
   /** % de ônibus no fluxo gerado (sem linhas de ônibus carregadas) */
   busShare: number
+  /** % do fluxo gerado que nasce como moto (sem a matriz de motos da Pesquisa OD) */
+  motoShare?: number
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
   /** % de motoristas que entram no cruzamento sem espaço para sair e podem ficar parados nele (CTB art. 45) */
@@ -59,11 +61,14 @@ export interface DemandParams {
  * - app de navegação 50 %: a maioria dos motoristas tem Waze/Google Maps, mas no trajeto diário só parte segue a rota em tempo real
  * - ignoram a sinalização 5 %; fecham o cruzamento 20 %: infrações comuns nos cruzamentos do centro e da Agamenon
  * - ônibus de linha: 8–90 s no ponto, 6 passageiros por parada no pico, partidas ±60 s do horário
- * - usam a faixa exclusiva de ônibus 10 %; param no ponto (embarque/desembarque, apps) 2 % */
+ * - usam a faixa exclusiva de ônibus 10 %; param no ponto (embarque/desembarque, apps) 2 %
+ * - motos 25 % do fluxo (sem a matriz de motos da OD): ordem de grandeza da participação das motos na frota do Recife;
+ *   estimativa a confirmar. Com a OD importada, as motos vêm da matriz de motos da pesquisa */
 export const TYPICAL_PARAMS = {
   beta: 0.08,
   intrazone: true,
   busShare: 3,
+  motoShare: 25,
   illegalPct: 5,
   boxBlockPct: 20,
   reroute: true,

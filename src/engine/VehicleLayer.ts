@@ -1,7 +1,8 @@
 import { Buffer, BufferUsage, Container, Geometry, GlProgram, Mesh, Shader } from 'pixi.js'
 
-/** floats por veículo no quadro do núcleo: x, y, dx, dy (frente e direção), velocidade, comprimento (negativo = ônibus). */
-const STRIDE = 6
+/** floats por veículo no quadro do núcleo (`SNAP_STRIDE`): x, y, dx, dy (frente e direção), velocidade, comprimento e
+ * tipo (0 carro, 1 ônibus, 2 moto; `KIND_*` em core/src/sim/mod.rs). Comprimento 0 = slot vazio. */
+const STRIDE = 7
 const BYTES = STRIDE * 4
 /** acima desta distância (m) entre dois quadros o slot foi reaproveitado por outro veículo: sem interpolar */
 const SNAP_DIST = 100
@@ -10,9 +11,9 @@ const VERT = `#version 300 es
 precision highp float;
 in vec2 aPosition;
 in vec4 aP0;
-in vec2 aM0;
+in vec3 aM0;
 in vec4 aP1;
-in vec2 aM1;
+in vec3 aM1;
 uniform mat3 uProjectionMatrix;
 uniform mat3 uWorldTransformMatrix;
 uniform mat3 uTransformMatrix;
@@ -23,18 +24,19 @@ out vec3 vColor;
 void main() {
   // quadro anterior (a) e atual (b): quem é quem depende de qual buffer recebeu o quadro mais novo
   vec4 pa = uFlip < 0.5 ? aP0 : aP1;
-  vec2 ma = uFlip < 0.5 ? aM0 : aM1;
+  vec3 ma = uFlip < 0.5 ? aM0 : aM1;
   vec4 pb = uFlip < 0.5 ? aP1 : aP0;
-  vec2 mb = uFlip < 0.5 ? aM1 : aM0;
-  float len = abs(mb.y);
+  vec3 mb = uFlip < 0.5 ? aM1 : aM0;
+  float len = mb.y;
   if (len < 0.01) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); vColor = vec3(0.0); return; }
-  float bus = mb.y < 0.0 ? 1.0 : 0.0;
-  float w0 = bus > 0.5 ? 2.5 : 1.9;
-  // em zoom baixo o retângulo é ampliado para continuar visível
-  float f = clamp(3.2 / (uZoom * w0), 1.0, 6.0);
+  float bus = abs(mb.z - 1.0) < 0.5 ? 1.0 : 0.0;
+  float moto = abs(mb.z - 2.0) < 0.5 ? 1.0 : 0.0;
+  float w0 = bus > 0.5 ? 2.5 : moto > 0.5 ? 0.9 : 1.9;
+  // em zoom baixo o retângulo é ampliado para continuar visível (a moto fica menor que o carro também na tela)
+  float f = clamp((moto > 0.5 ? 2.0 : 3.2) / (uZoom * w0), 1.0, moto > 0.5 ? 8.0 : 6.0);
   float L = len * f;
   float W = w0 * f;
-  bool prevOk = abs(ma.y) > 0.01 && distance(pa.xy, pb.xy) < ${SNAP_DIST.toFixed(1)};
+  bool prevOk = ma.y > 0.01 && distance(pa.xy, pb.xy) < ${SNAP_DIST.toFixed(1)};
   float t = prevOk ? uT : 1.0;
   vec2 dm = mix(prevOk ? pa.zw : pb.zw, pb.zw, t);
   float dl = length(dm);
@@ -43,11 +45,12 @@ void main() {
   vec2 c = mix(pa.xy - (prevOk ? pa.zw : pb.zw) * L * 0.5, pb.xy - pb.zw * L * 0.5, t);
   vec2 world = c + d * (aPosition.x * L) + vec2(-d.y, d.x) * (aPosition.y * W);
   float kmh = mb.x * 3.6;
-  vColor = bus > 0.5 ? vec3(0.376, 0.647, 0.980)
-         : kmh < 5.0 ? vec3(0.937, 0.267, 0.267)
+  vec3 sc = kmh < 5.0 ? vec3(0.937, 0.267, 0.267)
          : kmh < 20.0 ? vec3(0.984, 0.573, 0.235)
          : kmh < 40.0 ? vec3(0.980, 0.800, 0.082)
          : vec3(0.204, 0.827, 0.600);
+  // moto: mesma escala de velocidade, clareada para se distinguir do carro
+  vColor = bus > 0.5 ? vec3(0.376, 0.647, 0.980) : moto > 0.5 ? mix(sc, vec3(1.0), 0.45) : sc;
   vec3 p = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix * vec3(world, 1.0);
   gl_Position = vec4(p.xy, 0.0, 1.0);
 }`
@@ -62,7 +65,7 @@ void main() { finalColor = vec4(vColor, 1.0); }`
  * Veículos por instancing: um retângulo orientado por slot (o id do veículo é a posição no quadro).
  * Os dois últimos quadros do núcleo ficam em dois buffers da GPU e o vertex shader interpola entre eles
  * (posição e direção), então o custo por quadro desenhado na CPU é só atualizar um uniform; o zoom
- * (tamanho mínimo na tela) também é um uniform. Cor por faixa de velocidade e ônibus calculada no shader.
+ * (tamanho mínimo na tela) também é um uniform. Cor por faixa de velocidade, ônibus e moto calculada no shader.
  */
 export class VehicleLayer {
   readonly container = new Container()
@@ -83,14 +86,14 @@ export class VehicleLayer {
     const mk = () => new Buffer({ data: new Float32Array(STRIDE), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST, shrinkToFit: false })
     this.buffers = [mk(), mk()]
     const corners = new Buffer({ data: new Float32Array([-0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST })
-    const inst = (buffer: Buffer, offset: number, format: 'float32x4' | 'float32x2') => ({ buffer, format, stride: BYTES, offset, instance: true })
+    const inst = (buffer: Buffer, offset: number, format: 'float32x4' | 'float32x3') => ({ buffer, format, stride: BYTES, offset, instance: true })
     this.geometry = new Geometry({
       attributes: {
         aPosition: { buffer: corners, format: 'float32x2', stride: 8, offset: 0 },
         aP0: inst(this.buffers[0], 0, 'float32x4'),
-        aM0: inst(this.buffers[0], 16, 'float32x2'),
+        aM0: inst(this.buffers[0], 16, 'float32x3'),
         aP1: inst(this.buffers[1], 0, 'float32x4'),
-        aM1: inst(this.buffers[1], 16, 'float32x2'),
+        aM1: inst(this.buffers[1], 16, 'float32x3'),
       },
       indexBuffer: new Uint32Array([0, 1, 2, 0, 2, 3]),
       instanceCount: 0,
@@ -195,7 +198,7 @@ export class VehicleLayer {
     const s = this.slot(id)
     if (!s) return null
     const { a, o } = s
-    const L = Math.abs(a[o + 5])
+    const L = a[o + 5]
     const prev = this.arrays[1 - this.cur]
     const po = o
     const prevOk = id < this.used[1 - this.cur] && prev[po + 5] !== 0 && Math.hypot(prev[po] - a[o], prev[po + 1] - a[o + 1]) < SNAP_DIST
@@ -224,7 +227,7 @@ export class VehicleLayer {
     let bd = r * r
     for (let id = 0; id < this.used[this.cur]; id++) {
       const o = id * STRIDE
-      const L = Math.abs(a[o + 5])
+      const L = a[o + 5]
       if (L === 0) continue
       // a frente desenhada fica entre a do quadro anterior e a do atual: descarta rápido o que está longe dos dois
       const px = id < np ? prev[o] : a[o]

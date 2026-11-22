@@ -17,7 +17,7 @@ export function VehicleCard() {
     <div className="veh-card">
       <div>
         <strong>
-          {t.kind === 1 ? 'Ônibus' : 'Carro'} #{t.id}
+          {t.kind === 1 ? 'Ônibus' : t.kind === 2 ? 'Moto' : 'Carro'} #{t.id}
         </strong>
         <span className="veh-actions">
           <label className="check inline">

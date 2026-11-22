@@ -11,6 +11,9 @@ export interface OdSource {
   zonas: { id: number; municipio: string; bairro: string | null; ring: [number, number][] }[]
   /** 24 listas planas [origem, destino, veíc./h, ...] por hora de partida */
   horas: number[][]
+  /** idem para motos (motocicleta + mototáxi); ausente em arquivos antigos */
+  horasMoto?: number[][]
+  modoMoto?: string
 }
 
 /** Matriz importada já remapeada para as zonas do simulador. Persistida junto da demanda. */
@@ -20,6 +23,8 @@ export interface OdImport {
   scale: number
   /** 24 listas planas [idOrigem, idDestino, veíc./h] (escala 1) */
   hourly: number[][]
+  /** matriz de motos no mesmo formato, somada aos carros; ausente = importação anterior às motos */
+  hourlyMoto?: number[][]
   /** zonas da pesquisa fora do mapa (incorporadas à zona de borda mais próxima, ou servidas pelos portais) */
   merged: number
   /** portais de entrada/saída na divisa do mapa (`gatewayImport.ts`); ausente = zonas de fora incorporadas */
@@ -117,7 +122,7 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
     color: ZONE_COLORS[n % ZONE_COLORS.length],
   }))
   const merged = src.zonas.length - keptIdx.length
-  const name = `Pesquisa OD ${src.ano} · carro dirigindo`
+  const name = `Pesquisa OD ${src.ano} · carro dirigindo${src.horasMoto?.length === 24 ? ' + motos' : ''}`
   const pack = (acc: Map<string, number>) => {
     const out: number[] = []
     for (const [k, v] of acc) {
@@ -145,7 +150,7 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
       }
       target.set(z.id, src.zonas[best[0]].id)
     })
-    const hourly = src.horas.map((flat) => {
+    const remap = (horas: number[][]) => horas.map((flat) => {
       const acc = new Map<string, number>()
       for (let i = 0; i < flat.length; i += 3) {
         const o = target.get(flat[i])
@@ -154,7 +159,9 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
       }
       return pack(acc)
     })
-    return { zones, imp: { name, scale: 1, hourly, merged } }
+    const hourly = remap(src.horas)
+    const hourlyMoto = src.horasMoto?.length === 24 ? remap(src.horasMoto) : undefined
+    return { zones, imp: { name, scale: 1, hourly, hourlyMoto, merged } }
   }
 
   const ext = src.zonas.map((z, i) => ({ i, poly: polys[i], municipio: z.municipio })).filter((z) => !keep[z.i])
@@ -163,7 +170,7 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
   const cents = src.zonas.map((_, i) => centroid(clipped.get(i) ?? polys[i]))
   const sp = gatewaySplitter(gates, (id) => cents[idx.get(id)!])
   let dropped = 0
-  const hourly = src.horas.map((flat) => {
+  const remap = (horas: number[][], count: boolean) => horas.map((flat) => {
     const acc = new Map<string, number>()
     for (let i = 0; i < flat.length; i += 3) {
       const [o, d, v] = [flat[i], flat[i + 1], flat[i + 2]]
@@ -176,18 +183,20 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
       else if (ko) for (const [g, f] of sp.outbound(o, d)) add(acc, o, g, v * f)
       else if (o !== d) {
         const split = sp.through(o, d)
-        if (split.length === 0) dropped += v
+        if (split.length === 0 && count) dropped += v
         for (const [pair, f] of split) {
           const [ga, gb] = sp.pairOf(pair)
           add(acc, ga, gb, v * f)
         }
-      } else dropped += v
+      } else if (count) dropped += v
     }
     return pack(acc)
   })
+  const hourly = remap(src.horas, true)
+  const hourlyMoto = src.horasMoto?.length === 24 ? remap(src.horasMoto, false) : undefined
   return {
     zones: [...zones, ...gatewayZones(gates)],
-    imp: { name, scale: 1, hourly, merged, gateways: gates, dropped: Math.round(dropped) },
+    imp: { name, scale: 1, hourly, hourlyMoto, merged, gateways: gates, dropped: Math.round(dropped) },
   }
 }
 
@@ -197,9 +206,9 @@ export function buildOdImport(src: OdSource, data: Pick<NetworkData, 'meta' | 'n
  */
 export function applyOdImport(imp: OdImport, zones: Zone[], hour: number, intrazone: boolean) {
   const s = imp.scale
-  const hourOf = (h: number) => {
+  const hourOf = (src: number[][], h: number) => {
     const m: Record<string, number> = {}
-    const flat = imp.hourly[h]
+    const flat = src[h]
     for (let i = 0; i < flat.length; i += 3) {
       if (!intrazone && flat[i] === flat[i + 1]) continue
       m[`${flat[i]}>${flat[i + 1]}`] = Math.round(flat[i + 2] * s * 100) / 100
@@ -227,7 +236,9 @@ export function applyOdImport(imp: OdImport, zones: Zone[], hour: number, intraz
       profileValues: t.map((v) => (max > 0 ? Math.round((v / max) * 1000) / 1000 : 0)),
     }
   })
-  const odHourly = Array.from({ length: 24 }, (_, h) => hourOf(h))
+  const odHourly = Array.from({ length: 24 }, (_, h) => hourOf(imp.hourly, h))
+  // motos: só células fixas por hora (somadas aos carros no núcleo), sem entrar na geração nem no perfil das zonas
+  const odHourlyMoto = imp.hourlyMoto?.length === 24 ? Array.from({ length: 24 }, (_, h) => hourOf(imp.hourlyMoto!, h)) : undefined
   // mesma interpolação linear entre horas que o núcleo usa no perfil e na matriz horária
   const hr = ((hour % 24) + 24) % 24
   const i = Math.floor(hr) % 24
@@ -236,5 +247,5 @@ export function applyOdImport(imp: OdImport, zones: Zone[], hour: number, intraz
   for (const [k, v] of Object.entries(odHourly[i])) odManual[k] = v * (1 - f)
   for (const [k, v] of Object.entries(odHourly[(i + 1) % 24])) odManual[k] = (odManual[k] ?? 0) + v * f
   for (const k in odManual) odManual[k] = Math.round(odManual[k] * 100) / 100
-  return { zones: nextZones, odManual, odHourly }
+  return { zones: nextZones, odManual, odHourly, odHourlyMoto }
 }

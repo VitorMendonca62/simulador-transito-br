@@ -70,10 +70,15 @@ pub struct SimParams {
     pub bus_lane_car_pct: f64,
     /// % de motoristas que param no ponto de ônibus (uma vez por viagem, no primeiro ponto da faixa)
     pub bus_stop_car_pct: f64,
+    /// % do fluxo gerado (modelo gravitacional ou `od_hourly`) que nasce como moto; não vale com `od_hourly_moto`
+    pub moto_share: f64,
+    /// Matriz de motos fixada por hora do dia (24 entradas, veíc./h por "idOrigem>idDestino"), somada aos carros
+    /// (importação da Pesquisa OD: motocicleta + mototáxi). Vazia = sem matriz de motos.
+    pub od_hourly_moto: Vec<std::collections::HashMap<String, f64>>,
 }
 impl Default for SimParams {
     fn default() -> Self {
-        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0 }
+        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0, moto_share: 0.0, od_hourly_moto: Vec::new() }
     }
 }
 
@@ -110,6 +115,18 @@ struct Drv {
     step: u32,
     stop_step: u32,
     stop_lane: u32,
+}
+
+/// Células da matriz horária `h` (24 entradas) na hora `hour`, interpoladas linearmente entre horas inteiras como o
+/// perfil das zonas (`demand::profile_at`).
+fn hourly_at(h: &[std::collections::HashMap<String, f64>], hour: f64) -> std::collections::HashMap<String, f64> {
+    let hr = hour.rem_euclid(24.0);
+    let (i, f) = (hr.floor() as usize % 24, hr - hr.floor());
+    let mut out: std::collections::HashMap<String, f64> = h[i].iter().map(|(k, v)| (k.clone(), v * (1.0 - f))).collect();
+    for (k, v) in &h[(i + 1) % 24] {
+        *out.entry(k.clone()).or_insert(0.0) += v * f;
+    }
+    out
 }
 
 /// Ruído determinístico em [-1, 1] por (motorista, faixa): a mesma faixa sempre "parece" igual ao mesmo motorista.
@@ -266,10 +283,18 @@ pub struct Stats {
     pub bus_dwell_s: f64,
     /// carros da parcela que pararam no ponto de ônibus
     pub cars_at_bus_stop: u64,
+    /// motos nascidas e concluídas (também contadas em `spawned`/`finished`)
+    pub moto_spawned: u64,
+    pub moto_finished: u64,
 }
 
 /// floats por veículo no quadro enviado à interface (ver `Sim::snapshot`)
-pub const SNAP_STRIDE: usize = 6;
+pub const SNAP_STRIDE: usize = 7;
+
+/// Tipo de veículo (`Sim::kind`, 7ª posição do snapshot).
+pub const KIND_CAR: u8 = 0;
+pub const KIND_BUS: u8 = 1;
+pub const KIND_MOTO: u8 = 2;
 
 fn lc_block_text(c: u8) -> &'static str {
     match c {
@@ -425,6 +450,12 @@ pub struct Sim {
     /// menor `next_spawn[i][j]` de cada zona de origem (linha sem nascimento devido é pulada)
     row_next: Vec<f64>,
     rng: Rng,
+    /// matriz de motos (`od_hourly_moto`): taxas, próximo nascimento e menor por origem, com PRNG próprio para que,
+    /// sem a matriz, a simulação seja exatamente a de antes
+    rate_m: Vec<Vec<f64>>,
+    next_spawn_m: Vec<Vec<f64>>,
+    row_next_m: Vec<f64>,
+    rng_moto: Rng,
     next_matrix_at: f64,
     sigs: Vec<SigRt>,
     end_state: Vec<u8>,
@@ -772,6 +803,10 @@ impl Sim {
             pend_gates: Vec::new(),
             row_next: vec![f64::INFINITY; nz],
             rng: Rng::new(init.params.seed),
+            rate_m: vec![vec![0.0; nz]; nz],
+            next_spawn_m: vec![vec![f64::INFINITY; nz]; nz],
+            row_next_m: vec![f64::INFINITY; nz],
+            rng_moto: Rng::new(init.params.seed ^ 0x4D07_0B1C_E5EE_D000),
             next_matrix_at: 0.0,
             sigs,
             end_state: vec![0; net.segs.len() * 2],
@@ -944,13 +979,46 @@ impl Sim {
         if h.len() != 24 {
             return self.params.od_manual.clone();
         }
-        let hr = hour.rem_euclid(24.0);
-        let (i, f) = (hr.floor() as usize % 24, hr - hr.floor());
-        let mut out: std::collections::HashMap<String, f64> = h[i].iter().map(|(k, v)| (k.clone(), v * (1.0 - f))).collect();
-        for (k, v) in &h[(i + 1) % 24] {
-            *out.entry(k.clone()).or_insert(0.0) += v * f;
+        hourly_at(h, hour)
+    }
+
+    /// Recalcula as taxas da matriz de motos (células fixas, sem modelo gravitacional).
+    fn refresh_moto(&mut self) {
+        if self.params.od_hourly_moto.len() != 24 {
+            return;
         }
-        out
+        let hour = (self.time / 3600.0).rem_euclid(24.0);
+        let cells = hourly_at(&self.params.od_hourly_moto, hour);
+        let nz = self.zone_ids.len();
+        let idx: std::collections::HashMap<i64, usize> = self.zone_ids.iter().enumerate().map(|(i, &z)| (z, i)).collect();
+        let mut m = vec![vec![0.0f64; nz]; nz];
+        for (k, v) in &cells {
+            let Some((a, b)) = k.split_once('>') else { continue };
+            let (Ok(a), Ok(b)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) else { continue };
+            let (Some(&i), Some(&j)) = (idx.get(&a), idx.get(&b)) else { continue };
+            if i == j && !self.params.intrazone {
+                continue;
+            }
+            m[i][j] += v.max(0.0);
+        }
+        for i in 0..nz {
+            for j in 0..nz {
+                let new_rate = if self.gates[i].is_empty() { 0.0 } else { m[i][j] / 3600.0 };
+                let old = self.rate_m[i][j];
+                self.rate_m[i][j] = new_rate;
+                if new_rate <= 0.0 {
+                    self.next_spawn_m[i][j] = f64::INFINITY;
+                } else if old <= 0.0 || !self.next_spawn_m[i][j].is_finite() {
+                    self.next_spawn_m[i][j] = self.time + self.rng_moto.exp(new_rate);
+                } else if (new_rate - old).abs() > 1e-12 {
+                    let remaining = (self.next_spawn_m[i][j] - self.time).max(0.0);
+                    self.next_spawn_m[i][j] = self.time + remaining * old / new_rate;
+                }
+            }
+        }
+        for i in 0..nz {
+            self.row_next_m[i] = self.next_spawn_m[i].iter().copied().fold(f64::INFINITY, f64::min);
+        }
     }
 
     /// Recalcula a matriz OD para a hora atual e as taxas de chegada.
@@ -987,6 +1055,7 @@ impl Sim {
         for i in 0..nz {
             self.row_next[i] = self.next_spawn[i].iter().copied().fold(f64::INFINITY, f64::min);
         }
+        self.refresh_moto();
     }
 
     // ------------------------------------------------------------------ rotas em tempo real
@@ -1089,6 +1158,11 @@ impl Sim {
             return 0.0;
         }
         self.to_zone.iter().zip(&self.tree_at).map(|(&k, &t)| k as f64 * (self.time - t)).sum::<f64>() / n as f64
+    }
+
+    /// Motos na rede agora.
+    pub fn motos_alive(&self) -> usize {
+        (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] == KIND_MOTO).count()
     }
 
     /// Diagnóstico das entradas por zona: espera média na fila de entrada, tempo médio até sair da faixa de nascimento,
@@ -1238,9 +1312,9 @@ impl Sim {
             let Some(t) = self.pick_target(dest as usize, lane as usize) else { return false };
             t
         };
-        let mut drv = Drv { tgt: tree as usize, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32, bus_ok: kind == 1, route, step: 0, stop_step: NONE, stop_lane: NONE };
+        let mut drv = Drv { tgt: tree as usize, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32, bus_ok: kind == KIND_BUS, route, step: 0, stop_step: NONE, stop_lane: NONE };
         // sorteios por parcela fora do PRNG da simulação: com 0 % o resto da simulação não muda
-        if kind == 0 && ((noise(drv.seed, 0xB05A) + 1.0) * 50.0) < self.params.bus_lane_car_pct as f32 {
+        if kind == KIND_CAR && ((noise(drv.seed, 0xB05A) + 1.0) * 50.0) < self.params.bus_lane_car_pct as f32 {
             drv.bus_ok = true;
         }
         if route != NONE {
@@ -1267,8 +1341,11 @@ impl Sim {
         if !drv.bus_ok && l.bus {
             return false;
         }
-        let (vlen, tgap, amax, bcomf, vfac) = if kind == 1 {
+        let (vlen, tgap, amax, bcomf, vfac) = if kind == KIND_BUS {
             (12.0, self.rng.range(1.4, 1.8), self.rng.range(0.9, 1.2), self.rng.range(1.8, 2.4), self.rng.range(0.8, 0.95))
+        } else if kind == KIND_MOTO {
+            // moto (estimativas): curta, arranca mais forte, segue mais perto e anda um pouco acima do limite
+            (self.rng.range(2.0, 2.3), self.rng.range(0.6, 1.0), self.rng.range(2.8, 3.8), self.rng.range(2.5, 3.5), self.rng.range(1.0, 1.2))
         } else {
             (self.rng.range(4.1, 4.9), self.rng.range(0.9, 1.5), self.rng.range(1.6, 2.6), self.rng.range(2.2, 3.4), self.rng.range(0.9, 1.15))
         };
@@ -1378,8 +1455,8 @@ impl Sim {
         self.stop_at[id] = f32::NAN;
         self.bacc[id] = [0.0; 3];
         self.in_bay[id] = 0;
-        self.bus_lane_ok[id] = drv.bus_ok && kind == 0;
-        self.stop_car[id] = if kind == 0 && ((noise(drv.seed, 0x570B) + 1.0) * 50.0) < self.params.bus_stop_car_pct as f32 { 1 } else { 0 };
+        self.bus_lane_ok[id] = drv.bus_ok && kind == KIND_CAR;
+        self.stop_car[id] = if kind == KIND_CAR && ((noise(drv.seed, 0x570B) + 1.0) * 50.0) < self.params.bus_stop_car_pct as f32 { 1 } else { 0 };
         self.origin[id] = origin;
         self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
         // sorteio fora do PRNG da simulação: com 0 % o resto da simulação não muda
@@ -1410,6 +1487,9 @@ impl Sim {
         self.n_alive += 1;
         if route == NONE {
             self.stats.spawned += 1;
+            if kind == KIND_MOTO {
+                self.stats.moto_spawned += 1;
+            }
         }
         self.last_spawn = id;
         self.choose_conn(id);
@@ -1491,7 +1571,7 @@ impl Sim {
                 (stop_step, stop_lane) = (st.step, st.lane);
             }
         }
-        Drv { tgt: self.tgt[i] as usize, app: self.app[i], seed: self.pseed[i], bus_ok: self.kind[i] == 1 || self.bus_lane_ok[i], route, step, stop_step, stop_lane }
+        Drv { tgt: self.tgt[i] as usize, app: self.app[i], seed: self.pseed[i], bus_ok: self.kind[i] == KIND_BUS || self.bus_lane_ok[i], route, step, stop_step, stop_lane }
     }
 
     fn dist(&self, tg: usize, l: usize, live: bool) -> f32 {
@@ -1814,7 +1894,9 @@ impl Sim {
 
     /// Faixa `l` curta demais para o veículo `i` parar inteiro nela (só a de um nó a outro do mesmo cruzamento).
     fn short_link(&self, l: usize, i: usize) -> bool {
-        self.lanes[l].len < self.vlen[i] + 1.0
+        // a moto usa o comprimento de um carro: o trecho do canteiro continua sendo parte do cruzamento para ela
+        let vlen = if self.kind[i] == KIND_MOTO { 4.5 } else { self.vlen[i] };
+        self.lanes[l].len < vlen + 1.0
     }
 
     /// `o` tem preferência sobre `me`?
@@ -2454,7 +2536,8 @@ impl Sim {
                 let mut interact = 0.0;
                 if let Some((gap, vl)) = lead {
                     let gap = gap.max(0.1);
-                    let s_star = 2.0 + (v * t + v * (v - vl) / (2.0 * (a_max * b).sqrt())).max(0.0);
+                    let s0 = if self.kind[i] == KIND_MOTO { 1.0 } else { 2.0 };
+            let s_star = s0 + (v * t + v * (v - vl) / (2.0 * (a_max * b).sqrt())).max(0.0);
                     interact = (s_star / gap).powi(2);
                 }
                 let mut a = (a_max * (free - interact)).clamp(-9.0, a_max);
@@ -2513,6 +2596,8 @@ impl Sim {
             }
             if self.route[i] != NONE {
                 self.metrics.bus_sample(nv, dt);
+            } else if self.kind[i] == KIND_MOTO {
+                self.metrics.moto_sample(nv, dt);
             }
             if self.route[i] != NONE || self.stop_car[i] == 1 {
                 self.stop_update(i, dt);
@@ -2637,7 +2722,7 @@ impl Sim {
         let discs = |i: usize| -> ([[f32; 2]; 4], f32) {
             let e = self.edge[i] as usize;
             let mut p = [[0.0f32; 2]; 4];
-            let r = if self.kind[i] == 1 { 1.2 } else { 0.85 };
+            let r = match self.kind[i] { KIND_BUS => 1.2, KIND_MOTO => 0.5, _ => 0.85 };
             let span = (self.vlen[i] - 2.0 * r).max(0.0);
             for k in 0..4 {
                 p[k] = self.path_pt(net, e, self.s[i] - r - span * k as f32 / 3.0);
@@ -2762,6 +2847,9 @@ impl Sim {
                         self.bus_finish(i);
                     } else {
                         self.stats.finished += 1;
+                        if self.kind[i] == KIND_MOTO {
+                            self.stats.moto_finished += 1;
+                        }
                         let travel = self.time - self.t_spawn[i] as f64;
                         self.stats.travel_sum += travel;
                         self.metrics.trip_done(self.origin[i] as usize, self.dest[i] as usize, travel, self.t_free[i] as f64);
@@ -3107,7 +3195,7 @@ impl Sim {
 
     /// A faixa `cl` é utilizável por este veículo (ônibus só para ônibus em faixa exclusiva)?
     fn compatible(&self, i: usize, cl: usize) -> bool {
-        !(self.lanes[cl].bus && self.kind[i] == 0 && !self.bus_lane_ok[i])
+        !(self.lanes[cl].bus && self.kind[i] != KIND_BUS && !self.bus_lane_ok[i])
     }
 
     fn try_change(&mut self, i: usize, to: usize, forced: bool) -> bool {
@@ -3178,6 +3266,54 @@ impl Sim {
 
     // ---- geração de viagens
 
+    /// Nascimentos devidos do par `i`→`j`: da matriz de carros (com ônibus e motos por `bus_share`/`moto_share`) ou,
+    /// com `moto`, da matriz de motos (PRNG próprio no relógio de chegada).
+    fn spawn_due(&mut self, i: usize, j: usize, moto: bool) {
+        loop {
+            let (due, rate) = if moto { (self.next_spawn_m[i][j], self.rate_m[i][j]) } else { (self.next_spawn[i][j], self.rate[i][j]) };
+            if due > self.time {
+                break;
+            }
+            if rate <= 0.0 || self.gates[i].is_empty() {
+                if moto { self.next_spawn_m[i][j] = f64::INFINITY } else { self.next_spawn[i][j] = f64::INFINITY }
+                break;
+            }
+            let gap = if moto { self.rng_moto.exp(rate) } else { 0.0 };
+            // só nasce onde existe caminho até o destino (sorteia algumas entradas)
+            let mut gate = self.pick_gate(i);
+            for _ in 0..6 {
+                if self.zone_reaches(j, gate as usize) && self.lanes[gate as usize].len >= 15.0 {
+                    break;
+                }
+                gate = self.pick_gate(i);
+            }
+            if !self.zone_reaches(j, gate as usize) || self.lanes[gate as usize].len < 15.0 {
+                self.stats.skipped += 1;
+                if moto { self.next_spawn_m[i][j] += gap } else { self.next_spawn[i][j] += self.rng.exp(rate) }
+                continue;
+            }
+            let kind = if moto {
+                KIND_MOTO
+            } else {
+                // com linhas carregadas, os ônibus vêm só delas; com a matriz de motos, as motos vêm só dela
+                let bus = if self.bus_plans.is_empty() { self.params.bus_share } else { 0.0 };
+                let mot = if self.params.od_hourly_moto.is_empty() { self.params.moto_share } else { 0.0 };
+                let u = self.rng.f() as f64;
+                if u < bus / 100.0 { KIND_BUS } else if u < (bus + mot) / 100.0 { KIND_MOTO } else { KIND_CAR }
+            };
+            if !self.spawn_vehicle(gate, i as u16, j as u16, kind, self.time as f32, NONE) {
+                if self.pending[gate as usize].len() < 200 {
+                    if self.pending[gate as usize].is_empty() {
+                        self.pend_gates.push(gate);
+                    }
+                    self.pending[gate as usize].push_back((i as u32, j as u16, kind, self.time as f32));
+                    self.stats.queued += 1;
+                }
+            }
+            if moto { self.next_spawn_m[i][j] += gap } else { self.next_spawn[i][j] += self.rng.exp(rate) }
+        }
+    }
+
     fn spawn(&mut self, net: &Net) {
         let _ = net;
         let nz = self.zone_ids.len();
@@ -3201,41 +3337,20 @@ impl Sim {
                 continue; // nenhum par desta origem tem nascimento devido
             }
             for j in 0..nz {
-                while self.next_spawn[i][j] <= self.time {
-                    let rate = self.rate[i][j];
-                    if rate <= 0.0 || self.gates[i].is_empty() {
-                        self.next_spawn[i][j] = f64::INFINITY;
-                        break;
-                    }
-                    // só nasce onde existe caminho até o destino (sorteia algumas entradas)
-                    let mut gate = self.pick_gate(i);
-                    for _ in 0..6 {
-                        if self.zone_reaches(j, gate as usize) && self.lanes[gate as usize].len >= 15.0 {
-                            break;
-                        }
-                        gate = self.pick_gate(i);
-                    }
-                    if !self.zone_reaches(j, gate as usize) || self.lanes[gate as usize].len < 15.0 {
-                        self.stats.skipped += 1;
-                        self.next_spawn[i][j] += self.rng.exp(rate);
-                        continue;
-                    }
-                    // com linhas carregadas, os ônibus vêm só delas
-                    let share = if self.bus_plans.is_empty() { self.params.bus_share } else { 0.0 };
-                    let kind = if (self.rng.f() as f64) < share / 100.0 { 1 } else { 0 };
-                    if !self.spawn_vehicle(gate, i as u16, j as u16, kind, self.time as f32, NONE) {
-                        if self.pending[gate as usize].len() < 200 {
-                            if self.pending[gate as usize].is_empty() {
-                                self.pend_gates.push(gate);
-                            }
-                            self.pending[gate as usize].push_back((i as u32, j as u16, kind, self.time as f32));
-                            self.stats.queued += 1;
-                        }
-                    }
-                    self.next_spawn[i][j] += self.rng.exp(rate);
-                }
+                self.spawn_due(i, j, false);
             }
             self.row_next[i] = self.next_spawn[i].iter().copied().fold(f64::INFINITY, f64::min);
+        }
+        if !self.params.od_hourly_moto.is_empty() {
+            for i in 0..nz {
+                if self.row_next_m[i] > self.time {
+                    continue;
+                }
+                for j in 0..nz {
+                    self.spawn_due(i, j, true);
+                }
+                self.row_next_m[i] = self.next_spawn_m[i].iter().copied().fold(f64::INFINITY, f64::min);
+            }
         }
         if !self.bus_plans.is_empty() {
             self.spawn_buses();
@@ -3293,7 +3408,7 @@ impl Sim {
     }
 
     /// Estado dos veículos indexado pelo slot (o id do veículo é a posição): 6 floats por slot,
-    /// [x, y, dx, dy, velocidade, comprimento] da frente do veículo, com comprimento negativo para ônibus.
+    /// [x, y, dx, dy, velocidade, comprimento, tipo] da frente do veículo (tipo: `KIND_CAR`, `KIND_BUS`, `KIND_MOTO`).
     /// Slot livre = tudo zero (comprimento 0).
     pub fn snapshot(&self, net: &Net, out: &mut Vec<f32>) {
         out.clear();
@@ -3303,8 +3418,7 @@ impl Sim {
                 continue;
             }
             let (x, y, dx, dy) = self.pose_dir(net, i);
-            let len = if self.kind[i] == 1 { -self.vlen[i] } else { self.vlen[i] };
-            out[i * SNAP_STRIDE..(i + 1) * SNAP_STRIDE].copy_from_slice(&[x, y, dx, dy, self.v[i], len]);
+            out[i * SNAP_STRIDE..(i + 1) * SNAP_STRIDE].copy_from_slice(&[x, y, dx, dy, self.v[i], self.vlen[i], self.kind[i] as f32]);
         }
     }
 
@@ -3656,7 +3770,7 @@ impl Sim {
         };
         json!({
             "id": i,
-            "kind": if self.kind[i] == 1 { "ônibus" } else { "carro" },
+            "kind": match self.kind[i] { KIND_BUS => "ônibus", KIND_MOTO => "moto", _ => "carro" },
             "bus": line,
             "origin": if bus { json!(null) } else { json!(self.zone_ids[self.origin[i] as usize]) },
             "dest": if bus { json!(null) } else { json!(self.zone_ids[self.dest[i] as usize]) },

@@ -2927,3 +2927,115 @@ fn sim_stop_info_lists_next_buses() {
     let s = n.sim.as_ref().unwrap().metrics.series_flat();
     assert!(s.chunks(6).any(|r| r[5] > 0.0), "velocidade dos ônibus na série");
 }
+
+// ------------------------------------------------------------------ motos (versão 2, fase 7)
+
+fn moto_hourly(cell: &str) -> String {
+    let h = vec![format!("{{{cell}}}"); 24].join(",");
+    format!(r#","odHourlyMoto":[{h}]"#)
+}
+
+fn sim_snap(json: &str, seconds: f64) -> (Vec<f32>, crate::sim::Stats) {
+    let mut n = sample();
+    n.start_sim(json).unwrap();
+    run(&mut n, seconds);
+    let mut v = Vec::new();
+    let s = n.sim.as_ref().unwrap();
+    s.snapshot(&n.net, &mut v);
+    (v, s.stats.clone())
+}
+
+/// Com 0 % de motos (ou matriz de motos vazia), a simulação é exatamente a de antes.
+#[test]
+fn moto_zero_is_identical() {
+    let base = sim_snap(SIM_ZONES, 400.0);
+    let with = |extra: &str| sim_snap(&SIM_ZONES.replace("\"beta\":0.02", &format!("\"beta\":0.02{extra}")), 400.0);
+    let zero = with(r#","motoShare":0"#);
+    let empty = with(&moto_hourly(""));
+    assert_eq!(base.0, zero.0);
+    assert_eq!(base.0, empty.0);
+    assert_eq!(base.1.spawned, empty.1.spawned);
+    assert_eq!(base.1.moto_spawned, 0);
+    // nenhum veículo do snapshot é moto
+    assert!(base.0.chunks(crate::sim::SNAP_STRIDE).all(|c| c[5] == 0.0 || c[6] != crate::sim::KIND_MOTO as f32));
+}
+
+/// Com motos: determinístico, conservação, sem sobreposição na faixa nem no cruzamento, e elas concluem viagens.
+#[test]
+fn motos_are_deterministic_conserved_and_never_overlap() {
+    let json = SIM_ZONES.replace("\"beta\":0.02", r#""beta":0.02,"motoShare":40"#);
+    let mut n = sample();
+    n.start_sim(&json).unwrap();
+    for _ in 0..(900.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        for list in s.edge_lists() {
+            for w in list.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+            }
+        }
+    }
+    let s = n.sim.as_ref().unwrap();
+    let st = s.stats.clone();
+    assert!(st.moto_spawned > 50 && st.moto_spawned < st.spawned, "parte do fluxo é moto: {st:?}");
+    assert!(st.moto_finished > 10, "motos concluem viagens: {st:?}");
+    assert_eq!(st.spawned, st.finished + st.lost + s.n_alive as u64, "conservação");
+    assert_eq!(st.junction_overlaps, 0);
+    assert_eq!(st.red_runs, 0);
+    let a = sim_snap(&json, 300.0);
+    let b = sim_snap(&json, 300.0);
+    assert_eq!(a.0, b.0, "mesma semente => mesmo resultado");
+    assert_ne!(a.0, sim_snap(SIM_ZONES, 300.0).0, "as motos mudam a simulação");
+}
+
+/// A matriz de motos gera motos na taxa da célula, somadas aos carros (aqui, sem carros).
+#[test]
+fn moto_od_matrix_spawns_motos() {
+    let mut n = build_network(avenue("").as_bytes()).unwrap();
+    avenue_sim(&mut n, 0.0, &moto_hourly(r#""1>2":600"#));
+    run(&mut n, 1200.0);
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert_eq!(st.spawned, st.moto_spawned, "só motos: {st:?}");
+    assert!((140..=260).contains(&st.moto_spawned), "~200 motos em 20 min a 600/h: {st:?}");
+    assert!(st.moto_finished > 100, "{st:?}");
+    // o `motoShare` não vale com a matriz de motos
+    let mut n = build_network(avenue("").as_bytes()).unwrap();
+    avenue_sim(&mut n, 600.0, &format!(r#","motoShare":100{}"#, moto_hourly("")));
+    run(&mut n, 600.0);
+    assert_eq!(n.sim.as_ref().unwrap().stats.moto_spawned, 0);
+}
+
+/// Nesta fase a moto não usa a faixa exclusiva de ônibus.
+#[test]
+fn moto_never_on_bus_lane() {
+    let tag = r#"<tag k="bus:lanes:forward" v="|designated"/>"#;
+    let mut n = build_network(avenue(tag).as_bytes()).unwrap();
+    avenue_sim(&mut n, 900.0, r#","motoShare":100"#);
+    let mut on_bus = (0, 0);
+    for _ in 0..(10.0 * 60.0 / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let (c, l) = n.sim.as_ref().unwrap().cars_on_bus_edges();
+        on_bus = (on_bus.0 + c, on_bus.1 + l);
+    }
+    let st = n.sim.as_ref().unwrap().stats.clone();
+    assert!(st.moto_finished > 30, "{st:?}");
+    assert_eq!(on_bus, (0, 0));
+}
+
+/// O snapshot leva o tipo explícito e o comprimento positivo.
+#[test]
+fn snapshot_kind_field() {
+    let mut n = build_network(avenue("").as_bytes()).unwrap();
+    avenue_sim(&mut n, 900.0, r#","motoShare":100"#);
+    run(&mut n, 120.0);
+    let mut v = Vec::new();
+    n.sim.as_ref().unwrap().snapshot(&n.net, &mut v);
+    let live: Vec<&[f32]> = v.chunks(crate::sim::SNAP_STRIDE).filter(|c| c[5] > 0.0).collect();
+    assert!(!live.is_empty());
+    for c in live {
+        assert_eq!(c[6], crate::sim::KIND_MOTO as f32);
+        assert!((2.0..=2.3).contains(&c[5]), "comprimento da moto: {}", c[5]);
+    }
+}

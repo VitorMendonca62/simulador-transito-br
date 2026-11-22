@@ -7,6 +7,9 @@ pub const BUCKET_S: f64 = 60.0;
 const HIST_MAX: usize = 360;
 pub const NO_DATA: u8 = 255;
 
+/// colunas da série por balde (ver `Metrics::series`)
+pub const SERIES_COLS: usize = 7;
+
 pub struct Metrics {
     nd: usize,
     nz: usize,
@@ -42,14 +45,18 @@ pub struct Metrics {
     pub trips: u64,
     pub travel_sum: f64,
     pub delay_sum: f64,
-    // série global (uma linha por balde): t, vivos, concluídos no balde, vel. média (km/h), fila de entrada, parados (fração)
-    pub series: Vec<[f32; 6]>,
+    // série global (uma linha por balde): t, vivos, concluídos no balde, vel. média (km/h), fila de entrada,
+    // vel. dos ônibus de linha (km/h), vel. das motos (km/h)
+    pub series: Vec<[f32; SERIES_COLS]>,
     bucket_finished: u32,
     // acumuladores globais de velocidade (ponderados por tempo de veículo)
     veh_time: f64,
     /// ônibus de linha no balde: tempo e velocidade × tempo (6ª coluna da série)
     bus_time: f64,
     bus_speed_time: f64,
+    /// motos no balde: tempo e velocidade × tempo (7ª coluna da série)
+    moto_time: f64,
+    moto_speed_time: f64,
     veh_speed_time: f64,
     run_veh_time: f64,
     run_speed_time: f64,
@@ -91,6 +98,8 @@ impl Metrics {
             veh_time: 0.0,
             bus_time: 0.0,
             bus_speed_time: 0.0,
+            moto_time: 0.0,
+            moto_speed_time: 0.0,
             veh_speed_time: 0.0,
             run_veh_time: 0.0,
             run_speed_time: 0.0,
@@ -201,9 +210,12 @@ impl Metrics {
             self.hist_speed.push(row);
             let mean_kmh = if self.veh_time > 0.0 { (self.veh_speed_time / self.veh_time * 3.6) as f32 } else { 0.0 };
             let bus_kmh = if self.bus_time > 0.0 { (self.bus_speed_time / self.bus_time * 3.6) as f32 } else { 0.0 };
-            self.series.push([now as f32, alive as f32, self.bucket_finished as f32, mean_kmh, queued as f32, bus_kmh]);
+            let moto_kmh = if self.moto_time > 0.0 { (self.moto_speed_time / self.moto_time * 3.6) as f32 } else { 0.0 };
+            self.series.push([now as f32, alive as f32, self.bucket_finished as f32, mean_kmh, queued as f32, bus_kmh, moto_kmh]);
             self.bus_time = 0.0;
             self.bus_speed_time = 0.0;
+            self.moto_time = 0.0;
+            self.moto_speed_time = 0.0;
             self.bucket_finished = 0;
             self.veh_time = 0.0;
             self.veh_speed_time = 0.0;
@@ -254,6 +266,12 @@ impl Metrics {
     pub fn bus_sample(&mut self, v: f32, dt: f32) {
         self.bus_time += dt as f64;
         self.bus_speed_time += (v * dt) as f64;
+    }
+
+    /// Moto a `v` m/s durante `dt`.
+    pub fn moto_sample(&mut self, v: f32, dt: f32) {
+        self.moto_time += dt as f64;
+        self.moto_speed_time += (v * dt) as f64;
     }
 
     pub fn series_flat(&self) -> Vec<f32> {

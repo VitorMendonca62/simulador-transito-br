@@ -109,7 +109,14 @@ function OdImportBox() {
             {zones.length} zonas no mapa, {odImport.merged} de fora entram pela borda mais próxima.
           </>
         )}{' '}
-        A matriz da hora escolhida fica fixada e acompanha o relógio da simulação.
+        A matriz da hora escolhida fica fixada e acompanha o relógio da simulação.{' '}
+        {odImport.motoPerHour != null ? (
+          <>
+            Motos (motocicleta + mototáxi, 1 viagem = 1 moto) somadas aos carros: <b>{odImport.motoPerHour.toLocaleString('pt-BR')}/h</b> nesta hora, na escala 1.
+          </>
+        ) : (
+          <>Esta importação não tem a matriz de motos: reimporte a OD para incluí-las.</>
+        )}
       </p>
       <label className="field col">
         <span>
@@ -313,6 +320,7 @@ export function DemandParamsPanel() {
     useShallow((s) => ({ zones: s.zones, demandParams: s.demandParams, setDemandParams: s.setDemandParams, demand: s.demand, transitSource: s.transitSource })),
   )
   const lines = transitSource !== 'none' && (demandParams.busLines ?? true)
+  const odMotos = useStore((s) => s.odImport?.motoPerHour != null)
   const num = (k: keyof DemandParams, lo: number, hi: number) => (e: ChangeEvent<HTMLInputElement>) => setDemandParams({ [k]: Math.min(hi, Math.max(lo, Number(e.target.value))) })
   const total = demand ? demand.zones.reduce((a, z) => a + z.genNow, 0) : 0
   const typical = (Object.keys(TYPICAL_PARAMS) as (keyof typeof TYPICAL_PARAMS)[]).every((k) => demandParams[k] === TYPICAL_PARAMS[k])
@@ -359,6 +367,10 @@ export function DemandParamsPanel() {
           <input className="num" type="number" min={0} max={50} step={1} value={demandParams.busShare} onChange={(e) => setDemandParams({ busShare: Math.min(50, Math.max(0, Number(e.target.value))) })} />
         </label>
       )}
+      <label className="field" title={odMotos ? 'Com a matriz de motos da Pesquisa OD, as motos vêm dela e este campo não vale.' : 'Parcela do fluxo gerado entre as zonas que nasce como moto (estimativa para o Recife: ~25 % da frota).'}>
+        <span>Motos no fluxo (%)</span>
+        <input className="num" type="number" min={0} max={80} step={1} disabled={odMotos} value={demandParams.motoShare ?? 0} onChange={(e) => setDemandParams({ motoShare: Math.min(80, Math.max(0, Number(e.target.value))) })} />
+      </label>
       {lines && (
         <>
           <label className="field" title="Tempo parado no ponto: o mínimo (abrir e fechar as portas) mais 2,5 s por passageiro embarcando, até o máximo.">

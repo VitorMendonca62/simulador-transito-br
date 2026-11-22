@@ -91,7 +91,8 @@ interface State {
   demandParams: DemandParams
   odManual: Record<string, number>
   /** matriz da Pesquisa OD importada (resumo para a interface) */
-  odImport: { name: string; scale: number; merged: number; gateways: number; dropped: number } | null
+  /** `motoPerHour`: motos/h da matriz de motos na hora (null = importação sem motos; reimportar para incluí-las) */
+  odImport: { name: string; scale: number; merged: number; gateways: number; dropped: number; motoPerHour: number | null } | null
   odImporting: boolean
   /** origem dos semáforos: base oficial da CTTU (Recife) ou tags do OSM */
   signalSource: SignalSource
@@ -255,6 +256,8 @@ let transitRecord: TransitRecord = emptyTransit()
 let transitSave = 0
 /** matriz fixada por hora enviada à simulação (só com importação ativa) */
 let odHourly: Record<string, number>[] | undefined
+/** idem para as motos (importação com a matriz de motos) */
+let odHourlyMoto: Record<string, number>[] | undefined
 let demandTimer = 0
 let demandSave = 0
 const nextRoadId = () => roadRecord.reduce((m, r) => Math.max(m, r.id), 900_000_000_000_000) + 1
@@ -316,16 +319,27 @@ export const useStore = create<State>((set, get) => {
   /** Reaplica a matriz importada para a hora, a escala e a opção intrazona atuais. */
   const syncOdImport = () => {
     odHourly = undefined
+    odHourlyMoto = undefined
     if (!odImportRecord) return
     const r = applyOdImport(odImportRecord, zoneRecord, paramsRecord.hour, paramsRecord.intrazone)
     zoneRecord = r.zones
     odRecord = r.odManual
     odHourly = r.odHourly
+    odHourlyMoto = r.odHourlyMoto
+  }
+  /** Motos/h da matriz de motos na hora atual (interpolada como no núcleo); null sem a matriz. */
+  const motoPerHour = () => {
+    if (!odHourlyMoto) return null
+    const hr = ((paramsRecord.hour % 24) + 24) % 24
+    const i = Math.floor(hr) % 24
+    const f = hr - Math.floor(hr)
+    const sum = (m: Record<string, number>) => Object.values(m).reduce((a, v) => a + v, 0)
+    return Math.round(sum(odHourlyMoto[i]) * (1 - f) + sum(odHourlyMoto[(i + 1) % 24]) * f)
   }
   /** Recalcula a matriz OD no núcleo (debounce) e sincroniza zonas com o mapa. */
   const refreshDemand = () => {
     const imp = odImportRecord
-      ? { name: odImportRecord.name, scale: odImportRecord.scale, merged: odImportRecord.merged, gateways: odImportRecord.gateways?.length ?? 0, dropped: odImportRecord.dropped ?? 0 }
+      ? { name: odImportRecord.name, scale: odImportRecord.scale, merged: odImportRecord.merged, gateways: odImportRecord.gateways?.length ?? 0, dropped: odImportRecord.dropped ?? 0, motoPerHour: motoPerHour() }
       : null
     set({ zones: [...zoneRecord], demandParams: { ...paramsRecord }, odManual: { ...odRecord }, odImport: imp })
     viewRef.current?.setZones(zoneRecord, get().selectedZone)
@@ -444,6 +458,7 @@ export const useStore = create<State>((set, get) => {
         odRecord = {}
         odImportRecord = null
         odHourly = undefined
+        odHourlyMoto = undefined
         sigSourceRecord = signals
         trSourceRecord = lines
         transitRecord = emptyTransit()
@@ -621,6 +636,8 @@ export const useStore = create<State>((set, get) => {
             intrazone: paramsRecord.intrazone,
             odManual: odRecord,
             odHourly,
+            motoShare: paramsRecord.motoShare ?? 0,
+            odHourlyMoto: odHourlyMoto ?? [],
             busLines: paramsRecord.busLines ?? true,
             busDwellMin: paramsRecord.busDwellMin ?? 8,
             busDwellMax: paramsRecord.busDwellMax ?? 90,

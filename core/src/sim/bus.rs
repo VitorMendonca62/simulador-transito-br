@@ -241,7 +241,7 @@ impl Sim {
         while k < self.bus_queue.len() {
             let (p, t_req, h) = self.bus_queue[k];
             let lane = self.bus_plans[p as usize].lo[0];
-            if self.spawn_vehicle(lane, 0, u16::MAX, 1, t_req, p) {
+            if self.spawn_vehicle(lane, 0, u16::MAX, KIND_BUS, t_req, p) {
                 let id = self.last_spawn;
                 self.bacc[id] = [0.0, 0.0, h];
                 // faixa inicial curta: o ônibus já nasce sobre o primeiro ponto (o terminal) e embarca ali
@@ -666,7 +666,7 @@ impl Sim {
     /// Diagnóstico para testes: carros (não ônibus de linha) agora numa conversão só de ônibus e numa faixa de ônibus.
     pub fn cars_on_bus_edges(&self) -> (usize, usize) {
         let (mut conn, mut lane) = (0, 0);
-        for i in (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] == 0) {
+        for i in (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] != super::KIND_BUS) {
             let e = self.edge[i] as usize;
             if e >= self.nl && self.conns[e - self.nl].bus_only {
                 conn += 1;

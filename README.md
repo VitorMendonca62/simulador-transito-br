@@ -58,8 +58,8 @@ Para outra cidade, exporte uma área em [openstreetmap.org/export](https://www.o
 
 **Demanda e simulação**
 - **Zonas de demanda**: desenhe zonas de geração e atração. A matriz origem-destino sai de um modelo gravitacional com perfis horários, e qualquer célula pode ser fixada à mão.
-- **Simulação microscópica** de carros e ônibus: modelo de seguimento IDM, troca de faixa planejada pela rota, amarelo e esquerda permissiva no semáforo, preferência por aceitação de brecha, rotatórias e a regra da direita do CTB.
-- **Comportamento ajustável**: % de ônibus, motoristas com app de navegação desviando em tempo real (estilo Waze), quem ignora a sinalização e quem "fecha o cruzamento" (CTB art. 45). Já vem com valores típicos do Recife.
+- **Simulação microscópica** de carros, motos e ônibus: modelo de seguimento IDM, troca de faixa planejada pela rota, amarelo e esquerda permissiva no semáforo, preferência por aceitação de brecha, rotatórias e a regra da direita do CTB.
+- **Comportamento ajustável**: % de ônibus e de motos, motoristas com app de navegação desviando em tempo real (estilo Waze), quem ignora a sinalização e quem "fecha o cruzamento" (CTB art. 45). Já vem com valores típicos do Recife.
 - **Determinística por semente**: o mesmo cenário dá sempre o mesmo resultado.
 
 **Análise**
@@ -130,7 +130,7 @@ Ao importar, o simulador mantém as zonas que têm vias no mapa. As cidades vizi
 
 Antes de usar, considere três premissas:
 
-- **Só trabalho e educação:** compras, saúde, motos, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do real.
+- **Só trabalho e educação:** compras, saúde, táxi, aplicativo e carga ficam de fora, então o volume fica abaixo do real. As motos (motocicleta + mototáxi) entram por uma matriz própria, com a hipótese de 1 viagem = 1 moto; a versão no repositório distribui as horas de forma aproximada (ver `data/od_recife/metadados_e_limitacoes.md`).
 - **Pessoas, não veículos:** os números são pessoas expandidas da amostra. Na categoria "carro dirigindo", um condutor equivale a um veículo.
 - **Dados de 2018:** a pesquisa de 2021 não publicou matriz nem microdados.
 
@@ -207,7 +207,7 @@ Contribuições são bem-vindas: abra uma issue para discutir a mudança antes d
 
 ## Limitações
 
-- **Tipos de veículo:** só carros e ônibus; sem motos, caminhões nem pedestres. A fase de pedestres do semáforo apenas para os carros.
+- **Tipos de veículo:** carros, motos e ônibus; sem caminhões nem pedestres. As motos andam na fila como um veículo curto, ainda sem corredor entre as faixas. A fase de pedestres do semáforo apenas para os carros.
 - **Ônibus:** ainda não há linhas com paradas.
 - **Origem e destino dentro da zona:** são sorteados (faixa pelo comprimento, nó de destino ao acaso), sem dados de onde as pessoas moram ou trabalham.
 - **Semáforos:** os tempos são de tempo fixo e estimados, sem detecção nem plano real. Os ajustes manuais da CTTU usam ids de nós do OSM de 2026; num OSM muito diferente, volta o encaixe automático.
