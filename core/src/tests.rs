@@ -3189,3 +3189,69 @@ fn corridor_measure() {
     }
 }
 
+
+// ---- motos por parcela (versão 2, fase 9)
+
+const MOTO_PARCELS_ZERO: &str = r#","motoRedPct":0,"motoBusLanePct":0,"motoContraPct":0,"motoCorrFastPct":0"#;
+const MOTO_PARCELS_ALL: &str = r#","motoRedPct":100,"motoBusLanePct":100,"motoContraPct":100,"motoCorrFastPct":100"#;
+
+/// Parcelas em 0 (explícitas ou omitidas), ou ligadas sem motos: a simulação é exatamente a de antes.
+#[test]
+fn moto_parcels_zero_is_identical() {
+    let with = |extra: &str| sim_snap(&SIM_ZONES.replace("\"beta\":0.02", &format!("\"beta\":0.02{extra}")), 400.0).0;
+    assert_eq!(with(r#","motoShare":30"#), with(&format!(r#","motoShare":30{MOTO_PARCELS_ZERO}"#)));
+    assert_eq!(with(""), with(MOTO_PARCELS_ALL), "sem motos, as parcelas não mudam nada");
+    assert_ne!(with(r#","motoShare":30"#), with(&format!(r#","motoShare":30{MOTO_PARCELS_ALL}"#)), "com motos, mudam");
+}
+
+/// A parcela usa a faixa exclusiva de ônibus; sem ela, nenhuma moto entra nela.
+#[test]
+fn moto_bus_lane_share() {
+    let tag = r#"<tag k="bus:lanes:forward" v="|designated"/>"#;
+    let on_bus = |extra: &str| {
+        let mut n = build_network(avenue(tag).as_bytes()).unwrap();
+        avenue_sim(&mut n, 900.0, &format!(r#","motoShare":100{extra}"#));
+        let mut c = 0;
+        for _ in 0..(10.0 * 60.0 / 0.2) as u32 {
+            n.sim.as_mut().unwrap().step(&n.net);
+            c += n.sim.as_ref().unwrap().cars_on_bus_edges().1;
+        }
+        let s = n.sim.as_ref().unwrap();
+        assert_eq!(s.stats.spawned, s.stats.finished + s.stats.lost + s.n_alive as u64, "conservação");
+        c
+    };
+    assert_eq!(on_bus(r#","motoBusLanePct":0"#), 0);
+    assert!(on_bus(r#","motoBusLanePct":100"#) > 0, "motos da parcela andam na faixa de ônibus");
+}
+
+/// Corredor rápido: com o trânsito acima do limite da fase 8 (sem semáforo, 2 faixas lentas), só a parcela entra no
+/// corredor, sem sobrepor ninguém.
+#[test]
+fn corridor_fast_enters_above_limit() {
+    let entries = |extra: &str| {
+        let (n, _) = corridor_run(3, 3000.0, &format!(r#","motoShare":30{extra}"#), 900.0);
+        let st = n.sim.as_ref().unwrap().stats.clone();
+        assert_eq!(st.junction_overlaps, 0, "{st:?}");
+        st.corridor_entries
+    };
+    let (base, fast) = (entries(""), entries(r#","motoCorrFastPct":100"#));
+    eprintln!("entradas no corredor: base {base}, rápido {fast}");
+    assert!(fast > base, "a parcela entra no corredor com o trânsito andando: {fast} vs {base}");
+}
+
+/// Avanço do vermelho: com o cruzamento livre (sem trânsito na transversal), as motos da parcela passam no vermelho
+/// depois de parar; não contam como furo, e sem a parcela ninguém passa.
+#[test]
+fn moto_red_runner_only_when_clear() {
+    let run_red = |extra: &str| {
+        let (n, _) = corridor_run(3, 2400.0, &format!(r#","motoShare":30{extra}"#), 900.0);
+        n.sim.as_ref().unwrap().stats.clone()
+    };
+    let off = run_red("");
+    assert_eq!(off.moto_red_go, 0);
+    let on = run_red(r#","motoRedPct":100"#);
+    eprintln!("avanços do vermelho: {}", on.moto_red_go);
+    assert!(on.moto_red_go > 5, "motos avançam o vermelho com o cruzamento livre: {on:?}");
+    assert_eq!(on.red_runs, 0, "{on:?}");
+    assert_eq!(on.junction_overlaps, 0, "{on:?}");
+}

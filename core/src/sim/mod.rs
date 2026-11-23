@@ -78,10 +78,18 @@ pub struct SimParams {
     pub od_hourly_moto: Vec<std::collections::HashMap<String, f64>>,
     /// motos andam no corredor entre duas faixas do mesmo sentido quando o trânsito está lento (fase 8)
     pub moto_corridor: bool,
+    /// % dos motociclistas que avançam o vermelho com o cruzamento livre (parados na linha, com brecha folgada)
+    pub moto_red_pct: f64,
+    /// % dos motociclistas que usam a faixa exclusiva de ônibus
+    pub moto_bus_lane_pct: f64,
+    /// % dos motociclistas que andam na contramão em trechos curtos de mão única para cortar caminho
+    pub moto_contra_pct: f64,
+    /// % dos motociclistas que usam o corredor também com o trânsito andando (limites acima dos da fase 8)
+    pub moto_corr_fast_pct: f64,
 }
 impl Default for SimParams {
     fn default() -> Self {
-        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0, moto_share: 0.0, od_hourly_moto: Vec::new(), moto_corridor: true }
+        SimParams { seed: 1, hour: 8.0, bus_share: 2.0, beta: 0.08, intrazone: false, illegal_pct: 0.0, od_manual: Default::default(), od_hourly: Vec::new(), reroute: true, app_pct: 60.0, perception: 0.3, box_block_pct: 0.0, bus_lines: true, bus_dwell_min: 8.0, bus_dwell_max: 90.0, bus_pax_peak: 6.0, bus_jitter: 60.0, bus_lane_car_pct: 0.0, bus_stop_car_pct: 0.0, moto_share: 0.0, od_hourly_moto: Vec::new(), moto_corridor: true, moto_red_pct: 0.0, moto_bus_lane_pct: 0.0, moto_contra_pct: 0.0, moto_corr_fast_pct: 0.0 }
     }
 }
 
@@ -294,6 +302,11 @@ pub struct Stats {
     pub corridor_s: f64,
     /// soma dos tempos de viagem das motos concluídas (s)
     pub moto_travel_sum: f64,
+    /// motos da parcela que avançaram o vermelho com o cruzamento livre (não contam em `red_runs`)
+    pub moto_red_go: u64,
+    /// entradas de motos na contramão e moto-segundos andando nela
+    pub contra_entries: u64,
+    pub contra_s: f64,
 }
 
 /// floats por veículo no quadro enviado à interface (ver `Sim::snapshot`)
@@ -303,6 +316,16 @@ pub const SNAP_STRIDE: usize = 7;
 pub const KIND_CAR: u8 = 0;
 pub const KIND_BUS: u8 = 1;
 pub const KIND_MOTO: u8 = 2;
+/// comportamentos por parcela dos motociclistas (fase 9), bits de `moto_beh`
+pub const MB_RED: u8 = 1;
+pub const MB_BUS: u8 = 2;
+pub const MB_CONTRA: u8 = 4;
+pub const MB_FAST: u8 = 8;
+/// estado: a moto da parcela `MB_RED` decidiu avançar o vermelho nesta faixa (limpo ao entrar na conversão)
+const MB_REDGO: u8 = 16;
+/// parada na linha há tanto tempo (s) antes de avançar o vermelho, e brecha exigida (s) a quem tem o verde
+const MOTO_RED_WAIT: f32 = 2.0;
+const MOTO_RED_GAP: f32 = 4.0;
 
 fn lc_block_text(c: u8) -> &'static str {
     match c {
@@ -365,6 +388,10 @@ const LC_BLINK: f32 = 1.0;
 const CORR_VMAX: f32 = 5.6;
 const CORR_VOUT: f32 = 11.0;
 const CORR_DV: f32 = 4.2;
+/// limites da parcela "corredor rápido" (fase 9): entra abaixo de 40 km/h, sai acima de 60 km/h, até +25 km/h
+const CORR_VMAX_FAST: f32 = 11.1;
+const CORR_VOUT_FAST: f32 = 16.7;
+const CORR_DV_FAST: f32 = 6.9;
 /// distância mínima (m) entre os centros de duas faixas para haver corredor
 const CORR_MIN_W: f32 = 2.8;
 /// até onde (m) se olha à frente o fluxo das faixas ao lado e quem invade o corredor
@@ -452,6 +479,8 @@ pub struct Sim {
     rule_breaker: Vec<bool>,
     /// motorista que "fecha o cruzamento" (ver `SimParams::box_block_pct`)
     box_blocker: Vec<bool>,
+    /// comportamentos por parcela da moto (`MB_*`); 0 para carros e ônibus
+    moto_beh: Vec<u8>,
     /// parado neste passo por um ponto de conflito ocupado (para `Stats::box_wait_s`)
     held_box: Vec<bool>,
     /// primeiro da faixa retido na linha por um nó logo adiante (`ahead_stop_at`), mesmo com `enter_ok`
@@ -824,6 +853,7 @@ impl Sim {
             lane_w,
             rule_breaker: Vec::new(),
             box_blocker: Vec::new(),
+            moto_beh: Vec::new(),
             held_box: Vec::new(),
             ahead_held: Vec::new(),
             overlap_prev: Default::default(),
@@ -1375,6 +1405,18 @@ impl Sim {
 
     // ------------------------------------------------------------------ veículos
 
+    /// Sorteio das parcelas de comportamento da moto (fase 9), fora do PRNG: com 0 % nada muda.
+    fn moto_parcels(&self, seed: u32) -> u8 {
+        let p = &self.params;
+        let mut b = 0;
+        for (bit, key, pct) in [(MB_RED, 0x3ED0, p.moto_red_pct), (MB_BUS, 0xB05B, p.moto_bus_lane_pct), (MB_CONTRA, 0xC047, p.moto_contra_pct), (MB_FAST, 0xFA57, p.moto_corr_fast_pct)] {
+            if pct > 0.0 && ((noise(seed, key) + 1.0) * 50.0) < pct as f32 {
+                b |= bit;
+            }
+        }
+        b
+    }
+
     /// Nasce um veículo na faixa `lane` (ou numa vizinha do mesmo trecho). Ônibus de linha: `route` = plano, `dest`
     /// = `u16::MAX` (sem zona de destino).
     fn spawn_vehicle(&mut self, lane: u32, origin: u16, dest: u16, kind: u8, t_req: f32, route: u32) -> bool {
@@ -1387,6 +1429,10 @@ impl Sim {
         let mut drv = Drv { tgt: tree as usize, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32, bus_ok: kind == KIND_BUS, route, step: 0, stop_step: NONE, stop_lane: NONE };
         // sorteios por parcela fora do PRNG da simulação: com 0 % o resto da simulação não muda
         if kind == KIND_CAR && ((noise(drv.seed, 0xB05A) + 1.0) * 50.0) < self.params.bus_lane_car_pct as f32 {
+            drv.bus_ok = true;
+        }
+        let mbeh = if kind == KIND_MOTO { self.moto_parcels(drv.seed) } else { 0 };
+        if mbeh & MB_BUS != 0 {
             drv.bus_ok = true;
         }
         if route != NONE {
@@ -1484,6 +1530,7 @@ impl Sim {
                 self.origin.push(0);
                 self.rule_breaker.push(false);
                 self.box_blocker.push(false);
+                self.moto_beh.push(0);
                 self.held_box.push(false);
                 self.ahead_held.push(false);
                 self.app.push(false);
@@ -1530,7 +1577,8 @@ impl Sim {
         self.bacc[id] = [0.0; 3];
         self.in_bay[id] = 0;
         self.corr[id] = NONE;
-        self.bus_lane_ok[id] = drv.bus_ok && kind == KIND_CAR;
+        self.bus_lane_ok[id] = drv.bus_ok && kind != KIND_BUS;
+        self.moto_beh[id] = mbeh;
         self.stop_car[id] = if kind == KIND_CAR && ((noise(drv.seed, 0x570B) + 1.0) * 50.0) < self.params.bus_stop_car_pct as f32 { 1 } else { 0 };
         self.origin[id] = origin;
         self.rule_breaker[id] = (self.rng.f() as f64) < self.params.illegal_pct / 100.0;
@@ -2065,7 +2113,11 @@ impl Sim {
         let signaled = st != 0;
         // quem decidiu seguir no amarelo (sem distância para parar) mantém a decisão no começo do vermelho (vermelho geral)
         let committed = st == 1 && self.amber_go[id] == lane_id as u32 + 1 && self.red_age[end] + d_end.max(0.0) / v.max(1.0) < AMBER_COMMIT;
-        if st == 1 && !committed {
+        // parcela de motos que avança o vermelho (fase 9): parada na linha há `MOTO_RED_WAIT` s, avalia o nó como se
+        // não tivesse preferência sobre ninguém, com brecha folgada; depois de arrancar mantém a decisão (`MB_REDGO`)
+        let red_go = st == 1 && !committed && !clearing && self.moto_beh[id] & MB_RED != 0 && lane_id == self.edge[id] as usize
+            && (self.moto_beh[id] & MB_REDGO != 0 || (d_end < 5.0 && v < 0.5 && self.wait[id] >= MOTO_RED_WAIT));
+        if st == 1 && !committed && !red_go {
             { REASON.with(|r| r.set(2)); return false; }
         }
         if st == 2 {
@@ -2179,19 +2231,19 @@ impl Sim {
                 }
             }
         }
-        let t_gap = if relaxed { 1.0 } else { 2.2 };
+        let t_gap = if red_go { MOTO_RED_GAP } else if relaxed { 1.0 } else { 2.2 };
         let v_me = v.max(2.0);
         // tempo para percorrer `dist` partindo da velocidade atual e acelerando (parado, não se cruza a 2 m/s constantes)
         let a_me = (self.amax[id] * 0.6).max(0.5);
         let t_reach = |dist: f32| (-v + (v * v + 2.0 * a_me * dist.max(0.0)).sqrt()) / a_me;
         // paciência: quem espera muito só cede a quem realmente chega logo
-        let patient = self.wait[id] > 30.0;
+        let patient = self.wait[id] > 30.0 && !red_go;
         for &cf in conflicts.iter() {
             let oi = cf.other as usize - self.nl;
             let (me, o) = (&self.conns[me_idx], &self.conns[oi]);
             // fusão sem placa nem semáforo e de mesma hierarquia: zíper (quem chega primeiro entra), sem prioridade fixa à direita
             let zip = cf.merge && !signaled && me.rank == o.rank;
-            if !clearing && (zip || !self.has_priority(me, o, signaled)) {
+            if !clearing && !red_go && (zip || !self.has_priority(me, o, signaled)) {
                 // fusão sem semáforo em que eu tenho a preferência: não paro na linha por quem vem da via secundária
                 // (ele é que cede); quem já está na conversão dele e chega antes ao ponto vira meu líder (`merge_ghost`)
                 if cf.merge && !signaled && !zip {
@@ -2251,7 +2303,7 @@ impl Sim {
             // verdade pela conversão e só precisa que, quando chegar ao ponto, o seguidor da preferencial esteja longe o
             // bastante para o IDM dele não pedir mais que `MERGE_BRAKE` (como o `b_safe` do MOBIL); quem passa antes,
             // com folga, fica à frente
-            let ins = if cf.merge { Some(self.merge_arrival(id, me_idx, d_end + cf.s_me)) } else { None };
+            let ins = if cf.merge && !red_go { Some(self.merge_arrival(id, me_idx, d_end + cf.s_me)) } else { None };
             let vlen_me = self.vlen[id];
             let blocks = |t_j: f32, j: usize| -> bool {
                 let Some((t_m, v_m)) = ins else { return !(t_me + t_gap < t_j) };
@@ -2299,7 +2351,7 @@ impl Sim {
                     continue;
                 }
                 // quem está parado na linha há tempo está bloqueado (não vai ocupar o cruzamento já): não prende quem espera muito
-                if self.v[j] < 0.5 && self.wait[j] > 3.0 && self.wait[id] > 6.0 {
+                if !red_go && self.v[j] < 0.5 && self.wait[j] > 3.0 && self.wait[id] > 6.0 {
                     continue;
                 }
                 let d_j = self.lanes[fl].len - self.s[j];
@@ -2320,6 +2372,9 @@ impl Sim {
                     { REASON.with(|r| r.set(8)); BLOCKER.with(|b| b.set(j as i64)); return false; }
                 }
             }
+        }
+        if red_go {
+            self.moto_beh[id] |= MB_REDGO;
         }
         true
     }
@@ -2990,7 +3045,13 @@ impl Sim {
                     return;
                 }
                 let end = self.lanes[e].end_id as usize;
-                if self.end_state[end] == 1 && self.red_age[end] > 1.5 && !self.short_link(e, i) {
+                if self.moto_beh[i] & MB_REDGO != 0 {
+                    // avanço do vermelho de propósito (parcela da fase 9): não é furo por defeito
+                    self.moto_beh[i] &= !MB_REDGO;
+                    if self.end_state[end] == 1 {
+                        self.stats.moto_red_go += 1;
+                    }
+                } else if self.end_state[end] == 1 && self.red_age[end] > 1.5 && !self.short_link(e, i) {
                     self.stats.red_runs += 1;
                     if self.red_log.len() < 40 { self.red_log.push((e as u32, self.v[i], self.choice[i], self.wait[i], self.red_age[end])); }
                     if self.overlap_log.is_some() {
