@@ -7,6 +7,7 @@
 //! rotatória, direita) por aceitação de brecha, mais *keep-clear*. Tudo determinístico por semente.
 
 pub mod bus;
+pub mod contra;
 pub mod corridor;
 pub mod metrics;
 pub mod route;
@@ -121,6 +122,8 @@ struct Drv {
     seed: u32,
     /// pode usar faixa exclusiva de ônibus (ônibus, ou carro da parcela `bus_lane_car_pct`)
     bus_ok: bool,
+    /// moto da parcela que anda na contramão (pode escolher as conversões `moto_only`)
+    contra: bool,
     /// ônibus de linha: plano (`NONE` = carro ou ônibus sem linha), passo atual e passo/faixa da próxima parada
     route: u32,
     step: u32,
@@ -219,6 +222,8 @@ struct LaneRt {
     dirseg: u32,
     /// arestas de saída (conversões ligadas)
     conns: Vec<u32>,
+    /// faixa de contramão só de motos (fase 9, `contra.rs`)
+    contra: bool,
 }
 
 struct ConnRt {
@@ -238,6 +243,8 @@ struct ConnRt {
     u_me: V2,
     /// conversão só de ônibus (`CONN_BUS`)
     bus_only: bool,
+    /// entrada numa faixa de contramão: só para a moto da parcela `MB_CONTRA` (fora do roteador)
+    moto_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -628,6 +635,10 @@ pub struct Sim {
     /// por `s`, fora de `edge_veh`), bits dos corredores ocupados, ponta de faixa com semáforo e, por veículo, o
     /// corredor em que está (`NONE` = numa faixa; `edge` segue sendo a faixa de referência)
     corr_ok: Vec<bool>,
+    /// contramão (fase 9): para cada faixa de contramão, as faixas reais do lado da borda; para cada uma destas, a de
+    /// contramão ao lado (`NONE` se não há)
+    contra_adj: Vec<Vec<u32>>,
+    contra_by: Vec<u32>,
     corr_veh: Vec<Vec<u32>>,
     corr_bits: Vec<u64>,
     end_sig: Vec<bool>,
@@ -670,6 +681,7 @@ impl Sim {
                 ring: s.roundabout,
                 dirseg: l.seg * 2 + l.dir as u32,
                 conns: Vec::new(),
+                contra: false,
             });
             let _ = li;
         }
@@ -689,6 +701,16 @@ impl Sim {
                 }
             }
         }
+        // ---- contramão de motos (fase 9): faixas só da simulação, depois das da rede
+        let contra = if init.params.moto_contra_pct > 0.0 { contra::plan(net, &lanes) } else { Vec::new() };
+        let mut contra_adj: Vec<(u32, Vec<u32>)> = Vec::with_capacity(contra.len());
+        let mut contra_links = Vec::with_capacity(contra.len());
+        for c in contra {
+            contra_adj.push((lanes.len() as u32, c.adj));
+            contra_links.push((lanes.len() as u32, c.ins, c.outs));
+            lanes.push(c.lane);
+        }
+        let nl = lanes.len();
         // ---- conversões ligadas
         let mut conns: Vec<ConnRt> = Vec::new();
         let mut node_conns: Vec<Vec<u32>> = vec![Vec::new(); net.nodes.len()];
@@ -730,7 +752,46 @@ impl Sim {
                 ring: fl_ring,
                 u_me: net.outward(fl_end),
                 bus_only: c.state == CONN_BUS,
+                moto_only: false,
             });
+        }
+        // contramão: entradas (só da parcela, fora do roteador) e saídas
+        for (cl, ins, outs) in contra_links {
+            let links = ins.into_iter().map(|(n, f, k, c)| (n, f, cl, k, c, true)).chain(outs.into_iter().map(|(n, t, k, c)| (n, cl, t, k, c, false)));
+            for (node, from, to, kind, curve, entry) in links {
+                let fl = &lanes[from as usize];
+                let pts: Vec<V2> = (0..=8).map(|i| bez8(&curve, i as f32 / 8.0)).collect();
+                let len = pts.windows(2).map(|w| len_v(sub(w[1], w[0]))).sum::<f64>() as f32;
+                let vturn = match kind {
+                    K_STRAIGHT => fl.vfree.min(13.0),
+                    K_RIGHT => 6.5,
+                    K_LEFT => 5.5,
+                    _ => 3.5,
+                }
+                .min(contra::CONTRA_V);
+                let eid = (nl + conns.len()) as u32;
+                let (ring, fl_end) = (fl.ring, fl.end_id);
+                lanes[from as usize].conns.push(eid);
+                node_conns[node as usize].push(eid);
+                lane_in[to as usize].push(eid);
+                conns.push(ConnRt {
+                    node,
+                    from,
+                    to,
+                    kind,
+                    len: len.max(0.5),
+                    curve,
+                    pen: route::turn_penalty(net, kind, node),
+                    jpen: route::junction_penalty(net, node),
+                    vturn,
+                    // na contramão cede a todos, na entrada e na saída
+                    rank: 100,
+                    ring,
+                    u_me: net.outward(fl_end),
+                    bus_only: false,
+                    moto_only: entry,
+                });
+            }
         }
         let mut edge_len: Vec<f32> = lanes.iter().map(|l| l.len).collect();
         edge_len.extend(conns.iter().map(|c| c.len));
@@ -758,8 +819,11 @@ impl Sim {
         // ---- roteamento por faixa: conversões ligadas + trocas de faixa
         let lane_len: Vec<f32> = lanes.iter().map(|l| l.len).collect();
         let lane_speed: Vec<f32> = lanes.iter().map(|l| l.vfree).collect();
-        let conn_list: Vec<(u32, u32, f32)> = conns[..n_car_conns].iter().map(|c| (c.from, c.to, c.pen)).collect();
-        let lrouter = LaneRouter::new(net, &lane_len, &lane_speed, &conn_list);
+        // as ligadas primeiro (os índices delas no roteador são os ids, para a penalidade viva), depois as saídas da contramão
+        let conn_list: Vec<(u32, u32, f32)> =
+            conns[..n_car_conns].iter().chain(conns[n_car_conns..].iter().filter(|c| !c.bus_only && !c.moto_only)).map(|c| (c.from, c.to, c.pen)).collect();
+        let lane_key: Vec<(u32, u8)> = lanes.iter().map(|l| (l.seg, if l.contra { 2 } else { l.dir })).collect();
+        let lrouter = LaneRouter::new(&lane_key, &lane_len, &lane_speed, &conn_list);
         // faixas internas de cada zona (as duas pontas dentro dela) e árvore até a zona inteira
         let mut lane_zone = vec![u16::MAX; nl];
         let mut lane_local = vec![u32::MAX; nl];
@@ -877,7 +941,7 @@ impl Sim {
             params: init.params.clone(),
             rate: vec![vec![0.0; nz]; nz],
             next_spawn: vec![vec![f64::INFINITY; nz]; nz],
-            pending: vec![Default::default(); net.lanes.len()],
+            pending: vec![Default::default(); nl],
             pend_gates: Vec::new(),
             row_next: vec![f64::INFINITY; nz],
             rng: Rng::new(init.params.seed),
@@ -957,6 +1021,22 @@ impl Sim {
             bus_lane_ok: Vec::new(),
             stop_car: Vec::new(),
             corr_ok: Vec::new(),
+            contra_adj: {
+                let mut v = vec![Vec::new(); nl];
+                for (cl, adj) in &contra_adj {
+                    v[*cl as usize] = adj.clone();
+                }
+                v
+            },
+            contra_by: {
+                let mut v = vec![NONE; nl];
+                for (cl, adj) in &contra_adj {
+                    for &a in adj {
+                        v[a as usize] = *cl;
+                    }
+                }
+                v
+            },
             corr_veh: vec![Vec::new(); nl],
             corr_bits: vec![0; nl.div_ceil(64)],
             end_sig: vec![false; net.segs.len() * 2],
@@ -1426,7 +1506,7 @@ impl Sim {
             let Some(t) = self.pick_target(dest as usize, lane as usize) else { return false };
             t
         };
-        let mut drv = Drv { tgt: tree as usize, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32, bus_ok: kind == KIND_BUS, route, step: 0, stop_step: NONE, stop_lane: NONE };
+        let mut drv = Drv { tgt: tree as usize, app: (self.rng.f() as f64) < self.params.app_pct / 100.0, seed: self.rng.next() as u32, bus_ok: kind == KIND_BUS, contra: false, route, step: 0, stop_step: NONE, stop_lane: NONE };
         // sorteios por parcela fora do PRNG da simulação: com 0 % o resto da simulação não muda
         if kind == KIND_CAR && ((noise(drv.seed, 0xB05A) + 1.0) * 50.0) < self.params.bus_lane_car_pct as f32 {
             drv.bus_ok = true;
@@ -1435,6 +1515,7 @@ impl Sim {
         if mbeh & MB_BUS != 0 {
             drv.bus_ok = true;
         }
+        drv.contra = mbeh & MB_CONTRA != 0;
         if route != NONE {
             if let Some(st) = self.bus_plans[route as usize].stops.first().filter(|st| st.step == 0) {
                 (drv.stop_step, drv.stop_lane) = (0, st.lane);
@@ -1457,6 +1538,10 @@ impl Sim {
         };
         let l = &self.lanes[lane as usize];
         if !drv.bus_ok && l.bus {
+            return false;
+        }
+        // moto na contramão ao lado (fase 9): espera ela sair
+        if self.contra_by[lane as usize] != NONE && self.contra_busy(lane as usize) {
             return false;
         }
         let (vlen, tgap, amax, bcomf, vfac) = if kind == KIND_BUS {
@@ -1694,7 +1779,7 @@ impl Sim {
                 (stop_step, stop_lane) = (st.step, st.lane);
             }
         }
-        Drv { tgt: self.tgt[i] as usize, app: self.app[i], seed: self.pseed[i], bus_ok: self.kind[i] == KIND_BUS || self.bus_lane_ok[i], route, step, stop_step, stop_lane }
+        Drv { tgt: self.tgt[i] as usize, app: self.app[i], seed: self.pseed[i], bus_ok: self.kind[i] == KIND_BUS || self.bus_lane_ok[i], contra: self.moto_beh[i] & MB_CONTRA != 0, route, step, stop_step, stop_lane }
     }
 
     fn dist(&self, tg: usize, l: usize, live: bool) -> f32 {
@@ -1768,7 +1853,7 @@ impl Sim {
         let (mut local, mut other) = ((f32::INFINITY, NONE), (f32::INFINITY, NONE));
         for &c in &lane.conns {
             let cn = &self.conns[c as usize - self.nl];
-            if cn.bus_only || (!drv.bus_ok && self.lanes[cn.to as usize].bus) {
+            if cn.bus_only || (cn.moto_only && !drv.contra) || (!drv.bus_ok && self.lanes[cn.to as usize].bus) {
                 continue;
             }
             let nx = cn.to as usize;
@@ -1776,7 +1861,7 @@ impl Sim {
             // todas as faixas dela, para não inventar trocas de faixa entre faixas equivalentes)
             // a conversão imediata usa a penalidade fixa: o atraso medido nela inclui a espera do próprio veículo
             // (quem está na frente da fila); o atraso dos cruzamentos seguintes já está na árvore (`zone_d`)
-            let pen = cn.pen;
+            let pen = cn.pen + self.contra_pen(cn);
             let err = if sigma > 0.0 { sigma * noise(drv.seed, self.lanes[nx].dirseg) * (cn.pen + self.lrouter.time[nx]) } else { 0.0 };
             if self.lane_zone[nx] == t.zone {
                 let d = t.local[self.lane_local[nx] as usize];
@@ -2189,6 +2274,16 @@ impl Sim {
                 { REASON.with(|r| r.set(5)); BLOCKER.with(|b| b.set(j as i64)); return false; }
             }
         }
+        // contramão (fase 9): a moto só entra com a faixa real do lado vazia e ninguém entrando nela; quem vai entrar
+        // nessa faixa espera a moto sair da contramão
+        if self.lanes[to_lane as usize].contra && !self.contra_clear(to_lane as usize) {
+            REASON.with(|r| r.set(12));
+            return false;
+        }
+        if self.contra_by[to_lane as usize] != NONE && self.contra_busy(to_lane as usize) {
+            REASON.with(|r| r.set(13));
+            return false;
+        }
         let relaxed = self.wait[id] > 10.0;
         let conflicts = self.conflicts_of(net, cc);
         // ponto de conflito ocupado por quem está dentro do cruzamento (inclusive parado, "fechando" o cruzamento):
@@ -2230,6 +2325,10 @@ impl Sim {
                     }
                 }
             }
+        }
+        // saída da contramão parada há muito tempo: segue (quem ela segura não anda até ela sair)
+        if self.lanes[lane_id].contra && self.wait[id] > OCC_DEADLOCK {
+            return true;
         }
         let t_gap = if red_go { MOTO_RED_GAP } else if relaxed { 1.0 } else { 2.2 };
         let v_me = v.max(2.0);
@@ -2750,7 +2849,11 @@ impl Sim {
             self.v[i] = nv;
             if (self.edge[i] as usize) < self.nl {
                 let l = &self.lanes[self.edge[i] as usize];
-                self.metrics.sample(l.dirseg as usize, nv, dt, l.to_node as usize, l.len - self.s[i]);
+                if l.contra {
+                    self.stats.contra_s += dt as f64;
+                } else {
+                    self.metrics.sample(l.dirseg as usize, nv, dt, l.to_node as usize, l.len - self.s[i]);
+                }
             }
             if self.route[i] != NONE {
                 self.metrics.bus_sample(nv, dt);
@@ -3114,7 +3217,11 @@ impl Sim {
                 self.mand[i] = false;
                 self.blink_to[i] = NONE;
                 self.multi.push(to);
-                self.metrics.entered(self.lanes[to as usize].dirseg as usize);
+                if self.lanes[to as usize].contra {
+                    self.stats.contra_entries += 1;
+                } else {
+                    self.metrics.entered(self.lanes[to as usize].dirseg as usize);
+                }
                 if self.route[i] != NONE {
                     self.bus_enter(i, to as usize);
                 }
@@ -3135,7 +3242,7 @@ impl Sim {
         let mut best: Option<(f64, u32)> = None;
         for &c in &self.lanes[e].conns {
             let cn = &self.conns[c as usize - self.nl];
-            if cn.bus_only || (!self.drv(i).bus_ok && self.lanes[cn.to as usize].bus) {
+            if cn.bus_only || cn.moto_only || (!self.drv(i).bus_ok && self.lanes[cn.to as usize].bus) {
                 continue;
             }
             let p = net.nodes[self.lanes[cn.to as usize].to_node as usize].pos;
@@ -3392,6 +3499,11 @@ impl Sim {
         let e = self.edge[i] as usize;
         if !self.compatible(i, to) {
             self.lc_why[i] = 1;
+            return false;
+        }
+        // moto na contramão ao lado da faixa de destino (fase 9)
+        if self.contra_by[to] != NONE && self.contra_busy(to) {
+            self.lc_why[i] = 7;
             return false;
         }
         // não atravessa por cima de moto no corredor entre as duas faixas
@@ -3967,6 +4079,13 @@ impl Sim {
         } else {
             serde_json::Value::Null
         };
+        // parcelas de comportamento da moto (fase 9), na ordem de `MB_*`
+        let moto_parcels: Vec<&str> = [(MB_RED, "vermelho"), (MB_BUS, "faixaOnibus"), (MB_CONTRA, "contramao"), (MB_FAST, "corredorRapido")]
+            .iter()
+            .filter(|(b, _)| self.moto_beh[i] & b != 0)
+            .map(|&(_, n)| n)
+            .collect();
+        let in_contra = (self.edge[i] as usize) < self.nl && self.lanes[self.edge[i] as usize].contra;
         json!({
             "id": i,
             "kind": match self.kind[i] { KIND_BUS => "ônibus", KIND_MOTO => "moto", _ => "carro" },
@@ -4000,6 +4119,8 @@ impl Sim {
             "lanes": lanes_cost,
             "ruleBreaker": self.rule_breaker[i],
             "boxBlocker": self.box_blocker[i],
+            "motoParcels": moto_parcels,
+            "inContra": in_contra,
             "heldByBox": self.held_box[i],
             "elapsed": elapsed,
             "freeTime": self.t_free[i],

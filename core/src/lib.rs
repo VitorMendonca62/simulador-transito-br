@@ -734,6 +734,9 @@ impl Network {
                 "motoFinished": s.stats.moto_finished,
                 "motosInCorridor": s.motos_in_corridor(),
                 "corridorEntries": s.stats.corridor_entries,
+                "motoRedGo": s.stats.moto_red_go,
+                "motosContra": s.motos_in_contra(),
+                "contraEntries": s.stats.contra_entries,
             })
             .to_string(),
             None => "{}".to_string(),

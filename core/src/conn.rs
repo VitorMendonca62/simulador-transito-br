@@ -172,6 +172,17 @@ fn target_index(kind: u8, t: usize, m: usize, li0: usize, n_out: usize, side: i8
     .min(last)
 }
 
+/// Manobra e curva de uma ligação entre o fim de uma faixa (`p0`, direção `d0`) e o começo de outra (`p3`, `d3`), para
+/// as faixas que só a simulação cria (contramão de motos, versão 2 fase 9). `None` se a manobra é quase um retorno.
+pub fn turn_curve(p0: [f32; 2], d0: [f32; 2], p3: [f32; 2], d3: [f32; 2]) -> Option<(u8, [f32; 8])> {
+    let (a, b) = ([d0[0] as f64, d0[1] as f64], [d3[0] as f64, d3[1] as f64]);
+    if angle(a, b).abs() > 150.0 {
+        return None;
+    }
+    let kind = classify(a, b);
+    Some((kind, bezier(p0, d0, p3, d3, kind)))
+}
+
 fn bezier(p0: [f32; 2], d0: [f32; 2], p3: [f32; 2], d3: [f32; 2], kind: u8) -> [f32; 8] {
     let dx = p3[0] - p0[0];
     let dy = p3[1] - p0[1];

@@ -96,15 +96,15 @@ pub fn lane_change_cost(len: f32) -> f32 {
 
 impl LaneRouter {
     /// `lane_len`/`lane_speed` por faixa e `conns` = (de, para, penalidade) das conversões ligadas.
-    pub fn new(net: &Net, lane_len: &[f32], lane_speed: &[f32], conns: &[(u32, u32, f32)]) -> LaneRouter {
-        let nl = net.lanes.len();
+    /// `lane_key` = (trecho, sentido) de cada faixa: faixas vizinhas no vetor com a mesma chave trocam entre si.
+    pub fn new(lane_key: &[(u32, u8)], lane_len: &[f32], lane_speed: &[f32], conns: &[(u32, u32, f32)]) -> LaneRouter {
+        let nl = lane_key.len();
         let time: Vec<f32> = (0..nl).map(|l| lane_len[l].max(1.0) / (lane_speed[l] * 0.85)).collect();
         let change: Vec<f32> = (0..nl).map(|l| lane_change_cost(lane_len[l])).collect();
         let mut nb = vec![[NONE; 2]; nl];
         for l in 0..nl {
-            let (a, b) = (&net.lanes[l], if l + 1 < nl { Some(&net.lanes[l + 1]) } else { None });
-            if let Some(b) = b {
-                if a.seg == b.seg && a.dir == b.dir {
+            if l + 1 < nl {
+                if lane_key[l] == lane_key[l + 1] {
                     nb[l][1] = (l + 1) as u32;
                     nb[l + 1][0] = l as u32;
                 }
