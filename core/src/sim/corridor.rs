@@ -267,6 +267,9 @@ impl Sim {
     /// Voluntária (o trânsito voltou a andar): com o vão de uma troca de faixa comum e sem fazer ninguém frear além do
     /// confortável; obrigatória (rota, fim do corredor): basta caber, com freada de até `MOBIL_SAFE` atrás.
     fn corr_exit(&mut self, i: usize, to: usize, forced: bool) -> bool {
+        if self.contra_by[to] != NONE && self.contra_busy(to) {
+            return false; // moto na contramão ao lado da faixa (fase 9)
+        }
         let s = self.s[i];
         let list = &self.edge_veh[to];
         let p = list.partition_point(|&j| self.s[j as usize] < s);

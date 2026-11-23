@@ -3255,3 +3255,69 @@ fn moto_red_runner_only_when_clear() {
     assert_eq!(on.red_runs, 0, "{on:?}");
     assert_eq!(on.junction_overlaps, 0, "{on:?}");
 }
+
+/// Quarteirão com um atalho de mão única de ~60 m (A→B): quem vai de E (leste) para W (oeste) dá a volta por C e D
+/// (~260 m), a não ser na contramão. Carros de W para E usam o atalho no sentido certo.
+fn contra_grid(gen: f64, extra: &str) -> Network {
+    let osm = r#"<osm>
+<node id="1" lat="-8.0600" lon="-34.9010"/><node id="2" lat="-8.0600" lon="-34.9000"/>
+<node id="3" lat="-8.0600" lon="-34.89945"/><node id="4" lat="-8.0600" lon="-34.89855"/>
+<node id="5" lat="-8.0591" lon="-34.89945"/><node id="6" lat="-8.0591" lon="-34.9000"/>
+<way id="300"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/></way>
+<way id="301"><nd ref="2"/><nd ref="3"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/></way>
+<way id="302"><nd ref="3"/><nd ref="4"/><tag k="highway" v="residential"/></way>
+<way id="303"><nd ref="3"/><nd ref="5"/><tag k="highway" v="residential"/></way>
+<way id="304"><nd ref="5"/><nd ref="6"/><tag k="highway" v="residential"/></way>
+<way id="305"><nd ref="6"/><nd ref="2"/><tag k="highway" v="residential"/></way>
+</osm>"#;
+    let mut n = build_network(osm.as_bytes()).unwrap();
+    let at = |n: &Network, osm: i64| n.net.nodes.iter().find(|x| x.osm_id == osm).unwrap().pos;
+    let square = |p: crate::geo::V2, r: f64| format!("[[{},{}],[{},{}],[{},{}],[{},{}]]", p[0] - r, p[1] - r, p[0] + r, p[1] - r, p[0] + r, p[1] + r, p[0] - r, p[1] + r);
+    let (w, e) = (square(at(&n, 1), 20.0), square(at(&n, 4), 20.0));
+    let json = format!(
+        r#"{{"zones":[{{"id":1,"gen":{gen},"attr":1,"poly":{e}}},{{"id":2,"gen":{gen},"attr":1,"poly":{w}}}],
+          "params":{{"seed":3,"hour":7,"busShare":0,"beta":0,"odManual":{{"1>2":{gen},"2>1":{gen}}}{extra}}}}}"#
+    );
+    n.start_sim(&json).unwrap();
+    n
+}
+
+/// Contramão em trecho curto: só a parcela usa, nunca ao lado de quem vem de frente, e sem a parcela não há faixa nova.
+#[test]
+fn moto_contra_short_oneway_shortcut() {
+    let run_contra = |extra: &str| {
+        let mut n = contra_grid(400.0, &format!(r#","motoShare":50{extra}"#));
+        for _ in 0..(1200.0 / 0.2) as u32 {
+            n.sim.as_mut().unwrap().step(&n.net);
+            let s = n.sim.as_ref().unwrap();
+            if let Some(&(m, j)) = s.contra_conflicts().first() {
+                panic!("moto na contramão de frente com veículo (t={:.1}): {} / {}", s.time, s.dbg_veh(m as usize), s.dbg_veh(j as usize));
+            }
+            for list in s.edge_lists() {
+                for w in list.windows(2) {
+                    let (sa, _) = s.vehicle_s(w[0]);
+                    let (sb, lb) = s.vehicle_s(w[1]);
+                    assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+                }
+            }
+        }
+        n
+    };
+    let off = run_contra("");
+    let s = off.sim.as_ref().unwrap();
+    assert_eq!(s.contra_lanes(), 0, "sem a parcela não há faixa de contramão");
+    assert_eq!(s.lane_count(), off.net.lanes.len());
+    let on = run_contra(r#","motoContraPct":100"#);
+    let s = on.sim.as_ref().unwrap();
+    let st = s.stats.clone();
+    eprintln!("contramão: {} faixa(s), {} entradas, {:.0} moto·s; {st:?}", s.contra_lanes(), st.contra_entries, st.contra_s);
+    assert_eq!(s.contra_lanes(), 1, "só o atalho de mão única curto");
+    assert!(st.contra_entries > 20, "motos cortam caminho pela contramão: {st:?}");
+    assert_eq!(st.spawned, st.finished + st.lost + s.n_alive as u64, "conservação: {st:?}");
+    assert_eq!(st.junction_overlaps, 0, "{st:?}");
+    assert!(st.moto_finished > 50 && st.finished > 150, "{st:?}");
+    let off_st = off.sim.as_ref().unwrap().stats.clone();
+    let mt = |st: &crate::sim::Stats| st.moto_travel_sum / st.moto_finished as f64;
+    eprintln!("viagem média das motos: sem {:.1} s, com {:.1} s", mt(&off_st), mt(&st));
+    assert!(mt(&st) < mt(&off_st), "a contramão encurta a viagem das motos");
+}
