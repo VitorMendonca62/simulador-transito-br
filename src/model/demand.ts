@@ -30,6 +30,12 @@ export interface DemandParams {
   motoShare?: number
   /** motos andam no corredor entre duas faixas do mesmo sentido quando o trânsito está lento (padrão ligado) */
   motoCorridor?: boolean
+  /** parcelas dos motociclistas (%): avançam o vermelho com o cruzamento livre, usam a faixa exclusiva de ônibus,
+   * andam na contramão em trechos curtos de mão única e usam o corredor também com o trânsito andando */
+  motoRedPct?: number
+  motoBusLanePct?: number
+  motoContraPct?: number
+  motoCorrFastPct?: number
   /** % de motoristas que ignoram a proibição de conversão quando estão na faixa errada */
   illegalPct: number
   /** % de motoristas que entram no cruzamento sem espaço para sair e podem ficar parados nele (CTB art. 45) */
@@ -65,12 +71,18 @@ export interface DemandParams {
  * - ônibus de linha: 8–90 s no ponto, 6 passageiros por parada no pico, partidas ±60 s do horário
  * - usam a faixa exclusiva de ônibus 10 %; param no ponto (embarque/desembarque, apps) 2 %
  * - motos 25 % do fluxo (sem a matriz de motos da OD): ordem de grandeza da participação das motos na frota do Recife;
- *   estimativa a confirmar. Com a OD importada, as motos vêm da matriz de motos da pesquisa */
+ *   estimativa a confirmar. Com a OD importada, as motos vêm da matriz de motos da pesquisa
+ * - motociclistas (estimativas a confirmar, sem medição local): avançam o vermelho com o cruzamento livre 10 %, usam a
+ *   faixa exclusiva de ônibus 15 %, contramão em trecho curto de mão única 5 %, corredor com o trânsito andando 20 % */
 export const TYPICAL_PARAMS = {
   beta: 0.08,
   intrazone: true,
   busShare: 3,
   motoShare: 25,
+  motoRedPct: 10,
+  motoBusLanePct: 15,
+  motoContraPct: 5,
+  motoCorrFastPct: 20,
   illegalPct: 5,
   boxBlockPct: 20,
   reroute: true,

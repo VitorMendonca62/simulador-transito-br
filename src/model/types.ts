@@ -203,6 +203,11 @@ export interface SimStats {
   /** motos no corredor agora e entradas no corredor desde o início */
   motosInCorridor?: number
   corridorEntries?: number
+  /** motos da parcela que avançaram o vermelho com o cruzamento livre */
+  motoRedGo?: number
+  /** motos andando na contramão agora e entradas na contramão */
+  motosContra?: number
+  contraEntries?: number
 }
 
 /** Ônibus de linha no `explain`. */
@@ -254,6 +259,9 @@ export interface VehicleInfo {
   ruleBreaker: boolean
   /** este motorista "fecha o cruzamento" */
   boxBlocker?: boolean
+  /** parcelas da moto: "vermelho", "faixaOnibus", "contramao", "corredorRapido" */
+  motoParcels?: string[]
+  inContra?: boolean
   /** parado esperando um ponto de conflito ocupado */
   heldByBox?: boolean
   elapsed: number

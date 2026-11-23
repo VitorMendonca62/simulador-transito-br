@@ -375,6 +375,23 @@ export function DemandParamsPanel() {
         <input type="checkbox" checked={demandParams.motoCorridor ?? true} onChange={(e) => setDemandParams({ motoCorridor: e.target.checked })} />
         <span>Corredor de motos</span>
       </label>
+      <p className="hint">Motociclistas (%)</p>
+      <label className="field" title="Parcela dos motociclistas que, parados na linha com o sinal vermelho, avançam quando o cruzamento está livre (cedendo a todos, com brecha folgada). Não conta como furo de vermelho. 0 = ninguém.">
+        <span>Avançam o vermelho (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} value={demandParams.motoRedPct ?? 0} onChange={num('motoRedPct', 0, 100)} />
+      </label>
+      <label className="field" title="Parcela dos motociclistas que trafegam pela faixa exclusiva de ônibus. 0 = ninguém.">
+        <span>Usam a faixa de ônibus (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} value={demandParams.motoBusLanePct ?? 0} onChange={num('motoBusLanePct', 0, 100)} />
+      </label>
+      <label className="field" title="Parcela dos motociclistas que cortam caminho na contramão por trechos de mão única curtos (15–80 m) de vias locais, na borda da via. Só entram com a faixa do lado vazia; quem vem de frente espera a moto sair. 0 = ninguém.">
+        <span>Contramão em trecho curto (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} value={demandParams.motoContraPct ?? 0} onChange={num('motoContraPct', 0, 100)} />
+      </label>
+      <label className="field" title="Parcela dos motociclistas que usam o corredor também com o trânsito andando: entram abaixo de 40 km/h, só saem acima de 60 km/h e andam até 25 km/h acima do fluxo. Os demais seguem 20/40 km/h e +15 km/h. 0 = ninguém.">
+        <span>Corredor em velocidade alta (%)</span>
+        <input className="num" type="number" min={0} max={100} step={5} disabled={!(demandParams.motoCorridor ?? true)} value={demandParams.motoCorrFastPct ?? 0} onChange={num('motoCorrFastPct', 0, 100)} />
+      </label>
       {lines && (
         <>
           <label className="field" title="Tempo parado no ponto: o mínimo (abrir e fechar as portas) mais 2,5 s por passageiro embarcando, até o máximo.">
