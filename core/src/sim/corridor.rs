@@ -14,6 +14,18 @@ use super::*;
 
 
 impl Sim {
+    /// Limites do corredor da moto `i`: a parcela "corredor rápido" (`MB_FAST`, fase 9) entra com o trânsito a até
+    /// 40 km/h, só volta acima de 60 km/h e anda até 25 km/h acima do fluxo; as demais seguem os da fase 8.
+    fn corr_vmax(&self, i: usize) -> f32 {
+        if self.moto_beh[i] & MB_FAST != 0 { CORR_VMAX_FAST } else { CORR_VMAX }
+    }
+    fn corr_vout(&self, i: usize) -> f32 {
+        if self.moto_beh[i] & MB_FAST != 0 { CORR_VOUT_FAST } else { CORR_VOUT }
+    }
+    fn corr_dv(&self, i: usize) -> f32 {
+        if self.moto_beh[i] & MB_FAST != 0 { CORR_DV_FAST } else { CORR_DV }
+    }
+
     /// Eixo do corredor `c` (deslocamento lateral, no sistema do trecho, como `LaneRt::off`).
     pub(super) fn corr_mid(&self, c: usize) -> f32 {
         0.5 * (self.lanes[c].off + self.lanes[c + 1].off)
@@ -214,7 +226,7 @@ impl Sim {
         let drv = self.drv(i);
         let mut best: Option<(f32, usize, usize)> = None;
         for c in [e.wrapping_sub(1), e] {
-            if c >= self.nl || !self.corr_ok[c] || self.corr_flow(c, s) >= CORR_VMAX {
+            if c >= self.nl || !self.corr_ok[c] || self.corr_flow(c, s) >= self.corr_vmax(i) {
                 continue;
             }
             // motos já no corredor à frente (fila única até a linha): espalha entre os dois corredores da faixa
@@ -333,7 +345,7 @@ impl Sim {
         };
         let st = self.end_state[self.lanes[home].end_id as usize];
         let at_light = self.corr_to_line(i, home) && rest < 40.0 && (st == 1 || st == 2);
-        let flowing = !at_light && self.corr_flow(c, s) > CORR_VOUT;
+        let flowing = !at_light && self.corr_flow(c, s) > self.corr_vout(i);
         let free_end = !self.corr_to_line(i, home) && rest < CORR_END_FREE + 40.0;
         if !(route_out || flowing || free_end) {
             self.mand[i] = false;
@@ -424,7 +436,7 @@ impl Sim {
                     }
                 }
                 let v = self.v[i];
-                let v0 = self.desired_speed(i).min(self.corr_flow(c, self.s[i]) + CORR_DV).max(0.5);
+                let v0 = self.desired_speed(i).min(self.corr_flow(c, self.s[i]) + self.corr_dv(i)).max(0.5);
                 let (a_max, b, t) = (self.amax[i], self.bcomf[i], self.tgap[i]);
                 let mut x = 1.0 - (v / v0).powi(4);
                 if let Some((gap, vl)) = lead {
