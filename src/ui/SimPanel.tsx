@@ -106,6 +106,15 @@ export function SimPanel() {
               <dd>
                 {(st.motosActive ?? 0).toLocaleString('pt-BR')} na rede · {(st.motoFinished ?? 0).toLocaleString('pt-BR')} concluídas
                 {st.motosInCorridor ? ` · ${st.motosInCorridor.toLocaleString('pt-BR')} no corredor` : ''}
+                {st.motosContra ? ` · ${st.motosContra.toLocaleString('pt-BR')} na contramão` : ''}
+              </dd>
+            </div>
+          ) : null}
+          {st.motoRedGo || st.contraEntries ? (
+            <div title="Motos da parcela que avançaram o vermelho com o cruzamento livre (não contam como furo) e entradas na contramão em trecho curto de mão única">
+              <dt>Motos no vermelho · contramão</dt>
+              <dd>
+                {(st.motoRedGo ?? 0).toLocaleString('pt-BR')} · {(st.contraEntries ?? 0).toLocaleString('pt-BR')}
               </dd>
             </div>
           ) : null}

@@ -3939,6 +3939,8 @@ impl Sim {
             9 => "fila justa: outro veículo espera há mais tempo pela mesma saída",
             10 => "placa Pare: ainda não parou na linha",
             11 => "cruzamento ocupado: veículo parado ou passando no ponto de conflito",
+            12 => "contramão: a faixa do lado tem quem vem de frente",
+            13 => "moto na contramão ao lado da faixa de saída",
             _ => "",
         }
     }

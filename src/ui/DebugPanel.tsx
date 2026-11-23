@@ -3,6 +3,14 @@ import { fetchStuck, simStepBy, type StuckItem } from '../model/importer'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
 
+/** parcelas de comportamento da moto (versão 2, fase 9) */
+const MOTO_PARCEL_LABEL: Record<string, string> = {
+  vermelho: 'avança vermelho',
+  faixaOnibus: 'faixa de ônibus',
+  contramao: 'contramão',
+  corredorRapido: 'corredor rápido',
+}
+
 const f = (n: number | null | undefined, d = 1) => (n == null || !Number.isFinite(n) ? '—' : n.toFixed(d))
 
 /** Estado completo do veículo selecionado, para depurar o comportamento. */
@@ -151,6 +159,8 @@ export function VehicleCard() {
           <dd>
             {info.ruleBreaker ? 'infrator · ' : ''}
             {info.boxBlocker ? 'fecha cruzamento · ' : ''}
+            {info.motoParcels?.length ? `${info.motoParcels.map((p) => MOTO_PARCEL_LABEL[p] ?? p).join(', ')} · ` : ''}
+            {info.inContra ? 'na contramão · ' : ''}
             {info.heldByBox ? 'esperando cruzamento ocupado · ' : ''}troca de faixa em {f(info.laneChangeCooldown, 1)} s ({info.laneChangeBlock}) · via de hierarquia {info.rank}
           </dd>
         </dl>
