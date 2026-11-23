@@ -611,6 +611,11 @@ impl Sim {
     }
 
     /// Diagnóstico (testes): tempo parado (s) de cada moto na rede.
+    /// Diagnóstico para testes: motos paradas há entre `a` e `b` s.
+    pub fn moto_ids_waiting(&self, a: f32, b: f32) -> Vec<usize> {
+        (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] == KIND_MOTO && self.wait[i] > a && self.wait[i] <= b).collect()
+    }
+
     pub fn moto_waits(&self) -> Vec<f32> {
         (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] == KIND_MOTO).map(|i| self.wait[i]).collect()
     }

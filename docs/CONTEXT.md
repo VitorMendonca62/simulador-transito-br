@@ -418,3 +418,50 @@ fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada 
 - **App** (Recife + OD + CTTU + linhas, 7h): ~190 motos no corredor aos 10 min, de ~4,4 mil motos na rede.
 - **Build**: com o `target` compartilhado entre duas cópias do repositório, o cargo pode reaproveitar o WASM da outra cópia; na dúvida, `touch core/src/lib.rs` antes do `wasm-pack`.
 
+## Motos por parcela (versão 2, fase 9) — 2026-11-23
+- **Parcelas** (`SimParams`): `moto_red_pct`, `moto_bus_lane_pct`, `moto_contra_pct`, `moto_corr_fast_pct`, padrão 0 no
+  núcleo. Sorteio no nascimento, só de motos, por `noise(seed do motorista, chave)` fora do PRNG (`Sim::moto_parcels`),
+  guardado em `moto_beh` (bits `MB_RED`, `MB_BUS`, `MB_CONTRA`, `MB_FAST`; `MB_REDGO` é estado). Com tudo em 0 (ou sem
+  motos) a simulação é idêntica (`moto_parcels_zero_is_identical`). No app, os valores típicos do Recife são 10/15/5/20 %
+  (estimativas, sem medição local), no bloco "Motociclistas (%)" do painel de demanda.
+- **Avançar o vermelho** (`may_enter_from`): parada na linha (< 5 m, v < 0,5) há ≥ 2 s (`MOTO_RED_WAIT`), fora de
+  `short_link`, a moto avalia o nó como se não tivesse preferência sobre ninguém (ocupação, curva concorrente e quem
+  chega com o verde), com brecha de 4 s (`MOTO_RED_GAP`), sem paciência. Depois de arrancar mantém a decisão
+  (`MB_REDGO`, limpo ao entrar na conversão). Não conta em `red_runs` (que continua medindo defeito): vai em
+  `Stats.moto_red_go` (`motoRedGo`). Vale também para a moto do corredor (passa pelo `may_enter`). Na avenida de teste
+  com o corredor, 89 avanços em 15 min, 0 colisões, 0 furos.
+- **Faixa de ônibus**: a parcela recebe `bus_ok`; `bus_lane_ok` passou a valer para todo não ônibus da parcela (antes só
+  carros). A moto não para no ponto (`stop_car` segue só de carros) e não há corredor ao lado da faixa de ônibus.
+- **Corredor rápido**: limites por moto (`corr_vmax/vout/dv` em `corridor.rs`): a parcela entra abaixo de 40 km/h,
+  sai acima de 60 km/h e anda até +25 km/h sobre o fluxo (os demais, 20/40 km/h e +15). Na avenida de 3 faixas a
+  3000 veíc./h, entradas no corredor 246 → 299 com 100 %.
+- **Contramão em trecho curto de mão única** (`sim/contra.rs`; decisão do usuário: atalho na mão única, não
+  ultrapassagem pela faixa oposta). Só com `moto_contra_pct > 0`:
+  - para cada trecho `oneway` de 15–80 m, de terciária a `living_street`, sem rotatória, `link`, faixa de ônibus nem
+    `layer`, a simulação cria uma faixa `contra` (sentido 1, na borda esquerda do trecho a 0,5 m, `rank` 100, `vfree`
+    ≤ 25 km/h), **depois** das faixas da rede: `nl` da simulação passa a ser maior que o da rede e `LaneRouter::new`
+    recebe a chave (trecho, sentido) de cada faixa em vez da rede. No Recife são 1.045 faixas;
+  - entradas (no nó final do trecho, uma faixa por aproximação, pela manobra; `conn::turn_curve`) são `moto_only`:
+    ficam fora do roteador e só a parcela as escolhe em `stay_cost`, com +8 s (`CONTRA_PEN`). Saídas (no nó inicial)
+    entram no roteador, então o custo da contramão até o destino é conhecido. Conversões de entrada e saída têm
+    `rank` 100 (cedem a todos);
+  - quem vem de frente: a faixa real do lado da borda (idx 0) e a contramão se excluem. A moto só entra com ela vazia
+    e ninguém entrando (`contra_clear`, motivo 12); quem vai entrar nela (conversão, troca de faixa, saída do corredor,
+    nascimento) espera (`contra_busy`, motivo 13). Parada > 40 s na saída, a moto segue;
+  - métricas: a contramão fica fora do mapa de calor; `contra_entries`/`contra_s`, `motosContra`/`contraEntries`;
+    `contra_conflicts` (testes) confere que ninguém fica de frente com a moto.
+  - Teste `moto_contra_short_oneway_shortcut` (atalho de 60 m contra uma volta de ~260 m): 62 entradas em 20 min,
+    viagem média das motos 39,0 → 37,3 s, nenhum conflito de frente.
+- **Recife** (`recife_behavior`, CTTU, 30 % de motos, zonas em quadrantes; base → parcelas típicas, 6 sementes):
+  - concluídos 404 → 419, atraso 30,2 → 32,3 veíc·h (dentro da variação entre sementes), passo 0,70 → 0,73 ms;
+  - avanços do vermelho ~40–77 por execução, contramão 0–1 entradas (as zonas em quadrantes quase não pedem atalhos),
+    sobreposições moto × faixa (corredor e contramão) 0;
+  - colisões no cruzamento 0–1 por execução, nos dois casos nos nós de geometria já conhecidos (osm 2043345969,
+    8190979101, 9281358133);
+  - motos paradas > 120 s (amostras a cada 5 s): base 0/39/0/14/0/123, típicas 302/56/2/380/0/6. Pelo `MOTO_STUCK=1`
+    (novo no `recife_behavior`), são motos em filas comuns (Av. Prof. Moraes Rego, Rua Massaranduba), a maioria sem
+    parcela; nenhuma na contramão ou retida por ela;
+  - com as linhas (`BUS=1`, 3 sementes): ônibus parados > 120 s 0/0/13 → 0/31/0, passo 0,93 → 0,91 ms.
+  - Com as quatro parcelas em 100 %: ~660 avanços do vermelho e 5–8 entradas na contramão por execução, sem
+    sobreposição moto × faixa.
+

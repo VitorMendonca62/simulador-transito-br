@@ -394,6 +394,18 @@ Sempre % configurável dos motociclistas, padrão 0 (como `illegalPct` e `boxBlo
 **Pronto quando**: Recife roda com motos sem travas novas (`recife_behavior`: parados > 120 s = 0), sem sobreposição
 moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 
+**Concluída (2026-11-23).** Parâmetros `motoRedPct`, `motoBusLanePct`, `motoContraPct` e `motoCorrFastPct` (padrão 0 no
+núcleo; nos valores típicos do Recife 10/15/5/20 %, estimativas), sorteados por moto fora do PRNG. Decisão do usuário:
+a contramão é em **trecho curto de mão única** (atalho), não ultrapassagem pela faixa oposta. Código em
+`core/src/sim/contra.rs` (faixas de contramão só da simulação) e nos pontos de decisão do `sim/mod.rs` e do
+`corridor.rs`. Detalhes e medidas no `CONTEXT.md` (seção "Motos por parcela").
+- Testes novos: `moto_parcels_zero_is_identical`, `moto_bus_lane_share`, `corridor_fast_enters_above_limit`,
+  `moto_red_runner_only_when_clear`, `moto_contra_short_oneway_shortcut`.
+- Critério "parados > 120 s = 0": não vale nem na base com 30 % de motos (amostras de motos paradas > 120 s em 6
+  sementes: base 0/39/0/14/0/123, com as parcelas típicas 302/56/2/380/0/6). Os casos olhados são motos **sem** parcela
+  em filas comuns (Av. Prof. Moraes Rego, Rua Massaranduba), nenhuma na contramão nem retida por ela; sobreposições
+  moto × faixa no corredor e na contramão: 0.
+
 ---
 
 ## Backlog (fora desta versão)
@@ -415,4 +427,4 @@ moto × carro, desempenho dentro das metas da fase 2, `CONTEXT.md` atualizado.
 | 6 — Interface de linhas | concluída (2026-11-03): camada, painel, paradas editáveis, baia; falta medir 30× com o painel visível |
 | 7 — Moto como tipo | concluída (2026-11-22): tipo explícito, matriz OD de motos (microdados), `motoShare`, desenho e métricas |
 | 8 — Corredor | concluída (2026-11-22): corredor entre faixas, saída na frente no semáforo, sem sobreposição; Recife sem impasses novos |
-| 9 — Motos por parcela | pendente |
+| 9 — Motos por parcela | concluída (2026-11-23): vermelho, faixa de ônibus, contramão em mão única curta e corredor rápido, por parcela |

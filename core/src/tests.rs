@@ -1140,7 +1140,14 @@ fn recife_behavior() {
             if k % 25 == 0 {
                 let s = n.sim.as_ref().unwrap();
                 moto_stuck += s.moto_waits().iter().filter(|&&x| x > 120.0).count();
-                corr_ovl += s.corridor_conflicts().len();
+                corr_ovl += s.corridor_conflicts().len() + s.contra_conflicts().len();
+                if std::env::var("MOTO_STUCK").is_ok() {
+                    let sm = n.sim.as_mut().unwrap();
+                    for id in sm.moto_ids_waiting(120.0, 125.0) {
+                        let x = sm.explain(&n.net, id);
+                        eprintln!("      MSTK t={} #{id} {} {} s={:.1} rest={:.1} choice={} enter={} leader={} block={} parcels={} contra={} {}", k / 5, x["where"], x["street"], x["s"].as_f64().unwrap_or(0.0), x["rest"].as_f64().unwrap_or(0.0), x["choice"], x["enter"], x["leader"], x["laneChangeBlock"], x["motoParcels"], x["inContra"], sm.dbg_veh(id));
+                    }
+                }
             }
             if bus && k % 25 == 0 {
                 let w = n.sim.as_ref().unwrap().bus_waits();
@@ -1187,8 +1194,12 @@ fn recife_behavior() {
         }
         if s.stats.moto_spawned > 0 {
             eprintln!(
-                "   motos: nascidas {}  concluídas {}  viagem média {:.0} s  entradas no corredor {}  no corredor {:.0} moto·s  paradas > 120 s {moto_stuck}  sobreposições no corredor {corr_ovl}",
+                "   motos: nascidas {}  concluídas {}  viagem média {:.0} s  entradas no corredor {}  no corredor {:.0} moto·s  paradas > 120 s {moto_stuck}  sobreposições no corredor/contramão {corr_ovl}",
                 s.stats.moto_spawned, s.stats.moto_finished, s.stats.moto_travel_sum / s.stats.moto_finished.max(1) as f64, s.stats.corridor_entries, s.stats.corridor_s
+            );
+            eprintln!(
+                "   parcelas: vermelho {}  contramão {} entradas em {} faixas ({:.0} moto·s)",
+                s.stats.moto_red_go, s.stats.contra_entries, s.contra_lanes(), s.stats.contra_s
             );
         }
         eprintln!("   cruzamento: sobreposições {} (+{} geometria)  parados dentro {}  espera por ocupação {:.0} veíc·s  impasses {}", s.stats.junction_overlaps, s.stats.junction_overlaps_geom, s.stats.box_stops, s.stats.box_wait_s, s.stats.occ_deadlocks);
