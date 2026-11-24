@@ -3332,3 +3332,54 @@ fn moto_contra_short_oneway_shortcut() {
     eprintln!("viagem média das motos: sem {:.1} s, com {:.1} s", mt(&off_st), mt(&st));
     assert!(mt(&st) < mt(&off_st), "a contramão encurta a viagem das motos");
 }
+
+/// Avenida de mão única com 3 faixas que, no nó 3 (sem semáforo), continua com 1 faixa: fila de afunilamento. As motos
+/// do corredor saem dele antes do nó (saída obrigatória) e nunca ficam presas (antes: a moto de trás cedia a ela parada a
+/// 1 m, e a checagem de freada usava o vão parado de carro, 2 m; ou não havia vão entre carros parados a 2 m).
+fn funnel_run(seed: u64, seconds: f64) -> (Network, f32) {
+    let osm = avenue(r#"<tag k="oneway" v="yes"/>"#)
+        .replace(r#"<tag k="lanes" v="4"/>"#, r#"<tag k="lanes" v="3"/>"#)
+        .replace(
+            r#"<way id="200"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/>"#,
+            r#"<way id="199"><nd ref="3"/><nd ref="4"/><tag k="highway" v="secondary"/><tag k="oneway" v="yes"/><tag k="lanes" v="1"/></way>
+<way id="200"><nd ref="1"/><nd ref="2"/><nd ref="3"/>"#,
+        );
+    let mut n = build_network(osm.as_bytes()).unwrap();
+    avenue_sim(&mut n, 1800.0, &format!(r#","motoShare":40,"seed":{seed}"#));
+    let mut max_wait = 0.0f32;
+    for _ in 0..(seconds / 0.2) as u32 {
+        n.sim.as_mut().unwrap().step(&n.net);
+        let s = n.sim.as_ref().unwrap();
+        assert!(s.corridor_conflicts().is_empty(), "moto no corredor sobreposta (t={:.1})", s.time);
+        for list in s.edge_lists().iter().chain(s.corridor_lists().iter()) {
+            for w in list.windows(2) {
+                let (sa, _) = s.vehicle_s(w[0]);
+                let (sb, lb) = s.vehicle_s(w[1]);
+                assert!(sa <= sb - lb + 0.05, "sobreposição: traseira de {} em {} / frente de {}", w[1], sb - lb, sa);
+            }
+        }
+        max_wait = s.corridor_waits().into_iter().fold(max_wait, f32::max);
+        if std::env::var("FUNNEL_DBG").is_ok() {
+            let sm = n.sim.as_mut().unwrap();
+            for id in sm.moto_ids_waiting(100.0, 100.2) {
+                let x = sm.explain(&n.net, id);
+                eprintln!("t={:.0} #{id} {} s={:.1} rest={:.1} leader={} enter={} block={} {}", sm.time, x["where"], x["s"], x["rest"], x["leader"], x["enter"], x["laneChangeBlock"], sm.dbg_veh(id));
+            }
+        }
+    }
+    (n, max_wait)
+}
+
+#[test]
+fn corridor_forced_exit_never_deadlocks() {
+    for seed in 1..=3 {
+        let (n, max_wait) = funnel_run(seed, 1200.0);
+        let s = n.sim.as_ref().unwrap();
+        let st = s.stats.clone();
+        eprintln!("semente {seed}: maior espera de moto no corredor {max_wait:.0} s, entradas no corredor {}, concluídos {}", st.corridor_entries, st.finished);
+        assert!(st.corridor_entries > 10, "{st:?}");
+        assert!(st.finished > 350, "a fila escoa: {st:?}");
+        assert_eq!(st.spawned, st.finished + st.lost + s.n_alive as u64, "conservação: {st:?}");
+        assert!(max_wait < 120.0, "moto presa no corredor {max_wait:.0} s (semente {seed})");
+    }
+}
