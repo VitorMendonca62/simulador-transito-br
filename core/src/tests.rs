@@ -570,6 +570,27 @@ fn sim_vehicles_never_overlap() {
     }
 }
 
+/// `rem_pos` (resto sem `fmod`) dá exatamente o mesmo que `rem_euclid`, inclusive com o relógio acumulado em passos.
+#[test]
+fn rem_pos_matches_rem_euclid() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut t = 25200.0f64;
+    for k in 0..2_000_000u64 {
+        t += 0.2;
+        let c = [30.0, 45.0, 60.0, 61.0, 90.0, 97.0, 120.0, 150.0, 47.5, 0.7][k as usize % 10];
+        let off = (rnd() % 20_000) as f64 / 100.0 - 50.0;
+        let x = if k % 3 == 0 { (rnd() % 100_000_000) as f64 / 64.0 } else { t + off };
+        let (a, b) = (crate::sim::rem_pos(x, c), x.rem_euclid(c));
+        assert_eq!(a.to_bits(), b.to_bits(), "x={x} c={c}");
+    }
+}
+
 #[test]
 fn sim_is_deterministic() {
     let snap = |seed: u64| {
@@ -722,46 +743,78 @@ fn perf_sim() {
         Err(_) => format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":3,"beta":0.02}}}}"#),
     };
     let minutes: usize = std::env::var("PERF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+    // PERF_EXT=1: árvores de rotas fora do passo medido, como os workers de rotas do app (mesmo resultado)
+    let ext = std::env::var("PERF_EXT").is_ok();
     let t = Instant::now();
-    n.start_sim(&json).unwrap();
-    eprintln!("Sim::new {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    n.start_sim_ext(&json, ext).unwrap();
+    let mut copy = None;
+    if ext {
+        let s = n.sim.as_mut().unwrap();
+        let mut r = crate::sim::route::LaneRouter::from_bytes(&s.router_bytes()).unwrap();
+        for z in 0..s.zone_count() {
+            let mut d = Vec::new();
+            r.tree(s.zone_targets(z), &mut d);
+            s.init_put(&n.net, z, d);
+        }
+        copy = Some(r);
+    }
+    eprintln!("Sim::new {:.0} ms{}", t.elapsed().as_secs_f64() * 1e3, if ext { " (com as árvores iniciais)" } else { "" });
     let mut worst = 0.0f64;
-    // piores passos: (ms, tempo simulado, houve recálculo da matriz OD)
-    let mut slow: Vec<(f64, f64, bool)> = Vec::new();
+    // piores passos: (ms, tempo simulado, houve recálculo da matriz OD, pontos de destino e conflitos montados no passo)
+    let mut slow: Vec<(f64, f64, bool, [u64; 2])> = Vec::new();
     for block in 0..minutes {
         if block == minutes - 1 {
             n.sim.as_mut().unwrap().prof = [0.0; 7];
         }
-        let t = Instant::now();
+        let mut busy = 0.0f64;
         let mut peak = 0.0f64;
         for _ in 0..250 {
             let t1 = Instant::now();
             let m0 = n.sim.as_ref().unwrap().matrix_refreshes;
+            let lz0 = n.sim.as_ref().unwrap().lazy_built;
             n.sim.as_mut().unwrap().step(&n.net);
             let dt = t1.elapsed().as_secs_f64();
+            if let Some(r) = copy.as_mut() {
+                let s = n.sim.as_mut().unwrap();
+                if let Some((zones, pen, cm)) = s.route_take() {
+                    r.set_weights(pen, cm);
+                    for z in zones {
+                        let mut d = Vec::new();
+                        r.tree(s.zone_targets(z as usize), &mut d);
+                        s.route_put(z, d);
+                    }
+                }
+            }
             peak = peak.max(dt);
+            busy += dt;
             let s = n.sim.as_ref().unwrap();
-            slow.push((dt * 1e3, s.time, s.matrix_refreshes != m0));
+            slow.push((dt * 1e3, s.time, s.matrix_refreshes != m0, [s.lazy_built[0] - lz0[0], s.lazy_built[1] - lz0[1]]));
             slow.sort_by(|a, b| b.0.total_cmp(&a.0));
             slow.truncate(8);
         }
         let s = n.sim.as_ref().unwrap();
         worst = worst.max(peak);
+        // impressão digital do estado (posição, velocidade, tipo de cada veículo): mudanças "=" têm de manter
+        let mut snap = Vec::new();
+        s.snapshot(&n.net, &mut snap);
+        let hash = snap.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x.to_bits() as u64).wrapping_mul(0x100_0000_01b3));
         eprintln!(
-            "min {:>2}: vivos={:>6} gerados={:>6} concl.={:>6} fila={:>6}  passo médio {:>6.2} ms  pior {:>6.2} ms  idade das rotas {:>4.0} s",
+            "min {:>2}: vivos={:>6} gerados={:>6} concl.={:>6} fila={:>6} estado={hash:016x}  passo médio {:>6.2} ms  pior {:>6.2} ms  idade das rotas {:>4.0} s",
             block + 1,
             s.n_alive,
             s.stats.spawned,
             s.stats.finished,
             s.stats.queued,
-            t.elapsed().as_secs_f64() * 1e3 / 250.0,
+            busy * 1e3 / 250.0,
             peak * 1e3,
             s.route_age()
         );
     }
-    for (ms, t, m) in &slow {
-        eprintln!("   passo lento {ms:>7.2} ms em t={t:>6.0}s{}", if *m { "  (recálculo da matriz OD)" } else { "" });
+    for (ms, t, m, lz) in &slow {
+        eprintln!("   passo lento {ms:>7.2} ms em t={t:>6.0}s  pontos novos {:>3}  conflitos montados {:>4}{}", lz[0], lz[1], if *m { "  (recálculo da matriz OD)" } else { "" });
     }
+    let lz = n.sim.as_ref().unwrap().lazy_built;
+    eprintln!("   total: pontos de destino criados {}  conversões com conflitos montados {}", lz[0], lz[1]);
     let p = n.sim.as_ref().unwrap().prof;
     let names = ["sinais", "geração", "aceleração(líder+junção)", "integração", "folgas#1", "mudança de aresta+folgas#2", "troca de faixa"];
     for (k, nme) in names.iter().enumerate() {

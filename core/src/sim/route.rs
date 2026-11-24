@@ -169,7 +169,7 @@ impl LaneRouter {
     }
     /// Como `tree`, mas só percorre as faixas para as quais `local_of` dá um índice (as de uma zona);
     /// `dist[i]` é a do i-ésimo membro. Barato: custa o tamanho da zona, não o da rede.
-    pub fn tree_local(&self, targets: &[u32], local_of: &dyn Fn(u32) -> u32, size: usize) -> Vec<f32> {
+    pub fn tree_local(&self, targets: &[u32], local_of: impl Fn(u32) -> u32, size: usize) -> Vec<f32> {
         let mut dist = vec![f32::INFINITY; size];
         let mut heap = BinaryHeap::new();
         for &t in targets {

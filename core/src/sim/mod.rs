@@ -301,6 +301,43 @@ struct ConnRt {
     moto_only: bool,
 }
 
+/// `x.rem_euclid(c)` para `c > 0`, bit a bit igual, sem a chamada de `fmod` (feita em software no nativo e no WASM,
+/// ~1,7 % do passo com os ~1.000 semáforos do Recife). Com `c` inteiro e `x ≥ 2c`: `n·c` é exato (inteiro < 2^53),
+/// `x − n·c` também (Sterbenz: `n·c` fica entre `x/2` e `2x`), e o resto verdadeiro é representável, então a correção
+/// de ±`c` quando `n` sai um a mais ou a menos também é exata. Fora disso, `rem_euclid`.
+#[inline]
+pub(crate) fn rem_pos(x: f64, c: f64) -> f64 {
+    if c.fract() == 0.0 && x >= 2.0 * c && x < 4.0e15 {
+        let n = (x / c).floor();
+        let r = x - n * c;
+        if r < 0.0 {
+            return r + c;
+        }
+        if r >= c {
+            return r - c;
+        }
+        return r;
+    }
+    x.rem_euclid(c)
+}
+
+/// Resultado guardado de `stay_cost` para um veículo e uma faixa. Vale enquanto a chave bate: faixa, ponto de destino,
+/// versão da árvore da zona de destino (`zver`) e as flags do motorista que entram no cálculo (app, ônibus, contramão).
+/// O resto (`sc`, penalidades, árvores locais, ruído da percepção) não muda durante a viagem; ao nascer, o slot é zerado.
+#[derive(Clone, Copy)]
+struct ScMemo {
+    l: u32,
+    tgt: u32,
+    ver: u32,
+    fl: u8,
+    cost: f32,
+    conn: u32,
+}
+
+const SC_MEMO_EMPTY: ScMemo = ScMemo { l: NONE, tgt: 0, ver: 0, fl: 0, cost: 0.0, conn: NONE };
+/// entradas por veículo, indexadas por `faixa & 3` (as faixas de um trecho são consecutivas)
+const SC_MEMO_N: usize = 4;
+
 /// Dados de uma conversão de saída que `stay_cost` lê, contíguos por faixa de origem (`sc_off`): evita carregar a
 /// `ConnRt` inteira e a faixa de destino a cada consulta (falhas de cache dominavam o custo).
 #[derive(Clone, Copy)]
@@ -579,6 +616,12 @@ pub struct Sim {
     lane_local: Vec<u32>,
     /// conversões de saída de cada faixa em formato compacto para `stay_cost` (faixa l: `sc[sc_off[l]..sc_off[l + 1]]`)
     sc: Vec<ScConn>,
+    /// contadores de diagnóstico (`perf_sim`): pontos de destino criados, conversões com conflitos montados
+    pub lazy_built: [u64; 2],
+    /// `stay_cost` já calculado por veículo (`stay_cost_of`)
+    sc_memo: Vec<[std::cell::Cell<ScMemo>; SC_MEMO_N]>,
+    /// versão da árvore de cada zona (`zone_dist`/`zone_free`): sobe a cada troca, invalida `sc_memo`
+    zver: Vec<u32>,
     sc_off: Vec<u32>,
     /// `lane_in` achatado (faixa l: `lin[lin_off[l]..lin_off[l + 1]]`)
     lin: Vec<LinE>,
@@ -1013,6 +1056,9 @@ impl Sim {
             node_conns,
             lane_in,
             sc: Vec::new(),
+            sc_memo: Vec::new(),
+            lazy_built: [0; 2],
+            zver: vec![0; nz],
             sc_off: Vec::new(),
             lin: Vec::new(),
             lin_off: Vec::new(),
@@ -1215,6 +1261,9 @@ impl Sim {
     fn finish_init(&mut self, net: &Net) {
         if self.params.reroute {
             self.zone_free = self.zone_dist.iter().map(|d| d.iter().map(|&x| enc_t(x)).collect()).collect();
+            for v in &mut self.zver {
+                *v = v.wrapping_add(1);
+            }
         }
         self.refresh_matrix(net);
     }
@@ -1244,6 +1293,7 @@ impl Sim {
             return;
         }
         self.zone_dist[z] = tree;
+        self.zver[z] = self.zver[z].wrapping_add(1);
         if self.init_missing() == 0 {
             self.finish_init(net);
         }
@@ -1256,6 +1306,7 @@ impl Sim {
                 let mut d = Vec::new();
                 self.lrouter.tree(&self.zone_tl[z], &mut d);
                 self.zone_dist[z] = d;
+                self.zver[z] = self.zver[z].wrapping_add(1);
             }
         }
         self.finish_init(net);
@@ -1418,6 +1469,7 @@ impl Sim {
                     d
                 });
                 self.zone_dist[z as usize] = tree;
+                self.zver[z as usize] = self.zver[z as usize].wrapping_add(1);
                 self.tree_at[z as usize] = self.time;
                 self.reroutes += 1;
             }
@@ -1631,7 +1683,7 @@ impl Sim {
             if sg.cycle <= 0.0 {
                 continue;
             }
-            let mut r = (self.time + sg.offset).rem_euclid(sg.cycle);
+            let mut r = rem_pos(self.time + sg.offset, sg.cycle);
             let mut active: Option<(usize, u8)> = None;
             for (pi, p) in sg.phases.iter().enumerate() {
                 if r < p.0 {
@@ -1815,6 +1867,7 @@ impl Sim {
                 self.t_req.push(0.0);
                 self.left_gate.push(false);
                 self.tgt.push(0);
+                self.sc_memo.push(std::array::from_fn(|_| std::cell::Cell::new(SC_MEMO_EMPTY)));
                 self.route.push(NONE);
                 self.bstep.push(0);
                 self.bstop.push(0);
@@ -1863,6 +1916,9 @@ impl Sim {
         self.held_box[id] = false;
         self.ahead_held[id] = false;
         self.tgt[id] = tree;
+        for m in &self.sc_memo[id] {
+            m.set(SC_MEMO_EMPTY);
+        }
         self.app[id] = drv.app;
         self.pseed[id] = drv.seed;
         self.t_free[id] = if route != NONE {
@@ -1915,6 +1971,7 @@ impl Sim {
         let ends: Vec<u32> = members.iter().copied().filter(|&l| self.lanes[l as usize].to_node == node && !self.lanes[l as usize].bus).collect();
         let local_of = |l: u32| if self.lane_zone[l as usize] == zid { self.lane_local[l as usize] } else { NONE };
         let local = self.lrouter.tree_local(&ends, &local_of, members.len());
+        self.lazy_built[0] += 1;
         let (sum, cnt) = local.iter().filter(|d| d.is_finite()).fold((0.0f64, 0usize), |a, &d| (a.0 + d as f64, a.1 + 1));
         let t = Target { node, zone: zid, mean: if cnt > 0 { (sum / cnt as f64) as f32 } else { 0.0 }, reach: cnt as f32 / local.len().max(1) as f32, local };
         self.local_used += t.local.len();
@@ -2075,6 +2132,25 @@ impl Sim {
     }
 
     /// Melhor conversão da faixa `l` para o destino: (custo até a zona, conversão). Carros ignoram faixas de ônibus.
+    /// `stay_cost` do veículo `i` (com `drv` = `self.drv(i)` ou derivado dele), reaproveitando o último cálculo da mesma
+    /// faixa enquanto a árvore da zona de destino não mudar. Resultado idêntico ao `stay_cost`.
+    #[inline]
+    fn stay_cost_of(&self, i: usize, drv: Drv, l: usize) -> (f32, u32) {
+        if drv.route != NONE {
+            return self.stay_cost(drv, l);
+        }
+        let ver = self.zver[self.targets[drv.tgt].zone as usize];
+        let fl = drv.app as u8 | (drv.bus_ok as u8) << 1 | (drv.contra as u8) << 2;
+        let cell = &self.sc_memo[i][l & (SC_MEMO_N - 1)];
+        let m = cell.get();
+        if m.l == l as u32 && m.tgt == drv.tgt as u32 && m.ver == ver && m.fl == fl {
+            return (m.cost, m.conn);
+        }
+        let r = self.stay_cost(drv, l);
+        cell.set(ScMemo { l: l as u32, tgt: drv.tgt as u32, ver, fl, cost: r.0, conn: r.1 });
+        r
+    }
+
     fn stay_cost(&self, drv: Drv, l: usize) -> (f32, u32) {
         if drv.route != NONE {
             return self.bus_stay(drv, l);
@@ -2136,7 +2212,7 @@ impl Sim {
         if e >= self.nl {
             return;
         }
-        let (cost, c) = self.stay_cost(self.drv(id), e);
+        let (cost, c) = self.stay_cost_of(id, self.drv(id), e);
         self.choice[id] = if c == SINK {
             SINK
         } else if cost.is_finite() {
@@ -2153,6 +2229,7 @@ impl Sim {
         if a != u32::MAX {
             return a as usize..(a + n) as usize;
         }
+        self.lazy_built[1] += 1;
         let me = &self.conns[c as usize - self.nl];
         let pts_me: Vec<V2> = (0..=12).map(|i| bez8(&me.curve, i as f32 / 12.0)).collect();
         let cum = |p: &[V2]| -> Vec<f64> {
@@ -2164,6 +2241,7 @@ impl Sim {
         };
         let cum_me = cum(&pts_me);
         let scale_me = me.len as f64 / cum_me.last().copied().unwrap_or(1.0).max(1e-6);
+        let box_me = ctrl_box(&me.curve);
         let mut out = Vec::new();
         for &o in &self.node_conns[me.node as usize] {
             if o == c {
@@ -2175,6 +2253,12 @@ impl Sim {
             }
             if other.to == me.to {
                 out.push(Conflict { other: o, s_me: me.len, s_other: other.len, merge: true, w: 0.0 });
+                continue;
+            }
+            // a curva fica dentro do envoltório dos pontos de controle: caixas afastadas mais que a distância de
+            // quase-conflito (+0,5 m de folga para o arredondamento em f32) não se cruzam nem passam perto
+            let (bo, m) = (ctrl_box(&other.curve), NEAR_CONFLICT as f32 + 0.5);
+            if bo[0] > box_me[2] + m || box_me[0] > bo[2] + m || bo[1] > box_me[3] + m || box_me[1] > bo[3] + m {
                 continue;
             }
             let pts_o: Vec<V2> = (0..=12).map(|i| bez8(&other.curve, i as f32 / 12.0)).collect();
@@ -2396,7 +2480,7 @@ impl Sim {
                 }
                 break;
             }
-            let c2 = self.stay_cost(self.drv(i), f).1;
+            let c2 = self.stay_cost_of(i, self.drv(i), f).1;
             if c2 == NONE || c2 == SINK {
                 break;
             }
@@ -3522,7 +3606,7 @@ impl Sim {
             if cl == e {
                 continue;
             }
-            let (c, conn) = self.stay_cost(drv, cl);
+            let (c, conn) = self.stay_cost_of(i, drv, cl);
             if conn != NONE && conn != SINK && c.is_finite() && best.map_or(true, |b| c < b.0) {
                 best = Some((c, conn));
             }
@@ -3554,14 +3638,14 @@ impl Sim {
             self.remove_vehicle(i);
             return;
         }
-        let own = self.stay_cost(self.drv(i), e).0;
+        let own = self.stay_cost_of(i, self.drv(i), e).0;
         // infração: parado no fim da faixa sem saída boa; quem não infringe só o faz depois de muito tempo preso
         if self.choice[i] != SINK && rest < 25.0 && self.wait[i] > 8.0 {
             if self.rule_breaker[i] || self.wait[i] > 45.0 {
                 // compara em fluxo livre: a espera do próprio veículo (que entra no atraso medido da conversão dele)
                 // não pode, sozinha, justificar a conversão proibida da faixa vizinha
                 let free = Drv { app: false, ..self.drv(i) };
-                let own_free = self.stay_cost(free, e).0;
+                let own_free = self.stay_cost_of(i, free, e).0;
                 if let Some((cost, c)) = self.best_neighbor_conn(i, free) {
                     if !own_free.is_finite() || own_free - cost > 20.0 {
                         if self.choice[i] != c {
@@ -3599,7 +3683,7 @@ impl Sim {
                 if cl == e || !self.compatible(i, cl) {
                     continue;
                 }
-                let tot = self.stay_cost(self.drv(i), cl).0 + w * (cl as i32 - e as i32).unsigned_abs() as f32 * self.lc_mul(cl);
+                let tot = self.stay_cost_of(i, self.drv(i), cl).0 + w * (cl as i32 - e as i32).unsigned_abs() as f32 * self.lc_mul(cl);
                 // perto do nó só se muda de plano por um ganho grande (a árvore muda com o trânsito)
                 if tot + if rest < 50.0 && own.is_finite() { 30.0 } else { 2.0 } < best.0 {
                     best = (tot, cl);
@@ -3615,22 +3699,27 @@ impl Sim {
         }
         // discricionária (MOBIL): troca se o ganho próprio, descontado o incômodo causado aos outros, supera o limiar;
         // à direita é mais fácil e à esquerda mais difícil (CTB art. 29: a direita é dos mais lentos, ultrapassa-se pela esquerda)
-        let (my_lead, my_foll) = self.around(e, self.s[i], i);
-        // atrás de quem está parado no ponto, ultrapassa também perto do fim da faixa (fora da linha contínua)
-        let behind_stop = my_lead.is_some_and(|j| self.dwell[j] > 0.0) && rest > LC_SOLID_ZONE + 5.0;
-        // e fica na faixa dela (sem ultrapassagem por conforto)
-        if stop_here || ((self.choice[i] == SINK || rest < 60.0) && !behind_stop) {
+        // (vizinhos e acelerações da faixa atual só quando precisa: em faixa única, ou sem faixa ao lado que sirva à rota,
+        // não são usados; são funções puras, então adiar não muda nada)
+        if stop_here {
             self.cool[i] = 1.5;
             return;
         }
+        let mut mine: Option<(Option<usize>, Option<usize>)> = None;
+        if self.choice[i] == SINK || rest < 60.0 {
+            let (my_lead, my_foll) = self.around(e, self.s[i], i);
+            // atrás de quem está parado no ponto, ultrapassa também perto do fim da faixa (fora da linha contínua)
+            let behind_stop = my_lead.is_some_and(|j| self.dwell[j] > 0.0) && rest > LC_SOLID_ZONE + 5.0;
+            // e fica na faixa dela (sem ultrapassagem por conforto)
+            if !behind_stop {
+                self.cool[i] = 1.5;
+                return;
+            }
+            mine = Some((my_lead, my_foll));
+        }
         let (lo, hi) = self.lanes_of(e);
-        let a_cur = self.idm(i, self.lead_gap(i, my_lead));
-        // quem vem atrás de mim: hoje me segue; depois seguiria o meu líder
-        let d_old = my_foll.map_or(0.0, |f| {
-            let now = self.idm(f, Some((self.s[i] - self.vlen[i] - self.s[f], self.v[i])));
-            let after = self.idm(f, my_lead.map(|j| (self.s[j] - self.vlen[j] - self.s[f], self.v[j])));
-            after - now
-        });
+        // (aceleração atual, incômodo para quem vem atrás): quem vem atrás de mim hoje me segue; depois seguiria o meu líder
+        let mut cur: Option<(f32, f32)> = None;
         let mut pick: Option<(f32, usize)> = None;
         for cl in [e as i32 - 1, e as i32 + 1] {
             if cl < lo as i32 || cl >= hi as i32 {
@@ -3641,10 +3730,27 @@ impl Sim {
                 continue;
             }
             // não troca para uma faixa que piora a rota
-            let rc = self.stay_cost(self.drv(i), cl).0;
+            let rc = self.stay_cost_of(i, self.drv(i), cl).0;
             if !rc.is_finite() || (own.is_finite() && rc > own + 5.0) {
                 continue;
             }
+            let (a_cur, d_old) = match cur {
+                Some(c) => c,
+                None => {
+                    let (my_lead, my_foll) = match mine {
+                        Some(m) => m,
+                        None => self.around(e, self.s[i], i),
+                    };
+                    let a_cur = self.idm(i, self.lead_gap(i, my_lead));
+                    let d_old = my_foll.map_or(0.0, |f| {
+                        let now = self.idm(f, Some((self.s[i] - self.vlen[i] - self.s[f], self.v[i])));
+                        let after = self.idm(f, my_lead.map(|j| (self.s[j] - self.vlen[j] - self.s[f], self.v[j])));
+                        after - now
+                    });
+                    cur = Some((a_cur, d_old));
+                    (a_cur, d_old)
+                }
+            };
             let (ld, fl) = self.around(cl, self.s[i], i);
             let a_new = self.idm(i, self.lead_gap(i, ld));
             // novo seguidor: segurança e incômodo
@@ -4566,6 +4672,19 @@ fn len_v(a: V2) -> f64 {
 }
 
 /// Bézier cúbica (8 floats) no parâmetro `t`.
+/// Caixa (x0, y0, x1, y1) dos pontos de controle de uma curva de `bez8`: contém a curva inteira.
+fn ctrl_box(c: &[f32; 8]) -> [f32; 4] {
+    let (mut b0, mut b1, mut b2, mut b3) = (c[0], c[1], c[0], c[1]);
+    for k in 1..4 {
+        let (x, y) = (c[2 * k], c[2 * k + 1]);
+        b0 = b0.min(x);
+        b1 = b1.min(y);
+        b2 = b2.max(x);
+        b3 = b3.max(y);
+    }
+    [b0, b1, b2, b3]
+}
+
 fn bez8(c: &[f32; 8], t: f32) -> V2 {
     let u = 1.0 - t;
     let (a, b, d, e) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);

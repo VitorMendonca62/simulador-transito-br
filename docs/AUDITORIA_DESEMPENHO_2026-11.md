@@ -219,6 +219,44 @@ desenho por software deste contêiner); "sim" fica em ≤ 100 % (antes chegava a
 Com o worker a ~100 %, o ritmo agora é o limite do passo (1000 ÷ (5 passos × ~9,8 ms) ≈ 20×). Para chegar a M1
 (≥ 28×) falta a etapa 2 (passo do núcleo).
 
+**2026-11-24: etapa 2 implementada** (`sim/mod.rs`, `sim/route.rs`), toda com resultado idêntico: o estado de todos
+os veículos (hash do quadro a cada bloco de 50 s, impresso agora pelo `perf_sim`) e o `recife_behavior` (3 sementes)
+bateram com a base linha por linha; 91 testes passam.
+- 2.1: cache de `stay_cost` por veículo (`stay_cost_of`, 4 entradas por veículo), chave = faixa, ponto de destino,
+  versão da árvore da zona (`zver`, sobe a cada lote de rotas) e flags do motorista. Usado na troca de faixa, na escolha
+  da conversão e em `ahead_stop_at`. Corta pela metade as instruções de `stay_cost`.
+- Semáforos: `rem_pos` no lugar de `rem_euclid` (o `fmod` em software custava ~1,7 % do passo); bit a bit igual
+  (prova no comentário e teste `rem_pos_matches_rem_euclid`, 2 milhões de casos).
+- Troca de faixa por conforto (MOBIL): vizinhos e acelerações da faixa atual só quando há faixa ao lado candidata.
+- Conflitos (`conflicts_of`): pares de conversões cujas caixas dos pontos de controle estão afastadas mais que a
+  distância de quase-conflito (+0,5 m) não são comparados (a curva fica dentro do envoltório dos pontos de controle).
+  −27 % de instruções em `conflicts_of`.
+- `tree_local` genérico (sem `&dyn Fn`): sem ganho medido, mantido por ser inofensivo.
+- `perf_sim`: `PERF_EXT=1` calcula as árvores de rotas fora do passo medido (como os workers do app), hash do estado e,
+  nos passos lentos, quantos pontos de destino e conflitos foram montados.
+
+| Medida | Base (etapa 1) | Etapa 2 |
+|---|---|---|
+| Instruções em `Sim::step`, nativo, 500 s, rotas fora (callgrind) | 21,78 bi | 20,35 bi (**−6,6 %**) |
+| Ciclos estimados (instr. + 10×falta L1 + 100×falta L2) | 27,8 bi | 26,2 bi (−5,5 %) |
+| Navegador, ms por passo a 30× (3 rodadas alternadas) | 9,77 / 8,34 / 9,76 | 9,10 / 8,25 / 8,83 (**−6 %** na média) |
+| Navegador, ritmo a 30× | 20,7× / 24,0× / 20,4× | 22,1× / 24,4× / 22,9× (+7 %) |
+| Navegador, pior passo | 45 / 48 / 35 ms | 30 / 37 / 29 ms |
+
+**Abaixo do esperado (−15 a −25 %).** O que sobra no passo, medido com o callgrind:
+- O corpo do `step` concentra 43 % das faltas de cache L1, espalhadas pelos ~40 vetores por veículo (`s`, `v`, `edge`,
+  `vfac`…): é o laço por veículo, sem um ponto quente único (agrupar campos, B1, já foi testado sem ganho).
+- `lane_end_lead` → `may_enter`/`ahead_stop_at`/`merge_ghost`: ~24 % das instruções, lógica de decisão no nó que não
+  dá para pular sem mudar o comportamento.
+- `make_target` (árvore local do ponto de destino, ~230 mil instruções cada; 12,8 mil pontos em 1.000 s) e
+  `conflicts_of` (~33 mil por conversão; 55 mil conversões): custo diluído, que só some mudando o sorteio dos pontos
+  (≈) ou guardando a geometria das curvas (dezenas de MB, contra M9).
+- Os picos de passo restantes não têm causa única (0–4 pontos novos e 3–17 conflitos montados nos piores passos); boa
+  parte é ruído desta máquina virtual.
+
+Para M1 (≥ 28×) com ~9 ms por passo seria preciso −35 %. Os caminhos restantes mudam o modelo (≈: troca de faixa e
+`may_enter` em ritmo menor, menos pontos de destino) ou a arquitetura (E3, multithread).
+
 ## 6. Testado e descartado nesta auditoria
 
 | Opção | Resultado |
