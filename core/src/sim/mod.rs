@@ -4538,6 +4538,12 @@ impl Sim {
     pub fn vehicle_s(&self, i: u32) -> (f32, f32) {
         (self.s[i as usize], self.vlen[i as usize])
     }
+    /// Tamanhos para o relatório de desempenho: (faixas, conversões, zonas, bytes das árvores de rotas por zona).
+    pub fn size_report(&self) -> (usize, usize, usize, usize) {
+        let trees = self.zone_dist.iter().map(|d| d.len() * 4).sum::<usize>() + self.zone_free.iter().map(|d| d.len() * 2).sum::<usize>();
+        (self.nl, self.conns.len(), self.zone_dist.len(), trees)
+    }
+
     pub fn lane_count(&self) -> usize {
         self.nl
     }

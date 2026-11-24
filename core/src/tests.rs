@@ -715,6 +715,8 @@ fn perf_sim() {
     let t = Instant::now();
     n.start_sim(&json).unwrap();
     eprintln!("Sim::new {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let (nl, nc, nz, tb) = n.sim.as_ref().unwrap().size_report();
+    eprintln!("faixas={nl} conversões={nc} zonas={nz} árvores de rotas={:.0} MB", tb as f64 / 1048576.0);
     let mut worst = 0.0f64;
     // piores passos: (ms, tempo simulado, houve recálculo da matriz OD)
     let mut slow: Vec<(f64, f64, bool)> = Vec::new();
