@@ -379,6 +379,23 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
   .rail-btn::after { display: none; }
   .drawer { top: auto; left: 12px; right: 12px; bottom: 112px; width: auto; max-height: 55%; }
   .status { display: none; }
+  /* barra em duas linhas: marca e zoom em cima, ações embaixo */
+  .toolbar { row-gap: 8px; }
+  .toolbar .row.zoom { order: 1; gap: 4px; }
+  .toolbar > .row:not(.zoom) { order: 2; width: 100%; gap: 6px; flex-wrap: nowrap; }
+  .toolbar .btn.with-ico { white-space: nowrap; }
+}
+/* rótulo curto nas telas estreitas */
+.narrow-only { display: none; }
+@media (max-width: 420px) {
+  .toolbar { padding-left: 10px; column-gap: 8px; }
+  .brand { gap: 7px; font-size: 11px; }
+  .toolbar .zoom .btn.icon { width: 28px; }
+  .toolbar .zoom .btn.with-ico { font-size: 0; gap: 0; padding: 6px 6px; }
+  .toolbar > .row:not(.zoom) { flex-wrap: wrap; }
+  .toolbar > .row:not(.zoom) .btn.with-ico { font-size: 12px; padding: 6px 8px; gap: 6px; }
+  .wide-only { display: none; }
+  .narrow-only { display: inline; }
 }
 
 .scale { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-variant-numeric: tabular-nums; }
@@ -390,7 +407,7 @@ kbd { background: #1a2523; border: 1px solid #2f4540; border-bottom-width: 2px; 
 .drawer.sim-dock.closed { width: 220px; }
 .drawer.sim-dock.closed .drawer-head { padding-bottom: 12px; }
 @media (max-width: 760px) {
-  .drawer.sim-dock { top: 120px; bottom: auto; left: 12px; right: 12px; width: auto; max-height: 35%; }
+  .drawer.sim-dock { top: calc(var(--toolbar-bottom, 120px) + 8px); bottom: auto; left: 12px; right: 12px; width: auto; max-height: 35%; }
   .drawer.sim-dock.closed { width: auto; }
 }
 

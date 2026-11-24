@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { viewRef } from '../engine/instance'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
@@ -84,8 +84,18 @@ export function Toolbar() {
   const { data, loading } = useStore(useShallow((s) => ({ data: s.data, loading: s.loading })))
   const [recife, setRecife] = useState(false)
   const st = useStore.getState
+  const bar = useRef<HTMLElement>(null)
+  // altura real da barra (quebra em mais linhas no celular): os painéis de baixo começam logo depois dela
+  useLayoutEffect(() => {
+    const el = bar.current!
+    const set = () => document.documentElement.style.setProperty('--toolbar-bottom', `${el.getBoundingClientRect().bottom}px`)
+    set()
+    const ro = new ResizeObserver(set)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   return (
-    <header className="toolbar">
+    <header className="toolbar" ref={bar}>
       <div className="brand">
         <span className="logo" />
         Simulador de Trânsito <b>BR</b>
@@ -100,7 +110,8 @@ export function Toolbar() {
         {data && (
           <button className="btn with-ico" onClick={() => st().exportScenario()} title="Baixa um .json com todas as edições (vias, faixas, semáforos, conversões e demanda)">
             <IconDownload size={16} />
-            Exportar cenário
+            <span className="wide-only">Exportar cenário</span>
+            <span className="narrow-only">Exportar</span>
           </button>
         )}
       </div>
