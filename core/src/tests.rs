@@ -367,6 +367,49 @@ fn perf_stages() {
     eprintln!("set_edits rápido {:>7.1} ms  ({} de {} ladrilhos sujos, caminho rápido: {})", t.elapsed().as_secs_f64() * 1e3, n.delta.dirty.len(), n.tiles.tiles.len(), n.fast_edits);
 }
 
+/// Importação como no app ao abrir o Recife (OSM + CTTU + linhas, conexões sob demanda):
+/// `PERF_OSM=arquivo cargo test --release perf_import -- --ignored --nocapture` (`PERF_REP=n` repete).
+#[test]
+#[ignore]
+fn perf_import() {
+    use std::time::Instant;
+    let data = std::fs::read(std::env::var("PERF_OSM").expect("defina PERF_OSM")).unwrap();
+    let cttu = include_str!("../../public/data/semaforos_cttu.json");
+    let lines = include_str!("../../public/data/onibus_recife.json");
+    let rep: usize = std::env::var("PERF_REP").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    for _ in 0..rep {
+        let t = Instant::now();
+        let ext: Vec<crate::extsig::ExtSignal> = serde_json::from_str(cttu).unwrap();
+        let tr = crate::transit::TransitData::parse(lines).unwrap();
+        let t1 = t.elapsed();
+        let n = crate::build_network_transit(&data, &ext, tr, true).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        // impressão digital da rede: nós (posição, id OSM, semáforo), semáforos (nó, fases) e faixas
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |x: u64| h = (h ^ x).wrapping_mul(0x100_0000_01b3);
+        for nd in &n.net.nodes {
+            (mix(nd.pos[0].to_bits()), mix(nd.pos[1].to_bits()), mix(nd.osm_id as u64), mix(nd.signal as u64));
+        }
+        for sg in &n.net.signals {
+            mix(sg.node as u64);
+            for ph in &sg.phases {
+                (mix(ph.green.to_bits() as u64), mix(ph.ends.len() as u64));
+                ph.ends.iter().for_each(|&e| mix(e as u64));
+            }
+        }
+        for l in &n.net.lanes {
+            (mix(l.seg as u64), mix(l.from as u64), mix(l.to as u64));
+        }
+        eprintln!(
+            "import_osm_full {ms:>6.0} ms (JSON da CTTU e das linhas {:.0} ms)  {} nós, {} faixas, {} semáforos  rede={h:016x}",
+            t1.as_secs_f64() * 1e3,
+            n.net.nodes.len(),
+            n.net.lanes.len(),
+            n.net.signals.len()
+        );
+    }
+}
+
 #[test]
 fn gravity_conserves_origin_totals_and_respects_forced_cells() {
     let o = vec![100.0, 50.0, 0.0];

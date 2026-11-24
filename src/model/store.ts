@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { LayerKey, LayerState } from '../engine/MapView'
 import { viewRef } from '../engine/instance'
 import { DEFAULT_PARAMS, demandPayload, PROFILES, ZONE_COLORS, type DemandParams, type Zone } from './demand'
-import { applyOdImport, buildOdImport, OD2018_URL, type OdImport, type OdSource } from './odImport'
+import { applyOdImport, buildOdImport, fetchOd2018, type OdImport } from './odImport'
 
 import { HEAT_PALETTE, queueLevels, speedLevels } from '../engine/HeatLayer'
 import type { VehicleInfo } from './types'
@@ -719,9 +719,7 @@ export const useStore = create<State>((set, get) => {
       if (!data || get().odImporting) return
       set({ odImporting: true })
       try {
-        const res = await fetch(OD2018_URL)
-        if (!res.ok) throw new Error(`não foi possível ler ${OD2018_URL} (${res.status})`)
-        const { zones, imp } = buildOdImport((await res.json()) as OdSource, data, opts)
+        const { zones, imp } = buildOdImport(await fetchOd2018(), data, opts)
         zoneRecord = zones
         odImportRecord = imp
         syncOdImport()
@@ -1022,6 +1020,8 @@ export const useStore = create<State>((set, get) => {
     loadRecife: async ({ zones, signals, lines }) => {
       const name = 'mapa-recife.osm'
       set({ loading: true, error: null })
+      // a OD baixa e é decodificada enquanto o worker monta a rede (erros aparecem em `importOd2018`)
+      if (zones) fetchOd2018().catch(() => {})
       try {
         const res = await fetch(RECIFE_URL)
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)

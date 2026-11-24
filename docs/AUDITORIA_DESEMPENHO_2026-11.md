@@ -257,6 +257,49 @@ bateram com a base linha por linha; 91 testes passam.
 Para M1 (≥ 28×) com ~9 ms por passo seria preciso −35 %. Os caminhos restantes mudam o modelo (≈: troca de faixa e
 `may_enter` em ritmo menor, menos pontos de destino) ou a arquitetura (E3, multithread).
 
+**2026-11-24: etapa 3 implementada** (3.1 completo; 3.2 e 3.3 não feitos, ver abaixo). Resultado idêntico: estado do
+`perf_sim` (CTTU + linhas + motos) igual nos 20 blocos, rede igual (impressão digital nova do `perf_import`), 91 testes.
+
+Medido por fase no navegador (logs temporários, já removidos), antes das correções:
+
+| Fase | Abrir | Fase | Iniciar |
+|---|---|---|---|
+| `import_osm_full` (worker) | 799 ms | `sim_init_ext` (worker) | **916 ms**, dos quais `contra::plan` 638 ms |
+| **Baixar a OD** (só depois do mapa) | **741 ms** | árvores iniciais (2 workers de rotas) | 626 ms |
+| `buildOdImport` (thread principal) | 303 ms | | |
+| instalar no mapa / IndexedDB / extrair | 88 / 55 / 70 ms | | |
+
+Correções:
+- **`contra::plan`** (contramão das motos, fase 9; era a regressão do início): cada trecho candidato varria todas as
+  ~69 mil faixas da rede duas vezes atrás das que chegam/saem de um nó. Agora as faixas são indexadas por nó uma vez.
+  638 → 8 ms (nativo), mesma sequência de faixas.
+- **Encaixe da CTTU** (`extsig`): `near_segs` varria todos os trechos do mapa para cada ponto, e o cruzamento/pistas
+  auxiliares, todas as interseções. Agora uma grade (CSR) devolve os candidatos em ordem crescente (o desempate entre
+  trechos da mesma via depende da ordem). `import_osm_full` nativo 430 → 360 ms; rede idêntica.
+- **OD antecipada**: `loadRecife` pede o JSON da OD (`fetchOd2018`, com cache) junto com o mapa; ele chega enquanto o
+  worker monta a rede.
+- `perf_import` (teste ignorado): tempo da importação como no app e impressão digital da rede.
+
+| Medida (navegador, este contêiner) | Antes | Depois | Meta |
+|---|---|---|---|
+| M7 Abrir o Recife | 2,26–2,40 s | **1,06–1,27 s** | ≤ 1,5 s ✔ |
+| M6 Iniciar → simulação pronta | 1,41–1,58 s | **0,88–1,09 s** | ≤ 0,8 s (quase) |
+| `Sim::new` nativo, com as árvores iniciais | 2,20 s | 1,21 s | — |
+
+O que sobra em iniciar é sobretudo a árvore inicial de cada uma das 130 zonas (~640 ms com 2 workers de rotas neste
+contêiner de 4 vCPU; com 8 threads são 4 workers, ~metade). **Testado e revertido:** o worker da simulação calcular uma
+parte das árvores enquanto espera (43 de 130) — aqui ficou pior (0,94 → 1,11 s), porque um 3º thread de cálculo
+disputa os núcleos com o desenho por software; numa máquina com GPU pode valer, mas não deu para comprovar.
+
+**Não feitos:**
+- 3.2 (rede processada no IndexedDB): com `import_osm_full` em ~0,5 s no WASM e a meta de abrir já batida, serializar
+  a `Network` inteira não compensa o risco agora.
+- 3.3 (D5, `zone_dist` em `u16`): com a OD do Recife todas as zonas são destino, então o ganho seria só a quantização
+  das árvores, que **muda** as rotas (≈, não =). Fica para quando a memória (M9) for prioridade; `LOCAL_BUDGET` menor
+  também muda o sorteio dos pontos.
+- `buildOdImport` (~0,3–0,4 s na thread principal, espalhado entre portais, ponto no polígono e chaves de texto nos
+  mapas da matriz): não otimizado; candidato a ir para o worker se a tela travar ao abrir numa máquina real.
+
 ## 6. Testado e descartado nesta auditoria
 
 | Opção | Resultado |

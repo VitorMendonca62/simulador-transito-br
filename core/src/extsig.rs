@@ -112,11 +112,103 @@ fn car_way(tags: &[(String, String)]) -> bool {
     get("area") != Some("yes") && get("highway").and_then(crate::net::parse_highway).is_some() && way_level(tags) == 0
 }
 
+/// Grade de caixas (CSR): cada item entra nas células que a caixa dele toca. A consulta devolve, em ordem crescente e
+/// sem repetição, os itens das células que a caixa pedida toca: quem varria a lista inteira na mesma ordem e filtrava
+/// pela caixa chega ao mesmo resultado olhando só esses.
+struct Grid {
+    x0: f64,
+    y0: f64,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    off: Vec<u32>,
+    items: Vec<u32>,
+}
+
+impl Grid {
+    fn new(boxes: &[[f64; 4]], cell: f64) -> Grid {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for b in boxes {
+            x0 = x0.min(b[0]);
+            y0 = y0.min(b[1]);
+            x1 = x1.max(b[2]);
+            y1 = y1.max(b[3]);
+        }
+        if boxes.is_empty() {
+            (x0, y0, x1, y1) = (0.0, 0.0, 0.0, 0.0);
+        }
+        let nx = (((x1 - x0) / cell) as usize + 1).min(4096);
+        let ny = (((y1 - y0) / cell) as usize + 1).min(4096);
+        let mut g = Grid { x0, y0, cell, nx, ny, off: vec![0; nx * ny + 1], items: Vec::new() };
+        for pass in 0..2 {
+            let mut fill = g.off.clone();
+            for (i, b) in boxes.iter().enumerate() {
+                let (cx0, cy0, cx1, cy1) = g.range(b);
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        let c = cy * nx + cx;
+                        if pass == 0 {
+                            g.off[c + 1] += 1;
+                        } else {
+                            g.items[fill[c] as usize] = i as u32;
+                            fill[c] += 1;
+                        }
+                    }
+                }
+            }
+            if pass == 0 {
+                for c in 0..nx * ny {
+                    g.off[c + 1] += g.off[c];
+                }
+                g.items = vec![0; g.off[nx * ny] as usize];
+            }
+        }
+        g
+    }
+
+    /// Células (x0, y0, x1, y1) que a caixa toca, limitadas à grade.
+    fn range(&self, b: &[f64; 4]) -> (usize, usize, usize, usize) {
+        let c = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
+        (c(b[0], self.x0, self.nx), c(b[1], self.y0, self.ny), c(b[2], self.x0, self.nx), c(b[3], self.y0, self.ny))
+    }
+
+    /// Itens cujas caixas podem tocar `b`, em ordem crescente.
+    fn query(&self, b: [f64; 4], out: &mut Vec<u32>) {
+        out.clear();
+        let (cx0, cy0, cx1, cy1) = self.range(&b);
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                let c = cy * self.nx + cx;
+                out.extend_from_slice(&self.items[self.off[c] as usize..self.off[c + 1] as usize]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// Trechos das vias de carro (via, índice do trecho, a, b) com a grade deles.
+struct Segs {
+    list: Vec<(usize, usize, [f64; 2], [f64; 2])>,
+    grid: Grid,
+}
+
+impl Segs {
+    fn new(list: Vec<(usize, usize, [f64; 2], [f64; 2])>) -> Segs {
+        let boxes: Vec<[f64; 4]> = list.iter().map(|&(_, _, a, b)| [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]).collect();
+        Segs { grid: Grid::new(&boxes, 2.0 * R_MIDBLOCK), list }
+    }
+}
+
 /// Trechos mais próximos de `p`, um por via (até `R_MIDBLOCK`): (dist², via, trecho, t, direção), do mais perto ao mais longe.
-fn near_segs(p: [f64; 2], segs: &[(usize, usize, [f64; 2], [f64; 2])]) -> Vec<(f64, usize, usize, f64, [f64; 2])> {
+fn near_segs(p: [f64; 2], segs: &Segs) -> Vec<(f64, usize, usize, f64, [f64; 2])> {
     let d2 = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2);
     let mut per_way: HashMap<usize, (f64, usize, f64, [f64; 2])> = HashMap::new(); // via -> (dist², trecho, t, direção)
-    for &(wi, k, a, b) in segs {
+    let r = R_MIDBLOCK;
+    let mut cand = Vec::new();
+    // a grade só tira trechos que o teste de caixa abaixo também tiraria; a ordem (crescente) é a da lista
+    segs.grid.query([p[0] - r, p[1] - r, p[0] + r, p[1] + r], &mut cand);
+    for &(wi, k, a, b) in cand.iter().map(|&i| &segs.list[i as usize]) {
         let r = R_MIDBLOCK;
         if a[0].max(b[0]) < p[0] - r || a[0].min(b[0]) > p[0] + r || a[1].max(b[1]) < p[1] - r || a[1].min(b[1]) > p[1] + r {
             continue;
@@ -237,6 +329,10 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
             }
         }
     }
+    let segs = Segs::new(segs);
+    // grade dos nós de interseção (consultas por raio em vez de varrer todos para cada ponto)
+    let jgrid = Grid::new(&junctions.iter().map(|(_, q)| [q[0], q[1], q[0], q[1]]).collect::<Vec<_>>(), R_AUX);
+    let mut jcand: Vec<u32> = Vec::new();
 
     let mut marked: HashMap<i64, u32> = HashMap::new();
     let mut phases: HashMap<u32, Vec<ExtPhase>> = HashMap::new();
@@ -304,8 +400,11 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
             // nada do ajuste existe neste mapa (outra versão do OSM): encaixe automático
         }
         if s.cruzamento {
+            let r = R_JUNCTION_MAX;
+            jgrid.query([p[0] - r, p[1] - r, p[0] + r, p[1] + r], &mut jcand);
+            // (a ordem antes da ordenação abaixo, total em (dist², id), não importa)
             let mut near: Vec<(f64, i64)> =
-                junctions.iter().map(|(id, q)| (d2(p, *q), *id)).filter(|e| e.0 <= R_JUNCTION_MAX * R_JUNCTION_MAX).collect();
+                jcand.iter().map(|&i| &junctions[i as usize]).map(|(id, q)| (d2(p, *q), *id)).filter(|e| e.0 <= R_JUNCTION_MAX * R_JUNCTION_MAX).collect();
             if !near.is_empty() {
                 near.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let mut core: Vec<i64> = Vec::new();
@@ -338,7 +437,9 @@ pub fn replace_signals(raw: &mut RawOsm, list: &[ExtSignal]) -> Option<ExtSignal
     // cruzamento (a principal e a transversal)
     for (id, p, core) in aux {
         let core_names: Vec<u32> = core.iter().flat_map(|c| names.get(c).into_iter().flatten().copied()).collect();
-        for (j, q) in &junctions {
+        // cada nó só depende de si mesmo (marcado ou não, nomes): olhar só os da grade dá o mesmo
+        jgrid.query([p[0] - R_AUX, p[1] - R_AUX, p[0] + R_AUX, p[1] + R_AUX], &mut jcand);
+        for (j, q) in jcand.iter().map(|&i| &junctions[i as usize]) {
             if marked.contains_key(j) || d2(p, *q) > R_AUX * R_AUX {
                 continue;
             }

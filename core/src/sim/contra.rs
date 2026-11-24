@@ -39,11 +39,13 @@ fn pick_by_kind(net: &Net, cands: &[u32], kind: u8) -> u32 {
     if kind == K_LEFT { *cands.iter().min_by_key(|&&l| idx(l)).unwrap() } else { *cands.iter().max_by_key(|&&l| idx(l)).unwrap() }
 }
 
-/// Faixas da rede agrupadas por trecho e sentido (`lane_base` + sentido), filtradas por `keep`.
-fn groups(net: &Net, keep: impl Fn(&Lane) -> bool) -> Vec<Vec<u32>> {
+/// Faixas de `list` (ids em ordem crescente) agrupadas por trecho e sentido (`lane_base` + sentido), filtradas por
+/// `keep`. `list` é a lista do nó (`by_node`): a mesma sequência que filtrar a rede inteira, sem percorrê-la.
+fn groups(net: &Net, list: &[u32], keep: impl Fn(&Lane) -> bool) -> Vec<Vec<u32>> {
     let mut out: Vec<Vec<u32>> = Vec::new();
     let mut last = (u32::MAX, u8::MAX);
-    for (li, l) in net.lanes.iter().enumerate() {
+    for &li in list {
+        let l = &net.lanes[li as usize];
         if !keep(l) {
             continue;
         }
@@ -51,7 +53,16 @@ fn groups(net: &Net, keep: impl Fn(&Lane) -> bool) -> Vec<Vec<u32>> {
             out.push(Vec::new());
             last = (l.seg, l.dir);
         }
-        out.last_mut().unwrap().push(li as u32);
+        out.last_mut().unwrap().push(li);
+    }
+    out
+}
+
+/// Faixas da rede por nó (chegada ou saída), em ordem crescente de id.
+fn by_node(net: &Net, node_of: impl Fn(&Lane) -> u32) -> Vec<Vec<u32>> {
+    let mut out = vec![Vec::new(); net.nodes.len()];
+    for (li, l) in net.lanes.iter().enumerate() {
+        out[node_of(l) as usize].push(li as u32);
     }
     out
 }
@@ -59,6 +70,8 @@ fn groups(net: &Net, keep: impl Fn(&Lane) -> bool) -> Vec<Vec<u32>> {
 /// Planeja as faixas de contramão da rede (ver o módulo).
 pub(super) fn plan(net: &Net, lanes: &[LaneRt]) -> Vec<ContraPlan> {
     let mut out = Vec::new();
+    // antes cada trecho candidato varria todas as faixas da rede duas vezes (~0,6 s no Recife)
+    let (into, from) = (by_node(net, |l| l.to), by_node(net, |l| l.from));
     for (si, s) in net.segs.iter().enumerate() {
         if !s.oneway || s.roundabout || s.link || s.level != 0 || !(HW_TERTIARY..=HW_LIVING).contains(&s.hw) || s.lf == 0 {
             continue;
@@ -83,7 +96,7 @@ pub(super) fn plan(net: &Net, lanes: &[LaneRt]) -> Vec<ContraPlan> {
         let (start, sdir) = at(total - s.cut_to);
         let (end, edir) = at(s.cut_from);
         let mut ins = Vec::new();
-        for g in groups(net, |l| l.to == b && l.seg != si as u32 && !l.bus) {
+        for g in groups(net, &into[b as usize], |l| l.to == b && l.seg != si as u32 && !l.bus) {
             let l0 = &net.lanes[g[0] as usize];
             if let Some((kind, _)) = crate::conn::turn_curve(l0.end, l0.edir, start, sdir) {
                 let fl = pick_by_kind(net, &g, kind);
@@ -93,7 +106,7 @@ pub(super) fn plan(net: &Net, lanes: &[LaneRt]) -> Vec<ContraPlan> {
             }
         }
         let mut outs = Vec::new();
-        for g in groups(net, |l| l.from == a && l.seg != si as u32 && !l.bus) {
+        for g in groups(net, &from[a as usize], |l| l.from == a && l.seg != si as u32 && !l.bus) {
             let l0 = &net.lanes[g[0] as usize];
             if let Some((kind, _)) = crate::conn::turn_curve(end, edir, l0.start, l0.sdir) {
                 let tl = pick_by_kind(net, &g, kind);

@@ -35,6 +35,22 @@ export interface OdImport {
 
 export const OD2018_URL = `${import.meta.env.BASE_URL}data/od2018_zonas.json`
 
+let odSource: Promise<OdSource> | null = null
+/**
+ * Zonas e matrizes da OD 2018 (baixadas e decodificadas uma vez). Abrir o Recife já pede junto com o mapa, para o JSON
+ * chegar enquanto o worker monta a rede, em vez de depois.
+ */
+export function fetchOd2018(): Promise<OdSource> {
+  odSource ??= fetch(OD2018_URL).then((res) => {
+    if (!res.ok) throw new Error(`não foi possível ler ${OD2018_URL} (${res.status})`)
+    return res.json() as Promise<OdSource>
+  })
+  return odSource.catch((e) => {
+    odSource = null
+    throw e
+  })
+}
+
 const M_PER_DEG = 111_319.490_793_273_57
 /** Mínimo de nós da rede dentro do polígono para a zona ficar no mapa. */
 const MIN_NODES = 3
