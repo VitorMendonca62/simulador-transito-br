@@ -300,6 +300,22 @@ disputa os núcleos com o desenho por software; numa máquina com GPU pode valer
 - `buildOdImport` (~0,3–0,4 s na thread principal, espalhado entre portais, ponto no polígono e chaves de texto nos
   mapas da matriz): não otimizado; candidato a ir para o worker se a tela travar ao abrir numa máquina real.
 
+**2026-11-24: etapa 4 preparada, falta rodar numa máquina com GPU.** `scripts/perf/bench-desenho.mjs` abre o Recife,
+inicia a 30×, espera a rede encher e mede 10 s parado, arrastando, dando zoom e arrastando com a cidade inteira na
+tela: fps e p50/p95/p99 do intervalo entre quadros, desenhos do mapa por segundo, JS e GPU por desenho, tarefas longas e
+o ritmo da simulação. Avisa quando o WebGL é por software e diz se M8 foi batida.
+
+```
+npm run dev
+npm i --no-save playwright && npx playwright install chromium
+node scripts/perf/bench-desenho.mjs http://localhost:5173/ 60 30
+```
+
+Neste contêiner (SwiftShader, só para validar o roteiro): 4–8 fps em todas as fases, nada a concluir sobre a GPU. Um
+dado que não depende dela: **o JS do mapa gasta ~7 ms por desenho ao arrastar** (1,8 ms parado), quase metade do
+orçamento de 16,7 ms a 60 fps. Se a máquina real ficar abaixo de 55 fps ao arrastar, começar por aí (perfil com
+`PROF=` no `bench-browser.mjs`).
+
 ## 6. Testado e descartado nesta auditoria
 
 | Opção | Resultado |
