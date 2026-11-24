@@ -131,16 +131,70 @@ struct Drv {
     stop_lane: u32,
 }
 
-/// Células da matriz horária `h` (24 entradas) na hora `hour`, interpoladas linearmente entre horas inteiras como o
-/// perfil das zonas (`demand::profile_at`).
-fn hourly_at(h: &[std::collections::HashMap<String, f64>], hour: f64) -> std::collections::HashMap<String, f64> {
-    let hr = hour.rem_euclid(24.0);
-    let (i, f) = (hr.floor() as usize % 24, hr - hr.floor());
-    let mut out: std::collections::HashMap<String, f64> = h[i].iter().map(|(k, v)| (k.clone(), v * (1.0 - f))).collect();
-    for (k, v) in &h[(i + 1) % 24] {
-        *out.entry(k.clone()).or_insert(0.0) += v * f;
+/// Matriz horária (`od_hourly`/`od_hourly_moto`, 24 entradas "idOrigem>idDestino" → veículos/h) já ligada aos
+/// índices das zonas, para interpolar sem `String` nem `HashMap` a cada recálculo (com 253 zonas eram milhares de
+/// chaves clonadas e 64 mil `format!` num único passo). Mesma interpolação linear entre horas inteiras do perfil das
+/// zonas (`demand::profile_at`); uma célula vale na hora se aparece em alguma das duas horas vizinhas.
+#[derive(Default)]
+struct OdTable {
+    /// (origem, destino, valor por hora, horas em que a chave aparece: bit k = hora k)
+    cells: Vec<(u32, u32, [f64; 24], u32)>,
+}
+
+impl OdTable {
+    /// `canonical`: só chaves escritas exatamente como `"{id}>{id}"` (o que `demand::forced_cells` procura);
+    /// senão aceita espaços em volta dos números (como lia a matriz de motos).
+    fn build(h: &[std::collections::HashMap<String, f64>], idx: &std::collections::HashMap<i64, usize>, canonical: bool) -> OdTable {
+        let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut cells: Vec<(u32, u32, [f64; 24], u32)> = Vec::new();
+        for (hr, m) in h.iter().enumerate().take(24) {
+            for (k, &v) in m {
+                let pos = match at.get(k.as_str()) {
+                    Some(&p) => p,
+                    None => {
+                        let Some((a, b)) = k.split_once('>') else { continue };
+                        let (a, b) = if canonical { (a, b) } else { (a.trim(), b.trim()) };
+                        let (Ok(a), Ok(b)) = (a.parse::<i64>(), b.parse::<i64>()) else { continue };
+                        if canonical && *k != format!("{a}>{b}") {
+                            continue;
+                        }
+                        let (Some(&i), Some(&j)) = (idx.get(&a), idx.get(&b)) else { continue };
+                        cells.push((i as u32, j as u32, [0.0; 24], 0));
+                        at.insert(k.as_str(), cells.len() - 1);
+                        cells.len() - 1
+                    }
+                };
+                cells[pos].2[hr] = v;
+                cells[pos].3 |= 1 << hr;
+            }
+        }
+        OdTable { cells }
     }
-    out
+
+    /// Células na hora `hour`: (origem, destino, veículos/h).
+    fn at(&self, hour: f64) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        let hr = hour.rem_euclid(24.0);
+        let (i, f) = (hr.floor() as usize % 24, hr - hr.floor());
+        let k = (i + 1) % 24;
+        self.cells.iter().filter(move |c| c.3 & (1 << i | 1 << k) != 0).map(move |c| {
+            let a = if c.3 & (1 << i) != 0 { c.2[i] * (1.0 - f) } else { 0.0 };
+            let b = if c.3 & (1 << k) != 0 { c.2[k] * f } else { 0.0 };
+            (c.0 as usize, c.1 as usize, a + b)
+        })
+    }
+}
+
+/// Partes da demanda que não mudam durante a simulação, montadas no primeiro recálculo da matriz.
+#[derive(Default)]
+struct DemandCache {
+    zones: Vec<demand::ZoneIn>,
+    statics: Vec<demand::ZoneOut>,
+    /// tempos entre zonas (min); só guardado quando vem da cópia de fluxo livre (não muda mais)
+    t: Option<Vec<Vec<f64>>>,
+    /// `od_manual` por índice (sem `od_hourly`)
+    manual: Vec<Vec<Option<f64>>>,
+    car: Option<OdTable>,
+    moto: Option<OdTable>,
 }
 
 /// Ruído determinístico em [-1, 1] por (motorista, faixa): a mesma faixa sempre "parece" igual ao mesmo motorista.
@@ -530,6 +584,9 @@ pub struct Sim {
     row_next_m: Vec<f64>,
     rng_moto: Rng,
     next_matrix_at: f64,
+    /// recálculos da matriz OD feitos (diagnóstico de passos longos)
+    pub matrix_refreshes: u32,
+    dem: Option<DemandCache>,
     sigs: Vec<SigRt>,
     end_state: Vec<u8>,
     red_age: Vec<f32>,
@@ -950,6 +1007,8 @@ impl Sim {
             row_next_m: vec![f64::INFINITY; nz],
             rng_moto: Rng::new(init.params.seed ^ 0x4D07_0B1C_E5EE_D000),
             next_matrix_at: 0.0,
+            matrix_refreshes: 0,
+            dem: None,
             sigs,
             end_state: vec![0; net.segs.len() * 2],
             green_age: vec![0.0; net.segs.len() * 2],
@@ -1149,30 +1208,34 @@ impl Sim {
         }
     }
 
-    /// Células fixadas da matriz na hora `hour`: a fatia horária (interpolada como o perfil das
-    /// zonas, ver `demand::profile_at`), se houver, ou `od_manual`.
-    fn od_at(&self, hour: f64) -> std::collections::HashMap<String, f64> {
-        let h = &self.params.od_hourly;
-        if h.len() != 24 {
-            return self.params.od_manual.clone();
+    /// Monta (uma vez) o que a demanda reaproveita entre recálculos: zonas, geometria resolvida sobre a rede e as
+    /// matrizes fixadas por índice.
+    fn demand_cache(&mut self, net: &Net) {
+        if self.dem.is_some() {
+            return;
         }
-        hourly_at(h, hour)
+        let nz = self.zone_ids.len();
+        let zones: Vec<demand::ZoneIn> = (0..nz)
+            .map(|i| demand::ZoneIn { id: self.zone_ids[i], poly: self.zone_poly[i].clone(), gen: self.zone_gen[i], attr: self.zone_attr[i], profile: self.zone_profile[i].clone(), gateway: self.zone_gateway[i] })
+            .collect();
+        let mids = demand::seg_mids(net);
+        let statics = zones.iter().map(|z| demand::zone_static(net, &mids, z)).collect();
+        let idx: std::collections::HashMap<i64, usize> = self.zone_ids.iter().enumerate().map(|(i, &z)| (z, i)).collect();
+        let h = &self.params.od_hourly;
+        let car = (h.len() == 24).then(|| OdTable::build(h, &idx, true));
+        let manual = if car.is_none() { demand::forced_cells(&zones, &self.params.od_manual) } else { Vec::new() };
+        let hm = &self.params.od_hourly_moto;
+        let moto = (hm.len() == 24).then(|| OdTable::build(hm, &idx, false));
+        self.dem = Some(DemandCache { zones, statics, t: None, manual, car, moto });
     }
 
     /// Recalcula as taxas da matriz de motos (células fixas, sem modelo gravitacional).
     fn refresh_moto(&mut self) {
-        if self.params.od_hourly_moto.len() != 24 {
-            return;
-        }
+        let Some(table) = self.dem.as_ref().and_then(|d| d.moto.as_ref()) else { return };
         let hour = (self.time / 3600.0).rem_euclid(24.0);
-        let cells = hourly_at(&self.params.od_hourly_moto, hour);
         let nz = self.zone_ids.len();
-        let idx: std::collections::HashMap<i64, usize> = self.zone_ids.iter().enumerate().map(|(i, &z)| (z, i)).collect();
         let mut m = vec![vec![0.0f64; nz]; nz];
-        for (k, v) in &cells {
-            let Some((a, b)) = k.split_once('>') else { continue };
-            let (Ok(a), Ok(b)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) else { continue };
-            let (Some(&i), Some(&j)) = (idx.get(&a), idx.get(&b)) else { continue };
+        for (i, j, v) in table.at(hour) {
             if i == j && !self.params.intrazone {
                 continue;
             }
@@ -1200,20 +1263,41 @@ impl Sim {
 
     /// Recalcula a matriz OD para a hora atual e as taxas de chegada.
     fn refresh_matrix(&mut self, net: &Net) {
+        self.matrix_refreshes += 1;
+        self.demand_cache(net);
         let hour = (self.time / 3600.0).rem_euclid(24.0);
-        let payload = demand::Payload {
-            zones: (0..self.zone_ids.len())
-                .map(|i| demand::ZoneIn { id: self.zone_ids[i], poly: self.zone_poly[i].clone(), gen: self.zone_gen[i], attr: self.zone_attr[i], profile: self.zone_profile[i].clone(), gateway: self.zone_gateway[i] })
-                .collect(),
-            params: demand::ParamsIn { beta: self.params.beta, intrazone: self.params.intrazone, hour, od_manual: self.od_at(hour) },
+        let mut dem = self.dem.take().unwrap();
+        let t = match dem.t.take() {
+            Some(t) => t,
+            None => {
+                let me: &Sim = self;
+                demand::travel_matrix(&dem.statics, &|i, j, _c| me.zone_minutes(i, j))
+            }
         };
-        let me: &Sim = self;
-        let travel = |i: usize, j: usize, _c: &[[f64; 2]; 2]| me.zone_minutes(i, j);
-        let r = demand::resolve(net, &payload, &travel);
+        // células fixadas na hora: fatia horária (interpolada como o perfil das zonas) ou `od_manual`
+        let hourly;
+        let forced = match &dem.car {
+            Some(table) => {
+                let nz = dem.zones.len();
+                let mut f = vec![vec![None; nz]; nz];
+                for (i, j, v) in table.at(hour) {
+                    f[i][j] = Some(v);
+                }
+                hourly = f;
+                &hourly
+            }
+            None => &dem.manual,
+        };
+        let (_, matrix) = demand::resolve_with(&dem.statics, &dem.zones, hour, self.params.beta, self.params.intrazone, forced, &t);
+        // com a cópia de fluxo livre os tempos não mudam mais
+        if !self.zone_free.is_empty() {
+            dem.t = Some(t);
+        }
+        self.dem = Some(dem);
         let nz = self.zone_ids.len();
         for i in 0..nz {
             for j in 0..nz {
-                let veh_h = if self.gates[i].is_empty() { 0.0 } else { r.matrix[i][j] };
+                let veh_h = if self.gates[i].is_empty() { 0.0 } else { matrix[i][j] };
                 let new_rate = veh_h / 3600.0;
                 let old = self.rate[i][j];
                 self.rate[i][j] = new_rate;

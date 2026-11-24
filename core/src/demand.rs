@@ -166,51 +166,74 @@ pub fn gravity(o: &[f64], a: &[f64], t: &[Vec<f64>], beta: f64, intrazone: bool,
     out
 }
 
-/// Resolve zonas sobre a rede e calcula a matriz OD. `travel_min(i, j)` dá o tempo livre entre
-/// centróides (M1: distância/velocidade; M3: roteador).
-pub fn resolve(net: &Net, p: &Payload, travel_min: &dyn Fn(usize, usize, &[[f64; 2]; 2]) -> f64) -> Resolved {
-    let n = p.zones.len();
-    let mut zones = Vec::with_capacity(n);
-    // ponto médio e comprimento de cada trecho, uma vez para todas as zonas
-    let mids: Vec<(V2, f64)> = net
-        .segs
+/// Ponto médio e comprimento de cada trecho (para medir a extensão de via dentro das zonas).
+pub fn seg_mids(net: &Net) -> Vec<(V2, f64)> {
+    net.segs
         .iter()
         .map(|s| {
             let len = s.poly.length();
             (s.poly.at(len / 2.0).0, len)
         })
-        .collect();
-    for z in &p.zones {
-        let ip = InPoly::new(&z.poly);
-        let nodes = net.nodes.iter().filter(|nd| ip.contains(nd.pos)).count();
-        let road_m: f64 = mids.iter().filter(|(mid, _)| ip.contains(*mid)).map(|(_, len)| len).sum();
-        let g = z.gen * profile_at(&z.profile, p.params.hour);
-        let warning = if z.poly.len() < 3 {
-            Some("polígono incompleto".to_string())
-        } else if road_m < 1.0 && !(z.gateway && nodes > 0) {
-            Some("sem vias dentro da zona".to_string())
-        } else {
-            None
-        };
-        zones.push(ZoneOut { id: z.id, nodes, road_m, centroid: centroid(&z.poly), gen_now: if warning.is_some() { 0.0 } else { g }, warning });
+        .collect()
+}
+
+/// Parte da zona que só depende da geometria (nós e vias dentro do polígono, centróide, aviso). `gen_now` fica 0;
+/// é preenchido por `resolve_with` na hora pedida. Caro (testa todos os nós e trechos): a simulação calcula uma vez.
+pub fn zone_static(net: &Net, mids: &[(V2, f64)], z: &ZoneIn) -> ZoneOut {
+    let ip = InPoly::new(&z.poly);
+    let nodes = net.nodes.iter().filter(|nd| ip.contains(nd.pos)).count();
+    let road_m: f64 = mids.iter().filter(|(mid, _)| ip.contains(*mid)).map(|(_, len)| len).sum();
+    let warning = if z.poly.len() < 3 {
+        Some("polígono incompleto".to_string())
+    } else if road_m < 1.0 && !(z.gateway && nodes > 0) {
+        Some("sem vias dentro da zona".to_string())
+    } else {
+        None
+    };
+    ZoneOut { id: z.id, nodes, road_m, centroid: centroid(&z.poly), gen_now: 0.0, warning }
+}
+
+/// Células fixadas (`"idOrigem>idDestino"`) como matriz por índice de zona.
+pub fn forced_cells(zones: &[ZoneIn], od: &HashMap<String, f64>) -> Vec<Vec<Option<f64>>> {
+    let mut forced = vec![vec![None; zones.len()]; zones.len()];
+    if od.is_empty() {
+        return forced;
     }
-    let o: Vec<f64> = zones.iter().map(|z| z.gen_now).collect();
-    let a: Vec<f64> = p.zones.iter().zip(&zones).map(|(z, zo)| if zo.warning.is_some() { 0.0 } else { z.attr }).collect();
-    let mut t = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            t[i][j] = travel_min(i, j, &[zones[i].centroid, zones[j].centroid]);
-        }
-    }
-    let mut forced = vec![vec![None; n]; n];
-    for (i, zi) in p.zones.iter().enumerate() {
-        for (j, zj) in p.zones.iter().enumerate() {
-            if let Some(v) = p.params.od_manual.get(&format!("{}>{}", zi.id, zj.id)) {
+    for (i, zi) in zones.iter().enumerate() {
+        for (j, zj) in zones.iter().enumerate() {
+            if let Some(v) = od.get(&format!("{}>{}", zi.id, zj.id)) {
                 forced[i][j] = Some(*v);
             }
         }
     }
-    let matrix = gravity(&o, &a, &t, p.params.beta, p.params.intrazone, &forced);
+    forced
+}
+
+/// Matriz OD na hora `hour` a partir das zonas já resolvidas (`zone_static`) e das células fixadas por índice.
+pub fn resolve_with(statics: &[ZoneOut], zones: &[ZoneIn], hour: f64, beta: f64, intrazone: bool, forced: &[Vec<Option<f64>>], t: &[Vec<f64>]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let o: Vec<f64> = zones.iter().zip(statics).map(|(z, zo)| if zo.warning.is_some() { 0.0 } else { z.gen * profile_at(&z.profile, hour) }).collect();
+    let a: Vec<f64> = zones.iter().zip(statics).map(|(z, zo)| if zo.warning.is_some() { 0.0 } else { z.attr }).collect();
+    let matrix = gravity(&o, &a, t, beta, intrazone, forced);
+    (o, matrix)
+}
+
+/// Tempos entre zonas (min) pela função `travel_min(i, j, [centróide i, centróide j])`.
+pub fn travel_matrix(statics: &[ZoneOut], travel_min: &dyn Fn(usize, usize, &[[f64; 2]; 2]) -> f64) -> Vec<Vec<f64>> {
+    let n = statics.len();
+    (0..n).map(|i| (0..n).map(|j| travel_min(i, j, &[statics[i].centroid, statics[j].centroid])).collect()).collect()
+}
+
+/// Resolve zonas sobre a rede e calcula a matriz OD. `travel_min(i, j)` dá o tempo livre entre
+/// centróides (M1: distância/velocidade; M3: roteador).
+pub fn resolve(net: &Net, p: &Payload, travel_min: &dyn Fn(usize, usize, &[[f64; 2]; 2]) -> f64) -> Resolved {
+    let mids = seg_mids(net);
+    let mut zones: Vec<ZoneOut> = p.zones.iter().map(|z| zone_static(net, &mids, z)).collect();
+    let t = travel_matrix(&zones, travel_min);
+    let forced = forced_cells(&p.zones, &p.params.od_manual);
+    let (o, matrix) = resolve_with(&zones, &p.zones, p.params.hour, p.params.beta, p.params.intrazone, &forced, &t);
+    for (z, g) in zones.iter_mut().zip(o) {
+        z.gen_now = g;
+    }
     Resolved { zones, matrix }
 }
 

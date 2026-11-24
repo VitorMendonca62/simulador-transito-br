@@ -706,21 +706,34 @@ fn perf_sim() {
     } else {
         zones
     };
-    let json = format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":3,"beta":0.02}}}}"#);
+    // PERF_SIM_JSON=arquivo: o JSON de `simInit` real (botão "Baixar JSON da simulação" no painel de depuração)
+    let json = match std::env::var("PERF_SIM_JSON") {
+        Ok(p) => std::fs::read_to_string(p).unwrap(),
+        Err(_) => format!(r#"{{"zones":[{zones}],"params":{{"seed":1,"hour":8,"busShare":3,"beta":0.02}}}}"#),
+    };
+    let minutes: usize = std::env::var("PERF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
     let t = Instant::now();
     n.start_sim(&json).unwrap();
     eprintln!("Sim::new {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     let mut worst = 0.0f64;
-    for block in 0..12 {
-        if block == 11 {
+    // piores passos: (ms, tempo simulado, houve recálculo da matriz OD)
+    let mut slow: Vec<(f64, f64, bool)> = Vec::new();
+    for block in 0..minutes {
+        if block == minutes - 1 {
             n.sim.as_mut().unwrap().prof = [0.0; 7];
         }
         let t = Instant::now();
         let mut peak = 0.0f64;
         for _ in 0..250 {
             let t1 = Instant::now();
+            let m0 = n.sim.as_ref().unwrap().matrix_refreshes;
             n.sim.as_mut().unwrap().step(&n.net);
-            peak = peak.max(t1.elapsed().as_secs_f64());
+            let dt = t1.elapsed().as_secs_f64();
+            peak = peak.max(dt);
+            let s = n.sim.as_ref().unwrap();
+            slow.push((dt * 1e3, s.time, s.matrix_refreshes != m0));
+            slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+            slow.truncate(8);
         }
         let s = n.sim.as_ref().unwrap();
         worst = worst.max(peak);
@@ -735,6 +748,9 @@ fn perf_sim() {
             peak * 1e3,
             s.route_age()
         );
+    }
+    for (ms, t, m) in &slow {
+        eprintln!("   passo lento {ms:>7.2} ms em t={t:>6.0}s{}", if *m { "  (recálculo da matriz OD)" } else { "" });
     }
     let p = n.sim.as_ref().unwrap().prof;
     let names = ["sinais", "geração", "aceleração(líder+junção)", "integração", "folgas#1", "mudança de aresta+folgas#2", "troca de faixa"];
