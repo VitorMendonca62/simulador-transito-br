@@ -464,4 +464,21 @@ fluxo de entrada (OD); reconstrução incremental (hoje reconstrói tudo a cada 
   - com as linhas (`BUS=1`, 3 sementes): ônibus parados > 120 s 0/0/13 → 0/31/0, passo 0,93 → 0,91 ms.
   - Com as quatro parcelas em 100 %: ~660 avanços do vermelho e 5–8 entradas na contramão por execução, sem
     sobreposição moto × faixa.
+- **Correção (2026-11-24): moto presa no fim do corredor** (visto no app, Rua Paissandú, nó sem semáforo: duas motos
+  paradas por 400+ s). Causas:
+  - `Sim::idm`, usada nas checagens de troca de faixa e de saída do corredor, usava o vão parado de carro (2 m) também
+    para motos; o passo usa 1 m. A moto de trás, parada a 1 m da que pedia para sair do corredor e cedendo a ela por
+    cortesia, parecia precisar de ~9 m/s² de freada, e a saída era recusada para sempre. Agora `s0_of` (1 m moto, 2 m
+    os demais) vale no passo e no `idm`;
+  - saída obrigatória do corredor com quem vem atrás parado: basta caber (`MIN_GAP`), sem a checagem de freada;
+  - entre carros parados a 2 m uma moto não cabe: com a saída pedida (seta), a moto avança no corredor até a linha (em
+    vez de parar 6 m antes) e quem vem atrás cede a ela com qualquer vão positivo (`courtesy`, antes > 1 m);
+  - cartão do veículo: a moto no corredor mostra "corredor" e a moto seguinte do corredor como líder (antes, o 2º
+    veículo da faixa, com vão negativo).
+  - Teste `corridor_forced_exit_never_deadlocks` (3 faixas afunilando para 1 em nó sem semáforo, 1800 veíc./h, 40 % de
+    motos, 3 sementes): antes 967 s de espera no corredor e 81 concluídos em 20 min; agora no máximo 13–67 s e 449–466
+    concluídos.
+  - Recife (`recife_behavior`, CTTU, `MOTO_STUCK=1`, 6 sementes): nenhuma moto presa no corredor; amostras de motos
+    paradas > 120 s, base 0/1/50/12/134/31 e com as parcelas típicas 1/212/47/43/0/10, todas de filas inteiras paradas
+    em faixas comuns (ex.: faixa 15811, a fila toda espera > 120 s), como antes da correção.
 

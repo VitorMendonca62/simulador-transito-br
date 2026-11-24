@@ -2788,7 +2788,7 @@ impl Sim {
                 let mut interact = 0.0;
                 if let Some((gap, vl)) = lead {
                     let gap = gap.max(0.1);
-                    let s0 = if self.kind[i] == KIND_MOTO { 1.0 } else { 2.0 };
+                    let s0 = self.s0_of(i);
             let s_star = s0 + (v * t + v * (v - vl) / (2.0 * (a_max * b).sqrt())).max(0.0);
                     interact = (s_star / gap).powi(2);
                 }
@@ -3420,13 +3420,20 @@ impl Sim {
     }
 
     /// Aceleração IDM do veículo `i` com o líder `lead` (folga, velocidade); sem líder = só o termo livre.
+    /// Vão parado da IDM (m): a moto para mais perto (1 m) que carro e ônibus (2 m). O passo e as checagens de troca de
+    /// faixa usam o mesmo valor; com valores diferentes, a moto parada a 1 m de quem quer entrar na frente dela parecia
+    /// precisar de uma freada de ~9 m/s² e a entrada era recusada para sempre (impasse no fim do corredor).
+    fn s0_of(&self, i: usize) -> f32 {
+        if self.kind[i] == KIND_MOTO { 1.0 } else { 2.0 }
+    }
+
     fn idm(&self, i: usize, lead: Option<(f32, f32)>) -> f32 {
         let v = self.v[i];
         let v0 = self.desired_speed(i).max(0.5);
         let (a_max, b, t) = (self.amax[i], self.bcomf[i], self.tgap[i]);
         let mut x = 1.0 - (v / v0).powi(4);
         if let Some((gap, vl)) = lead {
-            let s_star = 2.0 + (v * t + v * (v - vl) / (2.0 * (a_max * b).sqrt())).max(0.0);
+            let s_star = self.s0_of(i) + (v * t + v * (v - vl) / (2.0 * (a_max * b).sqrt())).max(0.0);
             x -= (s_star / gap.max(0.1)).powi(2);
         }
         (a_max * x).clamp(-9.0, a_max)
@@ -3469,7 +3476,9 @@ impl Sim {
                 continue;
             }
             let gap = self.s[r] - self.vlen[r] - self.s[i];
-            if gap > 1.0 && best.map_or(true, |b| gap < b.0) {
+            // a moto saindo do corredor cabe num vão menor (ela entra de lado, sem vir de trás)
+            let min = if self.corr[r] != NONE { MIN_GAP } else { 1.0 };
+            if gap > min && best.map_or(true, |b| gap < b.0) {
                 best = Some((gap, self.v[r], r));
             }
         }
@@ -4016,8 +4025,9 @@ impl Sim {
             let nm = net.names.get(sg.name as usize).cloned().unwrap_or_default();
             (sg.way_id, nm, -1, c.len, c.node, 0, 0.0, c.rank)
         };
-        // líder
-        let list = self.edge_veh[e].clone();
+        // líder (a moto no corredor não está na lista da faixa: o líder é a moto seguinte do corredor)
+        let in_corr = self.corr[i] != NONE;
+        let list = if in_corr { self.corr_veh[self.corr[i] as usize].clone() } else { self.edge_veh[e].clone() };
         let k = list.iter().position(|&x| x as usize == i).unwrap_or(0);
         let front = k + 1 == list.len();
         let leader = if !front {
@@ -4095,7 +4105,7 @@ impl Sim {
             "origin": if bus { json!(null) } else { json!(self.zone_ids[self.origin[i] as usize]) },
             "dest": if bus { json!(null) } else { json!(self.zone_ids[self.dest[i] as usize]) },
             "targetNode": if bus { json!(null) } else { json!(net.nodes[self.targets[tgt].node as usize].osm_id) },
-            "where": if on_lane { "faixa" } else { "dentro do cruzamento" },
+            "where": if in_corr { "corredor" } else if on_lane { "faixa" } else { "dentro do cruzamento" },
             "way": seg_way,
             "street": seg_name,
             "laneIdx": lane_idx,

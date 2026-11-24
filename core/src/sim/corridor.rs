@@ -283,9 +283,16 @@ impl Sim {
         if p > 0 {
             let f = list[p - 1] as usize;
             let gap = s - self.vlen[i] - self.s[f];
-            let (need, brake) = if forced { (1.0, MOBIL_SAFE) } else { (2.0 + 0.9 * self.v[f], 1.0) };
-            if gap < need || self.idm(f, Some((gap, self.v[i]))) < -brake {
-                return false;
+            // obrigatória com quem vem atrás parado: basta caber (ninguém precisa frear)
+            if forced && self.v[f] < 0.5 {
+                if gap < MIN_GAP {
+                    return false;
+                }
+            } else {
+                let (need, brake) = if forced { (1.0, MOBIL_SAFE) } else { (2.0 + 0.9 * self.v[f], 1.0) };
+                if gap < need || self.idm(f, Some((gap, self.v[i]))) < -brake {
+                    return false;
+                }
             }
         }
         let c = self.corr[i] as usize;
@@ -378,9 +385,12 @@ impl Sim {
     fn corr_front_lead(&mut self, net: &Net, i: usize, e: usize) -> Option<(f32, f32)> {
         let rest = self.edge_len[e] - self.s[i];
         if !self.corr_to_line(i, e) {
-            // nó sem semáforo: o corredor acaba antes dele e a moto volta para uma faixa (`corr_update`)
+            // nó sem semáforo: o corredor acaba antes dele e a moto volta para uma faixa (`corr_update`). Com a saída
+            // pedida (seta) e sem vão ao lado (carros parados a 2 m, menos que uma moto), avança até a linha: passa à
+            // frente de quem está ao lado e entra na faixa quando o primeiro sai; parada antes, ficava presa
             self.enter_ok[i] = false;
-            return Some(((rest - CORR_END_FREE).max(0.0), 0.0));
+            let end = if self.mand[i] { 0.5 } else { CORR_END_FREE };
+            return Some(((rest - end).max(0.0), 0.0));
         }
         let mut lead = self.lane_end_lead(net, i, e, true);
         // retida na linha: a moto para com a frente nela (o carro para `s0` = 2 m antes), à frente do primeiro carro
@@ -611,6 +621,11 @@ impl Sim {
     }
 
     /// Diagnóstico (testes): tempo parado (s) de cada moto na rede.
+    /// Diagnóstico para testes: espera (s) de cada moto no corredor agora.
+    pub fn corridor_waits(&self) -> Vec<f32> {
+        self.corr_veh.iter().flatten().map(|&i| self.wait[i as usize]).collect()
+    }
+
     /// Diagnóstico para testes: motos paradas há entre `a` e `b` s.
     pub fn moto_ids_waiting(&self, a: f32, b: f32) -> Vec<usize> {
         (0..self.alive.len()).filter(|&i| self.alive[i] && self.kind[i] == KIND_MOTO && self.wait[i] > a && self.wait[i] <= b).collect()
