@@ -174,7 +174,29 @@ const postSim = (msg: WorkerOut, t: Transferable[] = []) => (self as unknown as 
 // ocupação do worker (tempo calculando a simulação) e memória do WASM, informadas à UI uma vez por segundo
 let busyMs = 0
 let wasmMem: WebAssembly.Memory | null = null
-self.setInterval(() => postSim({ type: 'perf', busyMs, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }), 1000)
+/**
+ * Diagnóstico das travadas, por janela de 1 s: pior passo, tempo parado esperando rotas (com passo devido), maior
+ * intervalo entre quadros enviados e segundos simulados (o ritmo obtido; o pedido é `simSpeed`).
+ */
+const win = { at: performance.now(), stepMax: 0, waitMs: 0, gapMax: 0, ackMax: 0, simSec: 0 }
+/** desde quando a simulação está parada esperando um lote de rotas (0 = não está) */
+let waitSince = 0
+/** passos acima disso vão para o console, com o motivo provável */
+const SLOW_STEP_MS = 50
+self.setInterval(() => {
+  const now = performance.now()
+  const msg: WorkerOut = { type: 'perf', busyMs, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }
+  if (simRunning) {
+    if (waitSince) {
+      win.waitMs += now - waitSince
+      waitSince = now
+    }
+    if (simPost) win.gapMax = Math.max(win.gapMax, now - simPost)
+    Object.assign(msg, { stepMax: win.stepMax, waitMs: win.waitMs, gapMax: win.gapMax, ackMax: win.ackMax, pace: win.simSec / ((now - win.at) / 1000), speed: simSpeed })
+  }
+  Object.assign(win, { at: now, stepMax: 0, waitMs: 0, gapMax: 0, ackMax: 0, simSec: 0 })
+  postSim(msg)
+}, 1000)
 
 // ------------------------------------------------------------------ rotas em outros workers
 /**
@@ -293,15 +315,32 @@ function simSlice() {
   let ticks = 0
   while (simCarry >= SIM_DT && performance.now() - t0 < budget) {
     // lote de rotas ainda nos workers: espera (sem eles, o próprio passo calcula)
-    if (routers && current.sim_route_wait()) break
+    if (routers && current.sim_route_wait()) {
+      if (!waitSince) waitSince = performance.now()
+      break
+    }
+    const s0 = performance.now()
+    if (waitSince) {
+      win.waitMs += s0 - waitSince
+      waitSince = 0
+    }
+    const m0 = current.sim_matrix_refreshes()
     current.sim_step(1)
     sendRouteBatch(current)
+    const ms = performance.now() - s0
+    win.stepMax = Math.max(win.stepMax, ms)
+    win.simSec += SIM_DT
+    if (ms > SLOW_STEP_MS) {
+      const why = current.sim_matrix_refreshes() !== m0 ? ' (recálculo da matriz OD)' : ''
+      console.warn(`passo lento da simulação: ${ms.toFixed(0)} ms em t=${current.sim_time().toFixed(0)} s${why}`)
+    }
     simCarry -= SIM_DT
     ticks++
   }
   if (simCarry > 2) simCarry = 2 // não acumula atraso indefinido
   // controle de vazão: a UI define o ritmo dos quadros; o worker continua simulando enquanto espera
   if (ticks > 0 && now - simPost > SIM_FRAME_MS && (simInFlight === 0 || now - simInFlight > SIM_ACK_TIMEOUT)) {
+    if (simPost) win.gapMax = Math.max(win.gapMax, now - simPost)
     simPost = now
     simInFlight = now
     const buf = current.sim_snapshot()
@@ -387,6 +426,8 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       if (msg.running && !simRunning && current?.sim_active()) {
         simRunning = true
         simInFlight = 0
+        simPost = 0
+        waitSince = 0
         simLast = performance.now()
         simCarry = 0
         if (!simTimer) simTimer = self.setTimeout(simLoop, 0)
@@ -430,6 +471,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
       return
     }
     if (msg.type === 'simAck') {
+      if (simInFlight) win.ackMax = Math.max(win.ackMax, performance.now() - simInFlight)
       simInFlight = 0
       return
     }

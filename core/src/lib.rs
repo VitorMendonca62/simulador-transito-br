@@ -670,6 +670,10 @@ impl Network {
     pub fn sim_time(&self) -> f64 {
         self.sim.as_ref().map_or(0.0, |s| s.time)
     }
+    /// Recálculos da matriz OD feitos até agora (diagnóstico de passos longos no worker).
+    pub fn sim_matrix_refreshes(&self) -> u32 {
+        self.sim.as_ref().map_or(0, |s| s.matrix_refreshes)
+    }
     /// Veículos indexados pelo slot (id = posição): [x, y, dx, dy, velocidade, comprimento (negativo = ônibus)] cada; slot livre = zeros.
     pub fn sim_snapshot(&self) -> Vec<f32> {
         let mut out = Vec::new();

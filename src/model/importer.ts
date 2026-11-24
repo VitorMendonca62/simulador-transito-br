@@ -49,8 +49,10 @@ export function watchWorkerPerf() {
   perfAttached = true
   getWorker().addEventListener('message', (ev: MessageEvent<WorkerOut>) => {
     if (ev.data.type !== 'perf') return
-    perf.simBusyMs = ev.data.busyMs
-    perf.wasmBytes = ev.data.wasmBytes
+    const m = ev.data
+    perf.simBusyMs = m.busyMs
+    perf.wasmBytes = m.wasmBytes
+    perf.sim = m.stepMax != null ? { stepMax: m.stepMax, waitMs: m.waitMs ?? 0, gapMax: m.gapMax ?? 0, pace: m.pace ?? 0, speed: m.speed ?? 1 } : null
   })
 }
 
@@ -176,10 +178,15 @@ export function onSim(fn: (m: Extract<WorkerOut, { type: 'sim' | 'simEnded' }>) 
   simListener = fn
 }
 
+/** JSON da última simulação iniciada (para reproduzir no `perf_sim` do núcleo: `PERF_SIM_JSON`). */
+let lastSimInit: string | null = null
+export const getLastSimInit = () => lastSimInit
+
 /** Inicia (pausada) uma simulação nova no núcleo. */
 export function simStart(payload: unknown): Promise<void> {
   const w = getWorker()
   attachSim()
+  const json = (lastSimInit = JSON.stringify(payload))
   return new Promise((resolve, reject) => {
     const onMsg = (ev: MessageEvent<WorkerOut>) => {
       if (ev.data.type !== 'simReady') return
@@ -188,7 +195,7 @@ export function simStart(payload: unknown): Promise<void> {
       else resolve()
     }
     w.addEventListener('message', onMsg)
-    w.postMessage({ type: 'simInit', json: JSON.stringify(payload) } satisfies WorkerIn)
+    w.postMessage({ type: 'simInit', json } satisfies WorkerIn)
   })
 }
 

@@ -13,6 +13,7 @@ export function PerfStats() {
   const cpu = useRef<HTMLSpanElement>(null)
   const gpu = useRef<HTMLSpanElement>(null)
   const ram = useRef<HTMLSpanElement>(null)
+  const sim = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     watchWorkerPerf()
@@ -33,6 +34,12 @@ export function PerfStats() {
       else set(gpu.current, 'GPU n/d')
       const heap = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize
       set(ram.current, `RAM ${heap != null ? mb(heap) : 'n/d'}${perf.wasmBytes ? ` + ${mb(perf.wasmBytes)} WASM` : ''}`)
+      const s = perf.sim
+      if (sim.current) sim.current.hidden = !s
+      if (s) {
+        const behind = s.pace < s.speed * 0.9 ? ` · ritmo ${s.pace.toFixed(1)}× de ${s.speed}×` : ''
+        set(sim.current, `passo ${s.stepMax.toFixed(0)} ms · espera rotas ${s.waitMs.toFixed(0)} ms · quadros ${s.gapMax.toFixed(0)} ms${behind}`)
+      }
       last = cur
     }, 1000)
     return () => window.clearInterval(id)
@@ -51,6 +58,9 @@ export function PerfStats() {
       </span>
       <span ref={ram} title="Memória: heap do JavaScript da página (só Chromium informa) + memória linear do núcleo WASM no worker.">
         RAM —
+      </span>
+      <span ref={sim} hidden title="Simulação no último segundo: pior passo do núcleo, tempo parado esperando as rotas dos workers auxiliares e maior intervalo entre quadros enviados à tela (acima de ~150 ms os carros dão uma parada). Ritmo aparece quando a simulação não acompanha a velocidade pedida.">
+        passo —
       </span>
     </>
   )

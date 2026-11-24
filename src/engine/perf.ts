@@ -13,6 +13,9 @@ export const perf = {
   simBusyMs: 0,
   /** memória linear do WASM no worker (bytes) */
   wasmBytes: 0,
+  /** último segundo com a simulação rodando (null = parada): pior passo (ms), tempo esperando rotas (ms), maior
+   * intervalo entre quadros (ms), ritmo obtido e pedido (s simulados por s real) */
+  sim: null as { stepMax: number; waitMs: number; gapMax: number; pace: number; speed: number } | null,
 }
 
 /** Mede o tempo de GPU dos desenhos com EXT_disjoint_timer_query_webgl2 (ausente em alguns navegadores). */

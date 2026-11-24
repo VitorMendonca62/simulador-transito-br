@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchStuck, simStepBy, type StuckItem } from '../model/importer'
+import { fetchStuck, getLastSimInit, simStepBy, type StuckItem } from '../model/importer'
 import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -228,6 +228,19 @@ export function StuckList() {
           ))}
         </ul>
       )}
+      <button className="link" onClick={downloadSimInit} title="Zonas, matriz OD e parâmetros desta simulação, para medir o desempenho do núcleo fora do navegador (perf_sim com PERF_SIM_JSON).">
+        Baixar JSON da simulação
+      </button>
     </div>
   )
+}
+
+function downloadSimInit() {
+  const json = getLastSimInit()
+  if (!json) return
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }))
+  a.download = 'simulacao.json'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
