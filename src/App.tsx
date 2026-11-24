@@ -8,6 +8,7 @@ import { PerfStats } from './ui/PerfStats'
 import { pickFile, Toolbar } from './ui/Toolbar'
 import { RecifeDialog } from './ui/RecifeDialog'
 import { IconMap, IconPin } from './ui/Icons'
+import { Tour } from './ui/Tour'
 
 /** Comprimento redondo (1, 2 ou 5 × 10ⁿ m) que ocupa até ~110 px na tela. */
 function niceLength(pxPerM: number): number {
@@ -156,6 +157,7 @@ export function App() {
       )}
       {toast && <div className="toast">{toast}</div>}
       {recife && <RecifeDialog onClose={() => setRecife(false)} />}
+      <Tour />
       <footer className="credits">
         Feito por{' '}
         <a href="https://github.com/VitorMendonca62" target="_blank" rel="noreferrer">

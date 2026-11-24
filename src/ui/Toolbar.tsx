@@ -4,6 +4,7 @@ import { useStore } from '../model/store'
 import { useShallow } from 'zustand/react/shallow'
 import { IconChevron, IconDownload, IconFile, IconFit, IconMap, IconMinus, IconPin, IconPlus, IconUpload } from './Icons'
 import { RecifeDialog } from './RecifeDialog'
+import { startTour } from './Tour'
 
 /** Abre o seletor de arquivo do tipo pedido: mapa (.osm/.pbf) ou cenário (.json). */
 export function pickFile(kind: 'map' | 'scenario') {
@@ -114,6 +115,9 @@ export function Toolbar() {
           <button className="btn with-ico" onClick={() => viewRef.current?.fit()} title="Enquadrar o mapa inteiro">
             <IconFit size={16} />
             Ajustar
+          </button>
+          <button className="btn icon help-btn" onClick={startTour} aria-label="Tour guiado" title="Rever o tour guiado">
+            ?
           </button>
         </div>
       ) : (
