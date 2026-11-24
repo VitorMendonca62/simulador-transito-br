@@ -152,6 +152,7 @@ function transferables(d: NetworkData): ArrayBuffer[] {
 let simRunning = false
 let simSpeed = 1
 let simLast = 0
+/** fatia agendada (≠ 0); o valor só serve de marca */
 let simTimer = 0
 let simPost = 0
 /** instante do último quadro enviado e ainda não confirmado pela UI (0 = nenhum pendente) */
@@ -168,6 +169,9 @@ let simBus = false
 const SIM_DT = 0.2
 /** intervalo entre quadros enviados à UI (15 Hz); a UI interpola entre eles */
 const SIM_FRAME_MS = 66
+/** a partir de 20× bastam 10 Hz (a interpolação esconde a diferença) e sobra mais tempo para os passos */
+const SIM_FRAME_MS_FAST = 100
+const SIM_FAST = 20
 
 const postSim = (msg: WorkerOut, t: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, t)
 
@@ -185,7 +189,8 @@ let waitSince = 0
 const SLOW_STEP_MS = 50
 self.setInterval(() => {
   const now = performance.now()
-  const msg: WorkerOut = { type: 'perf', busyMs, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }
+  // `at` (relógio do worker) deixa a UI calcular a taxa de ocupação sem depender de quando a mensagem chegou
+  const msg: WorkerOut = { type: 'perf', busyMs, at: now, wasmBytes: wasmMem?.buffer.byteLength ?? 0 }
   if (simRunning) {
     if (waitSince) {
       win.waitMs += now - waitSince
@@ -291,6 +296,14 @@ function simInitExt(net: Network, json: string): boolean {
   return true
 }
 
+/**
+ * Próxima fatia sem atraso mínimo: uma mensagem para si mesmo entra na fila de tarefas atrás das mensagens que já
+ * chegaram (rotas, confirmação de quadro), sem os ~4 ms do `setTimeout` aninhado. Com esses 4 ms a cada fatia de 10 ms,
+ * o worker atrasado ficava parado ~¼ do tempo (auditoria de 2026-11, achado A1).
+ */
+const yieldCh = new MessageChannel()
+yieldCh.port1.onmessage = () => simLoop()
+
 /** Avança a simulação por fatias de tempo real: passos fixos de 0,2 s, no máximo ~10 ms por fatia. */
 function simLoop() {
   const t0 = performance.now()
@@ -313,10 +326,12 @@ function simSlice() {
   const budget = 10
   const t0 = performance.now()
   let ticks = 0
+  let waiting = false
   while (simCarry >= SIM_DT && performance.now() - t0 < budget) {
     // lote de rotas ainda nos workers: espera (sem eles, o próprio passo calcula)
     if (routers && current.sim_route_wait()) {
       if (!waitSince) waitSince = performance.now()
+      waiting = true
       break
     }
     const s0 = performance.now()
@@ -339,7 +354,8 @@ function simSlice() {
   }
   if (simCarry > 2) simCarry = 2 // não acumula atraso indefinido
   // controle de vazão: a UI define o ritmo dos quadros; o worker continua simulando enquanto espera
-  if (ticks > 0 && now - simPost > SIM_FRAME_MS && (simInFlight === 0 || now - simInFlight > SIM_ACK_TIMEOUT)) {
+  const frameMs = simSpeed >= SIM_FAST ? SIM_FRAME_MS_FAST : SIM_FRAME_MS
+  if (ticks > 0 && now - simPost > frameMs && (simInFlight === 0 || now - simInFlight > SIM_ACK_TIMEOUT)) {
     if (simPost) win.gapMax = Math.max(win.gapMax, now - simPost)
     simPost = now
     simInFlight = now
@@ -367,7 +383,21 @@ function simSlice() {
     if (series) tr.push(series.buffer as ArrayBuffer)
     postSim({ type: 'sim', time: current.sim_time(), stats, buf, heat, series, histLen, track, bus }, tr)
   }
-  simTimer = self.setTimeout(simLoop, 4)
+  scheduleSlice(waiting)
+}
+
+/**
+ * Agenda a próxima fatia. Atrasado (a fatia acabou com passo ainda devido): na hora. Em dia: dorme até o próximo passo
+ * vencer, para não ocupar a CPU à toa em velocidades baixas. Esperando rotas: 1 ms, até o lote chegar.
+ */
+function scheduleSlice(waiting: boolean) {
+  if (!waiting && simCarry >= SIM_DT) {
+    simTimer = -1
+    yieldCh.port2.postMessage(0)
+    return
+  }
+  const due = waiting ? 1 : ((SIM_DT - simCarry) / simSpeed) * 1000
+  simTimer = self.setTimeout(simLoop, Math.max(1, Math.min(SIM_FRAME_MS, due)))
 }
 let lastStats: SimStats = { time: 0, alive: 0, spawned: 0, finished: 0, lost: 0, queued: 0, meanTravel: 0, redRuns: 0, laneChanges: 0 }
 

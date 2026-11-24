@@ -51,6 +51,7 @@ export function watchWorkerPerf() {
     if (ev.data.type !== 'perf') return
     const m = ev.data
     perf.simBusyMs = m.busyMs
+    perf.simBusyAt = m.at
     perf.wasmBytes = m.wasmBytes
     perf.sim = m.stepMax != null ? { stepMax: m.stepMax, waitMs: m.waitMs ?? 0, gapMax: m.gapMax ?? 0, pace: m.pace ?? 0, speed: m.speed ?? 1 } : null
   })

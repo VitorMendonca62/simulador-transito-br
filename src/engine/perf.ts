@@ -11,11 +11,28 @@ export const perf = {
   gpuSupported: false,
   /** tempo (ms) que o worker passou calculando a simulação */
   simBusyMs: 0,
+  /** relógio do worker (ms) quando `simBusyMs` foi medido: a taxa é Δocupado ÷ Δrelógio do worker, não da página */
+  simBusyAt: 0,
+  /** tempo (ms) em tarefas longas (> 50 ms) da thread principal, inclusive desenho nativo; só no Chromium */
+  longMs: 0,
+  longSupported: false,
   /** memória linear do WASM no worker (bytes) */
   wasmBytes: 0,
   /** último segundo com a simulação rodando (null = parada): pior passo (ms), tempo esperando rotas (ms), maior
    * intervalo entre quadros (ms), ritmo obtido e pedido (s simulados por s real) */
   sim: null as { stepMax: number; waitMs: number; gapMax: number; pace: number; speed: number } | null,
+}
+
+/**
+ * Soma as tarefas longas da thread principal em `perf.longMs`. Pega o que `uiMs` não vê: desenho nativo do navegador
+ * (WebGL por software, rasterização), coleta de lixo e layout. Sem a API (Firefox, Safari), fica só o `uiMs`.
+ */
+export function watchLongTasks() {
+  if (perf.longSupported || typeof PerformanceObserver === 'undefined' || !PerformanceObserver.supportedEntryTypes?.includes('longtask')) return
+  perf.longSupported = true
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) perf.longMs += e.duration
+  }).observe({ type: 'longtask' })
 }
 
 /** Mede o tempo de GPU dos desenhos com EXT_disjoint_timer_query_webgl2 (ausente em alguns navegadores). */

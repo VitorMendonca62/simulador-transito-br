@@ -190,6 +190,35 @@ e preencher M8. Só abrir trabalho no desenho se ficar abaixo de 55 fps.
   (cabeçalhos COOP/COEP no Cloudflare). 2–3× com 4 núcleos, mas é a maior refatoração do núcleo.
 - dt maior ou integração em várias taxas (E1/E2): mudam o modelo, fora enquanto houver calibração.
 
+## Status
+
+**2026-11-24: etapa 1 implementada** (`core.worker.ts`, `PerfStats.tsx`, `perf.ts`).
+- 1.1: a fatia que termina com passo ainda devido agenda a próxima por `MessageChannel` (sem atraso mínimo). Em dia,
+  `setTimeout` até o próximo passo vencer (no máximo 66 ms); esperando lote de rotas, 1 ms.
+- 1.2: "CPU tela" = o maior entre o JS do app e as tarefas longas (`longtask`, só Chromium). "sim %" pelo relógio do
+  worker (a mensagem `perf` leva `at`). O `bench-browser.mjs` também usa o relógio do worker.
+- 1.3: quadros a 10 Hz a partir de 20× (15 Hz abaixo).
+- Resultado da simulação inalterado (só muda quando as fatias rodam, não o que cada passo calcula).
+
+Medido no mesmo contêiner, rodadas alternadas, 100 s com a rede cheia (~19 mil veículos):
+
+| Rodada | Ritmo a 30× (antes → depois) | Ocupação do worker | ms por passo |
+|---|---|---|---|
+| 1 | 16,0× → **20,3×** (+27 %) | ~78 % → 99,6 % | 9,9 → 9,8 |
+| 2 | 16,0× → **20,4×** (+28 %) | ~78 % → 99,6 % | 10,0 → 9,8 |
+
+| Velocidade pedida | Ritmo obtido | Ocupação do worker |
+|---|---|---|
+| 1× | 0,98× | 1,5 % (não fica girando quando está em dia) |
+| 5× | 5,2× | 15 % |
+| 10× | 9,9× | 42 % |
+
+Barra de status, mesmo cenário a 30×: "CPU tela" passou de 1 % para 99–100 % (a thread estava de fato saturada pelo
+desenho por software deste contêiner); "sim" fica em ≤ 100 % (antes chegava a 151 %).
+
+Com o worker a ~100 %, o ritmo agora é o limite do passo (1000 ÷ (5 passos × ~9,8 ms) ≈ 20×). Para chegar a M1
+(≥ 28×) falta a etapa 2 (passo do núcleo).
+
 ## 6. Testado e descartado nesta auditoria
 
 | Opção | Resultado |

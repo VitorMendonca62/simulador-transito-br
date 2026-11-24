@@ -143,7 +143,7 @@ export type WorkerOut =
    * o pior passo (ms), o tempo parado esperando os workers de rotas (ms), o maior intervalo entre quadros enviados (ms)
    * (e a maior demora da tela em confirmar um quadro) e o ritmo obtido e o pedido (s simulados por s real) no último segundo
    */
-  | { type: 'perf'; busyMs: number; wasmBytes: number; stepMax?: number; waitMs?: number; gapMax?: number; ackMax?: number; pace?: number; speed?: number }
+  | { type: 'perf'; busyMs: number; at: number; wasmBytes: number; stepMax?: number; waitMs?: number; gapMax?: number; ackMax?: number; pace?: number; speed?: number }
   | { type: 'result'; id: number; json?: string; u32?: Uint32Array; f32?: Float32Array; u8?: Uint8Array; error?: string }
 
 /** Worker da simulação -> worker de rotas (`router.worker.ts`). `gen` descarta respostas de uma simulação anterior. */

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { perf } from '../engine/perf'
+import { perf, watchLongTasks } from '../engine/perf'
 import { watchWorkerPerf } from '../model/importer'
 
 const mb = (bytes: number) => `${(bytes / 1048576).toFixed(0)} MB`
@@ -17,11 +17,19 @@ export function PerfStats() {
 
   useEffect(() => {
     watchWorkerPerf()
-    let last = { t: performance.now(), renders: perf.renders, ui: perf.uiMs, gpu: perf.gpuMs, sim: perf.simBusyMs }
+    watchLongTasks()
+    let last = { t: performance.now(), renders: perf.renders, ui: perf.uiMs, long: perf.longMs, gpu: perf.gpuMs }
+    // ocupação do worker pelo relógio dele: a mensagem chega 1×/s, mas fora de fase com este intervalo (antes dava 150 %)
+    let simLast = { busy: perf.simBusyMs, at: perf.simBusyAt }
+    let simPct = 0
     const id = window.setInterval(() => {
       const now = performance.now()
       const dt = now - last.t
-      const cur = { t: now, renders: perf.renders, ui: perf.uiMs, gpu: perf.gpuMs, sim: perf.simBusyMs }
+      const cur = { t: now, renders: perf.renders, ui: perf.uiMs, long: perf.longMs, gpu: perf.gpuMs }
+      if (perf.simBusyAt > simLast.at) {
+        simPct = (perf.simBusyMs - simLast.busy) / (perf.simBusyAt - simLast.at)
+        simLast = { busy: perf.simBusyMs, at: perf.simBusyAt }
+      }
       const renders = cur.renders - last.renders
       const set = (el: HTMLSpanElement | null, text: string) => {
         if (el && el.textContent !== text) el.textContent = text
@@ -29,7 +37,8 @@ export function PerfStats() {
       const rate = (renders * 1000) / dt
       set(fps.current, renders === 0 ? 'parado' : `${rate.toFixed(0)} fps`)
       const pct = (ms: number) => `${Math.min(100, (ms / dt) * 100).toFixed(0)}%`
-      set(cpu.current, `CPU tela ${pct(cur.ui - last.ui)} · sim ${pct(cur.sim - last.sim)}`)
+      // tela: o maior entre o JS do app e as tarefas longas (que incluem o desenho nativo); são sobrepostos, não somam
+      set(cpu.current, `CPU tela ${pct(Math.max(cur.ui - last.ui, cur.long - last.long))} · sim ${Math.min(100, simPct * 100).toFixed(0)}%`)
       if (perf.gpuSupported) set(gpu.current, renders === 0 ? 'GPU —' : `GPU ${pct(cur.gpu - last.gpu)} (${((cur.gpu - last.gpu) / renders).toFixed(1)} ms/quadro)`)
       else set(gpu.current, 'GPU n/d')
       const heap = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize
@@ -50,7 +59,7 @@ export function PerfStats() {
       <span ref={fps} title="Quadros por segundo realmente desenhados. O mapa só redesenha quando algo muda; parado = nada a desenhar.">
         —
       </span>
-      <span ref={cpu} title="CPU tela: parte do tempo em que a thread principal esteve no laço de desenho e no tratamento dos quadros da simulação. CPU sim: tempo que o worker passou calculando a simulação (100% = não acompanha o tempo real).">
+      <span ref={cpu} title="CPU tela: parte do tempo em que a thread principal esteve ocupada: o laço de desenho e o tratamento dos quadros da simulação ou, se for maior, as tarefas longas (acima de 50 ms, inclusive o desenho feito pelo próprio navegador; medidas só no Chrome/Edge). CPU sim: tempo que o worker passou calculando a simulação (100% = não acompanha o tempo real).">
         CPU —
       </span>
       <span ref={gpu} title="Tempo de GPU gasto desenhando o mapa (timer de GPU do navegador). n/d = o navegador não oferece essa medição.">
