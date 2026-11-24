@@ -1,0 +1,234 @@
+{
+  "title": "MedLogic Pro | Dose pediátrica por peso e prescrição pronta",
+  "metas": [
+    "<meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<meta name=\"next-size-adjust\" content=\"\">",
+    "<meta name=\"description\" content=\"Do algoritmo do quadro pediátrico à prescrição pronta pelo peso, com volume a aspirar e diluição. Bulário e escores em português.\">",
+    "<meta property=\"og:title\" content=\"MedLogic Pro | Dose pediátrica por peso e prescrição pronta\">",
+    "<meta property=\"og:description\" content=\"Do algoritmo do quadro pediátrico à prescrição pronta pelo peso, com volume a aspirar e diluição. Bulário e escores em português.\">",
+    "<meta property=\"og:locale\" content=\"pt_BR\">",
+    "<meta property=\"og:type\" content=\"website\">",
+    "<meta name=\"twitter:card\" content=\"summary\">",
+    "<meta name=\"twitter:title\" content=\"MedLogic Pro | Dose pediátrica por peso e prescrição pronta\">",
+    "<meta name=\"twitter:description\" content=\"Do algoritmo do quadro pediátrico à prescrição pronta pelo peso, com volume a aspirar e diluição. Bulário e escores em português.\">"
+  ],
+  "sections": [
+    {
+      "tag": "HEADER",
+      "id": "",
+      "text": "Demonstração\nPlanos\nPerguntas\nMedLogic Pro\nEntrar\nAssinar"
+    },
+    {
+      "tag": "SECTION",
+      "id": "",
+      "text": "Coloque o peso da criança e copie a prescrição pronta.\n\nPediatria\nPara médicos e estudantes de medicina\n\nO MedLogic Pro guia você pelo algoritmo do quadro até a dose pelo peso. A prescrição sai montada, com o volume a aspirar e a diluição. São +50 algoritmos ligados ao guia de doses e ao bulário, em português.\n\nAssinar o plano do rodízio\nCriar conta grátis\nAciclovir FA 250 mg IV\n20 kg\nDose por administração\n200 mg/dose\nVolume a aspirar\n8 mL\nVolume do diluente\n32 mL\nVolume final preparado\n40 mL\n\nPlano do rodízio:\nR$ 199,50 a cada 6 meses\n1 mês grátis\n\nToda conta nova tem 7 dias de acesso completo.\n\nConteúdo coordenado pela Dra. Karla Araújo, pediatra\nCRM-PE 18734 RQE 13315\n\nDisponível em iPhone, Android e web.\n\nFerramenta de apoio ao profissional de saúde. Não substitui a prescrição médica."
+    },
+    {
+      "tag": "SECTION",
+      "id": "problema",
+      "text": "Na hora do sufoco, a dose da criança depende de uma conta que você faz de cabeça.\n\nDose por quilo, apresentação do frasco, reconstituição, diluição, intervalo e, em alguns medicamentos, dose máxima. São até seis etapas, feitas com a criança na sua frente e a fila andando.\n\nO fluxograma está num PDF da residência, a dose numa tabela e a bula em outro app. Cada troca de tela é tempo perdido e mais uma chance de errar um número."
+    },
+    {
+      "tag": "SECTION",
+      "id": "catalogo",
+      "text": "1.Encontre o algoritmo pelo cenário do plantão\nRespiratório\nInfeccioso\nEmergência\nNeurológico\nOutros\n\nNo mesmo app\n\nAlgoritmos pediátricos\n+50\nGuia de doses\n+120medicamentos com dose por peso\nBulário\n+120bulas\nEscores e ferramentas\n+85como Clearance de Creatinina, TFG-MDRD e HOMA\nFavoritos e recentes\nIncluído\nDa bula você volta à etapa do algoritmo"
+    },
+    {
+      "tag": "SECTION",
+      "id": "demonstracao",
+      "text": "2.Veja um caso do começo ao fim\n\nÉ o algoritmo de verdade. Siga os três passos tocando direto na tela do celular.\n\nMedLogic Pro\nInfecção do Trato Urinário (ITU)\n\nAmbulatorial x Hospitalar\n\nAvaliar seguintes condições:\n\nIdade < 28 dias;\n\nCrianças que apresentam sepse, toxemia, desidratação importante, vômitos, imunodepressão, uso de imunossupressores, comorbidades graves;\n\nAnomalias urológicas significativas (RVU IV-V ou obstrução moderada/grave);\n\nPacientes com baixa aderência ao tratamento;\n\nFalha ao tratamento ambulatorial;\n\nPersistência da febre após 3 dias de antibioticoterapia oral adequada.\n\nAusência de opção de antibiótico por via oral com sensibilidade comprovada no antibiograma.\n\nObservações\n\nO paciente possui alguma dessas condições?\n\nSIM\n\nNÃO\n\nNesta demonstração, siga o caminho destacado. As outras opções ficam desativadas.\n\n1\nAbra o algoritmo do quadro.\nSiga o fluxograma passo a passo até a conduta.\nNa tela, toque em \"SIM\".\n2\nToque no medicamento da etapa e informe o peso.\n3\nCopie a prescrição.\n\nPasso 1 de 3: Abra o algoritmo do quadro.\n\nVoltar\nRecomeçar\n\nCaso fixo para demonstração\n\nAlgoritmo\nInfecção do Trato Urinário (ITU)\nQuadro\nImunossupressão + neutropenia febril\nPeso\n20 kg (fixo)\nMedicamento\nCefepime FA de 1 g IV\nCalcular para o meu paciente\n\nToda conta nova tem 7 dias de acesso completo."
+    },
+    {
+      "tag": "SECTION",
+      "id": "diferencial",
+      "text": "3.A prescrição já vem com o preparo: quanto aspirar, quanto diluir e o volume final.\nAlgoritmo\ncada etapa leva ao medicamento indicado naquela etapa\nPrescrição\nsai montada com a dose pelo peso e o intervalo\nPreparo\nvolume a aspirar, volume de diluente e volume final\nEm gotas\no número de gotas\nInfusão contínua\na velocidade em mL/h para a bomba\nVolume a aspirar, diluente e volume final, junto da prescrição"
+    },
+    {
+      "tag": "SECTION",
+      "id": "para-quem",
+      "text": "Feito para quem dá plantão, e para quem está chegando lá\nComeçando a dar plantão\nRecém-formado ou residente, muitas vezes sem alguém experiente do lado. Você segue o algoritmo e sai com a prescrição montada.\nNo internato\nO raciocínio do quadro ligado à dose e à bula, durante o rodízio inteiro.\nAnos de plantão\nVocê já sabe a conduta. O app entrega a prescrição e os volumes de preparo sem você refazer a conta.\n\nExclusivo para profissionais e estudantes da área da saúde, maiores de 18 anos. O app não pede nem guarda dados de pacientes."
+    },
+    {
+      "tag": "SECTION",
+      "id": "quem-esta-por-tras",
+      "text": "Dra. Karla Araújo\nPediatra\nCRM-PE 18734 RQE 13315\nConteúdo coordenado pela Dra. Karla Araújo, pediatra\n\nFormada em Medicina pela UPE em 2010, a Dra. Karla Araújo fez residência em Pediatria no IMIP, concluída em 2013.\n\nHá mais de 14 anos trabalha em emergências pediátricas no Recife, como plantonista e como preceptora de residentes e acadêmicos de medicina. É esse plantão que ela traz para o conteúdo clínico do MedLogic Pro, que coordena.\n\nCada medicamento, bula, algoritmo e ferramenta é revisado pela equipe antes de ser publicado.\n\nPrivacidade\nSeus dados ficam no Brasil, conforme a LGPD."
+    },
+    {
+      "tag": "SECTION",
+      "id": "planos",
+      "text": "Escolha por quanto tempo você quer o MedLogic Pro no bolso\nComparação dos planos do MedLogic Pro\n\t\nGratuito\nR$ 0\n\t\nMensal\nR$ 39,90\npor mês\n\t\nPlano do rodízio\nRecomendado\n1 mês grátis\nR$ 199,50\na cada 6 meses\n\t\nAnual\n2 meses grátis\nR$ 399,00\npor ano\n\nBulário e glossário\t\nIncluído\n\t\nIncluído\n\t\nIncluído\n\t\nIncluído\n\nGuia de doses\t1 medicamento\tCompleto (+120)\tCompleto (+120)\tCompleto (+120)\nAlgoritmos pediátricos (+50)\t\nNão incluído\n\t\nIncluído\n\t\nIncluído\n\t\nIncluído\n\nEscores e ferramentas (+85)\t\nNão incluído\n\t\nIncluído\n\t\nIncluído\n\t\nIncluído\n\n\tCriar conta grátis\tAssinar o mensal\tAssinar o plano do rodízio\tAssinar o anual\n\nToda conta nova começa com 7 dias de acesso completo. Depois, sua conta passa para o Gratuito: dose de 1 medicamento, bulário e glossário. Algoritmos, o guia de doses completo e os escores ficam nos planos pagos. Os planos pagos são cobrados na hora da assinatura e renovam automaticamente. Você cancela quando quiser, direto no site ou no app.\n\nPagamento por cartão de crédito ou cartão de débito.\n\nTodo conteúdo novo entra na sua assinatura, sem custo extra."
+    },
+    {
+      "tag": "SECTION",
+      "id": "perguntas",
+      "text": "Perguntas frequentes\nO MedLogic Pro é só de pediatria?\nQuem faz o conteúdo?\nQual a diferença entre os planos?\nPosso testar antes de assinar?\nQuando sou cobrado?\nPosso confiar na dose calculada?\nPreciso informar dados do paciente?\nEm quais aparelhos funciona?\nA assinatura renova sozinha?\nComo cancelo?"
+    },
+    {
+      "tag": "SECTION",
+      "id": "",
+      "text": "Seu próximo plantão de pediatria, com a prescrição pronta pelo peso.\n\nEscolha o plano e abra o primeiro algoritmo hoje.\n\nAssinar o plano do rodízio\nCriar conta grátis\n1 mês grátis no rodízio e 2 no anual\nCancele quando quiser, no site ou no app\n7 dias de acesso completo ao criar a conta\nMesmo preço no site e no app\n\nDisponível em iPhone, Android e web."
+    },
+    {
+      "tag": "FOOTER",
+      "id": "",
+      "text": "MedLogic Pro\n\nOperado por Opex Consultoria Ltda. Ferramenta de apoio ao profissional de saúde. Não substitui a prescrição médica.\n\nPrivacidade\nEntrar\nCriar conta"
+    },
+    {
+      "tag": "SECTION",
+      "id": "",
+      "text": ""
+    }
+  ],
+  "links": [
+    {
+      "text": "Pular para o conteúdo",
+      "href": "#conteudo"
+    },
+    {
+      "text": "Demonstração",
+      "href": "#demonstracao"
+    },
+    {
+      "text": "Planos",
+      "href": "#planos"
+    },
+    {
+      "text": "Perguntas",
+      "href": "#perguntas"
+    },
+    {
+      "text": "MedLogic Pro",
+      "href": "/"
+    },
+    {
+      "text": "Entrar",
+      "href": "/login"
+    },
+    {
+      "text": "Assinar",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o plano do rodízio",
+      "href": "/register"
+    },
+    {
+      "text": "Criar conta grátis",
+      "href": "/register"
+    },
+    {
+      "text": "Conteúdo coordenado pela Dra. Karla Araújo, pediatra CRM-PE 18734 RQE 13315",
+      "href": "#quem-esta-por-tras"
+    },
+    {
+      "text": "Calcular para o meu paciente",
+      "href": "/register"
+    },
+    {
+      "text": "Criar conta grátis",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o mensal",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o plano do rodízio",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o anual",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o plano do rodízio",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o anual",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o mensal",
+      "href": "/register"
+    },
+    {
+      "text": "Criar conta grátis",
+      "href": "/register"
+    },
+    {
+      "text": "Assinar o plano do rodízio",
+      "href": "/register"
+    },
+    {
+      "text": "Criar conta grátis",
+      "href": "/register"
+    },
+    {
+      "text": "Privacidade",
+      "href": "/privacidade"
+    },
+    {
+      "text": "Entrar",
+      "href": "/login"
+    },
+    {
+      "text": "Criar conta",
+      "href": "/register"
+    }
+  ],
+  "buttons": [
+    "SIM",
+    "NÃO",
+    "1 Abra o algoritmo do quadro. Siga o fluxograma passo a passo até a conduta. Na tela, toque em \"SIM\".",
+    "2 Toque no medicamento da etapa e informe o peso.",
+    "3 Copie a prescrição.",
+    "Voltar",
+    "Recomeçar"
+  ],
+  "imgs": [
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2F1-hero-aciclovir-prescricao.1e7s165pgz9qd.png&w=3840&q=75",
+      "alt": "Tela de resultado do MedLogic Pro para aciclovir, 20 kg. Prescrição médica: Reconstituir 1 FA + 10 mL de AD. Administrar 8 mL + 32 mL de SF 0,9% IV, a cada 8 horas, infundir em 60 minutos.",
+      "w": 299,
+      "h": 649
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fdra-karla-araujo.2fpffjn0s48r_.webp&w=3840&q=75",
+      "alt": "",
+      "w": 40,
+      "h": 50
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2F5-lista-algoritmos.20mnwz_mz_jgr.png&w=3840&q=75",
+      "alt": "Lista de algoritmos pediátricos no app, com Anafilaxia em acessados recentemente, a busca por diagnóstico e os filtros Todos, Respiratório, Infeccioso, Emergência, Neurológico e Outros.",
+      "w": 270,
+      "h": 584
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2F6-bula-a-partir-da-dose.1lucwk5c4a9_b.png&w=3840&q=75",
+      "alt": "Bula da adrenalina (epinefrina) aberta a partir da dose, com o link Retornar ao algoritmo, Anafilaxia.",
+      "w": 236,
+      "h": 217
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2F1-recorte-preparo.0nqe_b5bw75su.png&w=3840&q=75",
+      "alt": "Detalhes do cálculo no app para aciclovir, 20 kg. Dose por administração: 200 mg/dose. Dose de referência usada: 10 mg/kg/dose. Dose diária: 600 mg. Administrações: 3 ao dia. Volume a aspirar: 8 mL. Volume do diluente: 32 mL. Volume final preparado: 40 mL.",
+      "w": 420,
+      "h": 458
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fdra-karla-araujo.2fpffjn0s48r_.webp&w=3840&q=75",
+      "alt": "Dra. Karla Araújo, pediatra, de jaleco branco com estetoscópio no pescoço e braços cruzados, sorrindo.",
+      "w": 400,
+      "h": 501
+    },
+    {
+      "src": "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2F4-prescricao-copiada.2odav-0hitdj4.png&w=3840&q=75",
+      "alt": "Prescrição médica copiada no app: Administrar 0,2 mL IM, com intervalo a cada 5-15 minutos, por até 3 vezes, se necessário. Detalhes do cálculo: 0,2 mg/dose, volume a aspirar 0,2 mL.",
+      "w": 0,
+      "h": 0
+    }
+  ]
+}
