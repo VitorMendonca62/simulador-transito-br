@@ -684,7 +684,17 @@ fn perf_sim() {
     use std::time::Instant;
     let path = std::env::var("PERF_OSM").expect("defina PERF_OSM");
     let data = std::fs::read(path).unwrap();
-    let mut n = build_network_lazy_for_test(&data);
+    // CTTU=1 / BUS=1: mesma rede do app ao abrir o Recife (semáforos da CTTU, linhas de ônibus)
+    let cttu: Vec<crate::extsig::ExtSignal> =
+        if std::env::var("CTTU").is_ok() { serde_json::from_str(include_str!("../../public/data/semaforos_cttu.json")).unwrap() } else { Vec::new() };
+    let mut n = if std::env::var("BUS").is_ok() {
+        let t = crate::transit::TransitData::parse(include_str!("../../public/data/onibus_recife.json")).unwrap();
+        crate::build_network_transit(&data, &cttu, t, true).unwrap()
+    } else if !cttu.is_empty() {
+        build_network_ext(&data, &cttu).unwrap()
+    } else {
+        build_network_lazy_for_test(&data)
+    };
     let t = Instant::now();
     n.ensure_conns();
     eprintln!("ensure_conns {:.0} ms", t.elapsed().as_secs_f64() * 1e3);

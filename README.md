@@ -182,12 +182,13 @@ src/model/            estado, ponte com o worker, persistência
 src/ui/               barra superior, trilho de painéis e painéis
 scripts/od_recife/    pipeline da Pesquisa OD 2018
 scripts/semaforos_recife/  pipeline dos semáforos da CTTU e ajustes manuais
+scripts/perf/         medição de desempenho (navegador e WASM) do cenário de referência
 data/                 saídas dos pipelines (CSVs, relatórios, metadados)
 public/data/          mapa do Recife, zonas e semáforos lidos pelo app
 docs/CONTEXT.md       decisões, medições e roadmap
 ```
 
-O histórico completo das decisões, as medições de desempenho e as limitações conhecidas estão em [`docs/CONTEXT.md`](docs/CONTEXT.md).
+O histórico completo das decisões, as medições de desempenho e as limitações conhecidas estão em [`docs/CONTEXT.md`](docs/CONTEXT.md). A meta de desempenho atual e o plano para atingi-la estão em [`docs/AUDITORIA_DESEMPENHO_2026-11.md`](docs/AUDITORIA_DESEMPENHO_2026-11.md).
 
 ## Desenvolvimento
 
