@@ -301,6 +301,48 @@ struct ConnRt {
     moto_only: bool,
 }
 
+/// Dados de uma conversão de saída que `stay_cost` lê, contíguos por faixa de origem (`sc_off`): evita carregar a
+/// `ConnRt` inteira e a faixa de destino a cada consulta (falhas de cache dominavam o custo).
+#[derive(Clone, Copy)]
+struct ScConn {
+    /// id da conversão (aresta)
+    c: u32,
+    /// faixa de destino
+    to: u32,
+    /// `pen + contra_pen`
+    pen: f32,
+    /// `pen + tempo livre da faixa de destino` (escala do erro de percepção)
+    err_base: f32,
+    dirseg: u32,
+    lane_local: u32,
+    zone: u16,
+    /// SC_BUS_ONLY | SC_MOTO_ONLY | SC_TO_BUS
+    flags: u8,
+}
+const SC_BUS_ONLY: u8 = 1;
+const SC_MOTO_ONLY: u8 = 2;
+const SC_TO_BUS: u8 = 4;
+
+#[derive(Clone, Copy)]
+struct LaneHot {
+    len: f32,
+    vfree: f32,
+    dirseg: u32,
+    to_node: u32,
+    contra: bool,
+}
+
+/// Conversão que chega a uma faixa (lista achatada `lin`), com o que a fila justa e a fusão leem dela.
+#[derive(Clone, Copy)]
+struct LinE {
+    c: u32,
+    node: u32,
+    from: u32,
+    /// ponta (`end_id`) da faixa de origem, para o estado do semáforo
+    from_end: u32,
+    rank: i16,
+}
+
 #[derive(Clone, Copy)]
 struct Conflict {
     other: u32,
@@ -499,7 +541,11 @@ pub struct Sim {
     node_conns: Vec<Vec<u32>>,
     /// conversões que chegam a cada faixa
     lane_in: Vec<Vec<u32>>,
-    conflicts: Vec<Option<std::rc::Rc<Vec<Conflict>>>>,
+    /// conflitos de cada conversão, calculados na primeira consulta: `conf_flat[conf_rng[c].0..][..conf_rng[c].1]`
+    /// (`u32::MAX` = ainda não calculados). Arena contígua: sem `Rc` (o contador de referências custava uma falha de
+    /// cache por consulta)
+    conf_flat: Vec<Conflict>,
+    conf_rng: Vec<(u32, u32)>,
     /// tempo até a zona de destino por faixa (até o primeiro nó dela): vale enquanto o veículo está fora da zona
     zone_dist: Vec<Vec<f32>>,
     /// cópia de fluxo livre de `zone_dist` (meio segundo), para quem não usa app e para o tempo livre da viagem
@@ -531,6 +577,24 @@ pub struct Sim {
     zone_lanes: Vec<Vec<u32>>,
     lane_zone: Vec<u16>,
     lane_local: Vec<u32>,
+    /// conversões de saída de cada faixa em formato compacto para `stay_cost` (faixa l: `sc[sc_off[l]..sc_off[l + 1]]`)
+    sc: Vec<ScConn>,
+    sc_off: Vec<u32>,
+    /// `lane_in` achatado (faixa l: `lin[lin_off[l]..lin_off[l + 1]]`)
+    lin: Vec<LinE>,
+    lin_off: Vec<u32>,
+    /// destino, origem e nó de cada conversão (índice = aresta − nl), fora da `ConnRt` para caber no cache
+    conn_to: Vec<u32>,
+    conn_from: Vec<u32>,
+    conn_node: Vec<u32>,
+    /// faixas ocupadas no último `refresh_live_pen` (multiplicador de troca diferente de 1) e área de trabalho
+    lc_prev: Vec<u32>,
+    lc_occ: Vec<u32>,
+    /// conversões com `conn_seen` finito (a ordem não importa: cada uma só escreve a sua penalidade)
+    seen_conns: Vec<u32>,
+    /// campos das faixas lidos por veículo a cada passo, fora da `LaneRt` (que carrega a lista de conversões)
+    lane_hot: Vec<LaneHot>,
+    conn_vturn: Vec<f32>,
     lrouter: LaneRouter,
     local_used: usize,
     /// destino de cada veículo (índice em `targets`), fixo da origem ao fim da viagem
@@ -948,7 +1012,20 @@ impl Sim {
             active: Vec::new(),
             node_conns,
             lane_in,
-            conflicts: vec![None; ne],
+            sc: Vec::new(),
+            sc_off: Vec::new(),
+            lin: Vec::new(),
+            lin_off: Vec::new(),
+            conn_to: Vec::new(),
+            conn_from: Vec::new(),
+            conn_node: Vec::new(),
+            lc_prev: Vec::new(),
+            lc_occ: Vec::new(),
+            seen_conns: Vec::new(),
+            lane_hot: Vec::new(),
+            conn_vturn: Vec::new(),
+            conf_flat: Vec::new(),
+            conf_rng: vec![(u32::MAX, 0); ne],
             zone_free: Vec::new(),
             zone_dist,
             zone_tl,
@@ -1124,6 +1201,7 @@ impl Sim {
                 }
             })
             .collect();
+        sim.build_sc();
         if with_bus {
             sim.init_buses(net, &init.bus);
         }
@@ -1464,7 +1542,12 @@ impl Sim {
     fn sample_conn_delay(&mut self, ci: usize, d: f32) {
         let d = d.clamp(0.0, 600.0);
         let now = self.time as f32;
-        self.conn_delay[ci] = if self.conn_seen[ci].is_finite() { 0.75 * self.conn_delay[ci] + 0.25 * d } else { d };
+        if self.conn_seen[ci].is_finite() {
+            self.conn_delay[ci] = 0.75 * self.conn_delay[ci] + 0.25 * d;
+        } else {
+            self.conn_delay[ci] = d;
+            self.seen_conns.push(ci as u32);
+        }
         self.conn_seen[ci] = now;
     }
 
@@ -1478,9 +1561,25 @@ impl Sim {
     /// Quem está parado agora na frente da fila também conta (fila que ainda não escoou ninguém).
     fn refresh_live_pen(&mut self) {
         let now = self.time as f32;
-        for l in 0..self.nl {
-            let Some(&j) = self.edge_veh[l].last() else { continue };
-            let j = j as usize;
+        // só as faixas ocupadas (pelo espelho `occ_bits`): nas vazias não há fila e o multiplicador de troca é 1
+        let mut occ = std::mem::take(&mut self.lc_occ);
+        occ.clear();
+        for (w, &bits) in self.occ_bits.iter().enumerate() {
+            let mut b = bits;
+            while b != 0 {
+                let l = w * 64 + b.trailing_zeros() as usize;
+                if l >= self.nl {
+                    break;
+                }
+                occ.push(l as u32);
+                b &= b - 1;
+            }
+            if (w + 1) * 64 >= self.nl {
+                break;
+            }
+        }
+        for &l in &occ {
+            let j = *self.edge_veh[l as usize].last().unwrap() as usize;
             let cc = self.choice[j];
             if cc != NONE && cc != SINK {
                 let ci = cc as usize - self.nl;
@@ -1489,24 +1588,32 @@ impl Sim {
                     self.conn_delay[ci] = ongoing.min(600.0);
                     if !self.conn_seen[ci].is_finite() {
                         self.conn_seen[ci] = now;
+                        self.seen_conns.push(ci as u32);
                     }
                 }
             }
         }
-        for l in 0..self.nl {
-            let m = self.lc_mul(l);
-            self.lrouter.change_mul[l] = m;
+        // vazias desde a última vez voltam a 1 (= `lc_mul` de faixa vazia); as ocupadas recebem o valor atual
+        for &l in &self.lc_prev {
+            self.lrouter.change_mul[l as usize] = 1.0;
         }
-        for ci in 0..self.n_car_conns {
+        for &l in &occ {
+            let m = self.lc_mul(l as usize);
+            self.lrouter.change_mul[l as usize] = m;
+        }
+        self.lc_occ = std::mem::replace(&mut self.lc_prev, occ);
+        // só as conversões já medidas: nas demais a penalidade continua a fixa (`c.pen`, valor inicial de `live_pen`
+        // e do roteador)
+        for k in 0..self.seen_conns.len() {
+            let ci = self.seen_conns[k] as usize;
+            if ci >= self.n_car_conns {
+                continue;
+            }
             let c = &self.conns[ci];
             let age = now - self.conn_seen[ci];
-            let pen = if age.is_finite() {
-                // sem ninguém passando há tempo, a medição perde valor e volta ao típico
-                let w = (-(age - 60.0).max(0.0) / 300.0).exp();
-                (c.pen - c.jpen) + w * self.conn_delay[ci] + (1.0 - w) * c.jpen
-            } else {
-                c.pen
-            };
+            // sem ninguém passando há tempo, a medição perde valor e volta ao típico
+            let w = (-(age - 60.0).max(0.0) / 300.0).exp();
+            let pen = (c.pen - c.jpen) + w * self.conn_delay[ci] + (1.0 - w) * c.jpen;
             self.live_pen[ci] = pen;
             self.lrouter.set_pen(ci, pen);
         }
@@ -1899,6 +2006,12 @@ impl Sim {
         self.n_alive -= 1;
     }
 
+    /// A aresta `e` tem algum veículo (espelho de `!edge_veh[e].is_empty()`, sem tocar na lista).
+    #[inline]
+    fn occ(&self, e: usize) -> bool {
+        self.occ_bits[e / 64] & (1 << (e % 64)) != 0
+    }
+
     fn insert_sorted(&mut self, edge: u32, id: usize) {
         let s = self.s[id];
         let list = &self.edge_veh[edge as usize];
@@ -1915,6 +2028,50 @@ impl Sim {
         if list.is_empty() {
             self.occ_bits[e / 64] &= !(1 << (e % 64));
         }
+    }
+
+    /// Monta a tabela compacta das conversões de saída por faixa (`sc`), na ordem de `lanes[l].conns`.
+    fn build_sc(&mut self) {
+        let mut sc = Vec::new();
+        let mut off = Vec::with_capacity(self.nl + 1);
+        for l in 0..self.nl {
+            off.push(sc.len() as u32);
+            for &c in &self.lanes[l].conns {
+                let cn = &self.conns[c as usize - self.nl];
+                let nx = cn.to as usize;
+                let flags = if cn.bus_only { SC_BUS_ONLY } else { 0 } | if cn.moto_only { SC_MOTO_ONLY } else { 0 } | if self.lanes[nx].bus { SC_TO_BUS } else { 0 };
+                sc.push(ScConn {
+                    c,
+                    to: cn.to,
+                    pen: cn.pen + self.contra_pen(cn),
+                    err_base: cn.pen + self.lrouter.time[nx],
+                    dirseg: self.lanes[nx].dirseg,
+                    lane_local: self.lane_local[nx],
+                    zone: self.lane_zone[nx],
+                    flags,
+                });
+            }
+        }
+        off.push(sc.len() as u32);
+        self.sc = sc;
+        self.sc_off = off;
+        let mut lin = Vec::new();
+        let mut lin_off = Vec::with_capacity(self.lane_in.len() + 1);
+        for l in 0..self.lane_in.len() {
+            lin_off.push(lin.len() as u32);
+            lin.extend(self.lane_in[l].iter().map(|&o| {
+                let oc = &self.conns[o as usize - self.nl];
+                LinE { c: o, node: oc.node, from: oc.from, from_end: self.lanes[oc.from as usize].end_id, rank: oc.rank }
+            }));
+        }
+        lin_off.push(lin.len() as u32);
+        self.lin = lin;
+        self.lin_off = lin_off;
+        self.conn_to = self.conns.iter().map(|c| c.to).collect();
+        self.conn_from = self.conns.iter().map(|c| c.from).collect();
+        self.conn_node = self.conns.iter().map(|c| c.node).collect();
+        self.conn_vturn = self.conns.iter().map(|c| c.vturn).collect();
+        self.lane_hot = self.lanes.iter().map(|l| LaneHot { len: l.len, vfree: l.vfree, dirseg: l.dirseg, to_node: l.to_node, contra: l.contra }).collect();
     }
 
     /// Melhor conversão da faixa `l` para o destino: (custo até a zona, conversão). Carros ignoram faixas de ônibus.
@@ -1935,20 +2092,20 @@ impl Sim {
         let sigma = self.params.perception as f32;
         // quem pode seguir por dentro da zona até o ponto sempre prefere isso; senão vai rumo à zona
         let (mut local, mut other) = ((f32::INFINITY, NONE), (f32::INFINITY, NONE));
-        for &c in &lane.conns {
-            let cn = &self.conns[c as usize - self.nl];
-            if cn.bus_only || (cn.moto_only && !drv.contra) || (!drv.bus_ok && self.lanes[cn.to as usize].bus) {
+        let (lo, hi) = (self.sc_off[l] as usize, self.sc_off[l + 1] as usize);
+        for k in &self.sc[lo..hi] {
+            if k.flags & SC_BUS_ONLY != 0 || (k.flags & SC_MOTO_ONLY != 0 && !drv.contra) || (!drv.bus_ok && k.flags & SC_TO_BUS != 0) {
                 continue;
             }
-            let nx = cn.to as usize;
+            let (c, nx) = (k.c, k.to as usize);
             // percepção: a próxima via parece um pouco mais rápida ou lenta para cada motorista (mesmo erro em
             // todas as faixas dela, para não inventar trocas de faixa entre faixas equivalentes)
             // a conversão imediata usa a penalidade fixa: o atraso medido nela inclui a espera do próprio veículo
             // (quem está na frente da fila); o atraso dos cruzamentos seguintes já está na árvore (`zone_d`)
-            let pen = cn.pen + self.contra_pen(cn);
-            let err = if sigma > 0.0 { sigma * noise(drv.seed, self.lanes[nx].dirseg) * (cn.pen + self.lrouter.time[nx]) } else { 0.0 };
-            if self.lane_zone[nx] == t.zone {
-                let d = t.local[self.lane_local[nx] as usize];
+            let pen = k.pen;
+            let err = if sigma > 0.0 { sigma * noise(drv.seed, k.dirseg) * k.err_base } else { 0.0 };
+            if k.zone == t.zone {
+                let d = t.local[k.lane_local as usize];
                 if d.is_finite() {
                     if pen + d + err < local.0 {
                         local = (pen + d + err, c);
@@ -1991,9 +2148,10 @@ impl Sim {
 
     // ---- cruzamentos
 
-    fn conflicts_of(&mut self, net: &Net, c: u32) -> std::rc::Rc<Vec<Conflict>> {
-        if let Some(v) = &self.conflicts[c as usize] {
-            return v.clone();
+    fn conflicts_of(&mut self, net: &Net, c: u32) -> std::ops::Range<usize> {
+        let (a, n) = self.conf_rng[c as usize];
+        if a != u32::MAX {
+            return a as usize..(a + n) as usize;
         }
         let me = &self.conns[c as usize - self.nl];
         let pts_me: Vec<V2> = (0..=12).map(|i| bez8(&me.curve, i as f32 / 12.0)).collect();
@@ -2069,9 +2227,10 @@ impl Sim {
             }
         }
         let _ = net;
-        let rc = std::rc::Rc::new(out);
-        self.conflicts[c as usize] = Some(rc.clone());
-        rc
+        let a = self.conf_flat.len();
+        self.conf_flat.extend_from_slice(&out);
+        self.conf_rng[c as usize] = (a as u32, out.len() as u32);
+        a..a + out.len()
     }
 
     /// Veículo da conversão `cf.other` com a carroceria sobre a área do ponto de conflito que ainda não a terá
@@ -2130,7 +2289,8 @@ impl Sim {
             e >= self.nl || self.short_link(e, i)
         };
         self.occ_skipped = false;
-        let cfs = self.conflicts_of(net, cc);
+        let r = self.conflicts_of(net, cc);
+        let cfs = &self.conf_flat[r];
         let v = self.v[i].max(1.0);
         let mut best: Option<(f32, f32, usize)> = None;
         for cf in cfs.iter() {
@@ -2219,13 +2379,13 @@ impl Sim {
         // onde parar: na linha de uma faixa que comporte o veículo inteiro (senão a traseira fecha o nó anterior)
         let mut last_ok = rest;
         for _ in 0..3 {
-            let cn = &self.conns[c as usize - self.nl];
-            let f = cn.to as usize;
-            let d2 = dist + cn.len + self.lanes[f].len;
-            if self.lanes[f].len >= 30.0 || d2 > d_check || !self.edge_veh[f].is_empty() || !self.edge_veh[c as usize].is_empty() {
+            let f = self.conn_to[c as usize - self.nl] as usize;
+            let flen = self.edge_len[f];
+            let d2 = dist + self.edge_len[c as usize] + flen;
+            if flen >= 30.0 || d2 > d_check || self.occ(f) || self.occ(c as usize) {
                 break;
             }
-            let fits = self.lanes[f].len >= self.vlen[i] + 1.0;
+            let fits = flen >= self.vlen[i] + 1.0;
             let st = self.end_state[self.lanes[f].end_id as usize];
             if st != 0 && !self.short_link(f, i) {
                 // semáforo ao fim de uma faixa curta mais adiante: fechado (vermelho, ou amarelo com espaço para parar) já
@@ -2307,22 +2467,28 @@ impl Sim {
                 return false;
             }
         }
-        let (me_idx, to_lane) = (cc as usize - self.nl, self.conns[cc as usize - self.nl].to);
+        let (me_idx, to_lane) = (cc as usize - self.nl, self.conn_to[cc as usize - self.nl]);
         // fila justa na saída: quem espera há mais tempo, vindo de outra faixa para a mesma faixa de saída, passa antes
         {
-            let node = self.conns[me_idx].node as usize;
+            let node = self.conns[me_idx].node;
             let my_wait = self.wait[id];
-            for &o in &self.node_conns[node] {
-                let oc = &self.conns[o as usize - self.nl];
-                if oc.to != to_lane || oc.from as usize == lane_id {
+            // as conversões que chegam a `to_lane` (mesma ordem de `node_conns[node]`, filtrada por `to`)
+            let (lo, hi) = (self.lin_off[to_lane as usize] as usize, self.lin_off[to_lane as usize + 1] as usize);
+            let my_rank = self.conns[me_idx].rank;
+            for oc in &self.lin[lo..hi] {
+                let o = oc.c;
+                if oc.node != node || oc.from as usize == lane_id {
                     continue;
                 }
-                if self.end_state[self.lanes[oc.from as usize].end_id as usize] == 1 {
+                if self.end_state[oc.from_end as usize] == 1 {
                     continue;
                 }
                 // a ordem de espera só desempata entre iguais: quem tem preferência (o anel da rotatória sobre quem
                 // entra, a via principal sobre a secundária) não cede a vez a quem não tem
-                if !signaled && self.conns[me_idx].rank < oc.rank {
+                if !signaled && my_rank < oc.rank {
+                    continue;
+                }
+                if !self.occ(oc.from as usize) {
                     continue;
                 }
                 if let Some(&j) = self.edge_veh[oc.from as usize].last() {
@@ -2369,7 +2535,8 @@ impl Sim {
             return false;
         }
         let relaxed = self.wait[id] > 10.0;
-        let conflicts = self.conflicts_of(net, cc);
+        let r = self.conflicts_of(net, cc);
+        let conflicts = &self.conf_flat[r];
         // ponto de conflito ocupado por quem está dentro do cruzamento (inclusive parado, "fechando" o cruzamento):
         // ninguém entra, com qualquer sinal ou preferência — exceto quem já está dentro dele, num trecho mais curto que
         // o veículo, parado há muito tempo (impasse, como em `occ_obstacle`)
@@ -2659,10 +2826,10 @@ impl Sim {
                 self.ahead_held[i] = ahead.map_or(false, |a| a.0 <= rest + 0.5);
             }
             // dentro da conversão escolhida
-            let to = self.conns[cc as usize - self.nl].to;
+            let to = self.conn_to[cc as usize - self.nl];
             let clen = self.edge_len[cc as usize];
-            let other = if let Some(&j) = self.edge_veh[cc as usize].first() {
-                let j = j as usize;
+            let other = if self.occ(cc as usize) {
+                let j = self.edge_veh[cc as usize][0] as usize;
                 Some((rest + self.s[j] - self.vlen[j], self.v[j]))
             } else if let Some(&j) = self.edge_veh[to as usize].first() {
                 let j = j as usize;
@@ -2722,16 +2889,22 @@ impl Sim {
     /// Líder projetado numa fusão: quem está numa conversão que converge com a minha (`cc`, cuja linha está a `d0` m da
     /// minha frente; negativo = já estou nela) e chega antes ao ponto de fusão é seguido como se já estivesse à frente,
     /// a (minha distância ao ponto − a dele − o comprimento dele). Antes ele só virava líder ao chegar à faixa de saída.
-    fn merge_ghost(&mut self, net: &Net, i: usize, cc: u32, d0: f32) -> Option<(f32, f32)> {
+    fn merge_ghost(&mut self, _net: &Net, i: usize, cc: u32, d0: f32) -> Option<(f32, f32)> {
+        // as fusões de `conflicts_of(cc)`, na mesma ordem: conversões do mesmo nó para a mesma faixa de saída, vindas
+        // de outra faixa (a lista achatada `lin` evita varrer todos os conflitos e tocar nas `ConnRt`)
+        let ci = cc as usize - self.nl;
+        let (to, node, from) = (self.conn_to[ci] as usize, self.conn_node[ci], self.conn_from[ci]);
+        let d_me = d0 + self.edge_len[cc as usize];
         let mut best: Option<(f32, f32)> = None;
-        for cf in self.conflicts_of(net, cc).iter() {
-            if !cf.merge {
+        for le in &self.lin[self.lin_off[to] as usize..self.lin_off[to + 1] as usize] {
+            let o = le.c;
+            if o == cc || le.node != node || le.from == from || !self.occ(o as usize) {
                 continue;
             }
-            let d_me = d0 + cf.s_me;
-            for &j in &self.edge_veh[cf.other as usize] {
+            let s_other = self.edge_len[o as usize];
+            for &j in &self.edge_veh[o as usize] {
                 let j = j as usize;
-                let dj = cf.s_other - self.s[j];
+                let dj = s_other - self.s[j];
                 if j == i || dj >= d_me {
                     continue;
                 }
@@ -2753,10 +2926,10 @@ impl Sim {
     fn desired_speed(&self, i: usize) -> f32 {
         let e = self.edge[i] as usize;
         if e < self.nl {
-            self.lanes[e].vfree * self.vfac[i]
+            self.lane_hot[e].vfree * self.vfac[i]
         } else {
-            let c = &self.conns[e - self.nl];
-            (self.lanes[c.from as usize].vfree * self.vfac[i]).min(c.vturn)
+            let ci = e - self.nl;
+            (self.lane_hot[self.conn_from[ci] as usize].vfree * self.vfac[i]).min(self.conn_vturn[ci])
         }
     }
 
@@ -2882,7 +3055,7 @@ impl Sim {
                 if e < self.nl {
                     let cc = self.choice[i];
                     if cc != NONE && cc != SINK {
-                        let vt = self.conns[cc as usize - self.nl].vturn;
+                        let vt = self.conn_vturn[cc as usize - self.nl];
                         if v > vt {
                             let rest = (self.edge_len[e] - self.s[i]).max(0.5);
                             let need = (v * v - vt * vt) / (2.0 * rest);
@@ -2932,7 +3105,7 @@ impl Sim {
             self.s[i] += 0.5 * (v + nv) * dt;
             self.v[i] = nv;
             if (self.edge[i] as usize) < self.nl {
-                let l = &self.lanes[self.edge[i] as usize];
+                let l = self.lane_hot[self.edge[i] as usize];
                 if l.contra {
                     self.stats.contra_s += dt as f64;
                 } else {
@@ -3116,8 +3289,8 @@ impl Sim {
             g = h;
         }
         for &(a, b) in &logs_kind {
-            let cfs = self.conflicts_of(net, self.edge[a]);
-            if cfs.iter().any(|c| c.other == self.edge[b] && !c.merge) {
+            let r = self.conflicts_of(net, self.edge[a]);
+            if self.conf_flat[r].iter().any(|c| c.other == self.edge[b] && !c.merge) {
                 new_pairs.0 += 1;
             } else {
                 new_pairs.1 += 1;
@@ -3127,8 +3300,8 @@ impl Sim {
         self.stats.junction_overlaps_geom += new_pairs.1;
         for (a, b) in logs {
             let (ea, eb) = (self.edge[a], self.edge[b]);
-            let cfs = self.conflicts_of(net, ea);
-            let cf = cfs.iter().find(|c| c.other == eb).copied();
+            let r = self.conflicts_of(net, ea);
+            let cf = self.conf_flat[r].iter().find(|c| c.other == eb).copied();
             let (ca, cb) = (&self.conns[ea as usize - self.nl], &self.conns[eb as usize - self.nl]);
             let st = |c: &ConnRt| self.end_state[self.lanes[c.from as usize].end_id as usize];
             let line = format!(
@@ -4300,8 +4473,8 @@ impl Sim {
                 return (format!("{base} -> saída gap {gap:.1}"), j as i64);
             }
         }
-        let cfs = self.conflicts_of(net, e as u32);
-        for cf in cfs.iter() {
+        let r = self.conflicts_of(net, e as u32);
+        for cf in self.conf_flat[r].iter() {
             if cf.merge || self.s[i] > cf.s_me - cf.w {
                 continue;
             }
