@@ -1,0 +1,20 @@
+/* Tour do primeiro acesso (src/ui/Tour.tsx) */
+.tour { position: fixed; inset: 0; z-index: 50; }
+.tour-shield { position: absolute; inset: 0; }
+.tour-dim { position: absolute; inset: 0; background: rgba(4, 8, 7, .62); pointer-events: none; }
+.tour-spot { position: absolute; border-radius: 12px; box-shadow: 0 0 0 2px var(--accent), 0 0 0 9999px rgba(4, 8, 7, .62); pointer-events: none; transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease; }
+.tour-card { position: absolute; width: min(340px, calc(100% - 24px)); padding: 16px 18px 14px; background: #0f1716; border: 1px solid #2f4540; border-radius: 14px; box-shadow: 0 20px 50px rgba(0, 0, 0, .6); transition: left .2s ease, top .2s ease; }
+.tour-card h2 { margin: 2px 0 6px; font-size: 15px; font-weight: 650; }
+.tour-card p { margin: 0; color: var(--dim); font-size: 13px; }
+.tour-card p b { color: var(--text); font-weight: 600; }
+.tour-card .row.end { margin-top: 12px; }
+.tour-count { color: var(--accent); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; }
+.tour-dots { display: flex; gap: 5px; margin-top: 12px; }
+.tour-dots i { width: 6px; height: 6px; border-radius: 50%; background: #2a3a36; }
+.tour-dots i.on { background: var(--accent); width: 16px; border-radius: 3px; }
+.tour .link-btn { margin-right: auto; background: none; border-color: transparent; color: var(--dim); padding-left: 4px; padding-right: 4px; }
+.tour .link-btn:hover:not(:disabled) { background: none; border-color: transparent; color: var(--text); }
+.help-btn { font-weight: 700; }
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot, .tour-card { transition: none; }
+}
