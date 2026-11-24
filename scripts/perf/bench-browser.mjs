@@ -16,6 +16,8 @@ const PROF = Number(process.env.PROF || 0)
 const browser = await chromium.launch({ args: ['--enable-precise-memory-info', '--enable-unsafe-swiftshader'] })
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } })
 page.on('console', (m) => /passo lento|erro|error/i.test(m.text()) && console.log('[console]', m.text().slice(0, 200)))
+// sem o tour do primeiro acesso
+await page.addInitScript(() => localStorage.setItem('tour-done-v1', '1'))
 await page.goto(url)
 await page.waitForTimeout(1500)
 
